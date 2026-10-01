@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>ClickGuide 설정</title>
+  <link rel="stylesheet" href="../common/ui.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main>
+  <header class="page-head">
+    <h1>ClickGuide 설정</h1>
+    <span class="spacer"></span>
+    <span id="saved" class="pill" hidden>저장됨</span>
+    <button id="reset" class="ghost sm">기본값으로</button>
+  </header>
+
+  <section class="card">
+    <h2>기록</h2>
+    <div class="field">
+      <label for="lang">설명 문장 언어</label>
+      <select id="lang"><option value="ko">한국어</option><option value="en">English</option></select>
+    </div>
+    <div class="checks">
+      <label class="check"><input type="checkbox" id="recordClicks"> 클릭 기록</label>
+      <label class="check"><input type="checkbox" id="recordInputs"> 입력값 기록 (입력칸을 벗어날 때)</label>
+      <label class="check"><input type="checkbox" id="recordNavigation"> 페이지 이동 기록</label>
+      <label class="check"><input type="checkbox" id="followNewTabs"> 녹화 중 새로 열린 탭도 따라가기</label>
+    </div>
+    <div class="field">
+      <label for="captureDelayMs">클릭 후 캡처까지 지연 <span class="faint">(ms)</span></label>
+      <input type="number" id="captureDelayMs" min="0" max="2000" step="50">
+      <p class="faint">0이면 클릭 직후 화면을 찍습니다. 클릭 결과 화면을 남기고 싶으면 300~800을 넣어 보세요.</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>이미지</h2>
+    <div class="grid2">
+      <div class="field">
+        <label for="maxImageWidth">저장 가로 최대 (px)</label>
+        <input type="number" id="maxImageWidth" min="640" max="3840" step="80">
+      </div>
+      <div class="field">
+        <label for="jpegQuality">JPEG 품질 <span id="qv" class="faint"></span></label>
+        <input type="range" id="jpegQuality" min="50" max="95" step="1">
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>개인정보 가리기</h2>
+    <div class="checks">
+      <label class="check"><input type="checkbox" id="maskPasswords"> 비밀번호 입력칸을 스크린샷에서 흐리게</label>
+      <label class="check"><input type="checkbox" id="maskSensitiveValues"> 민감해 보이는 입력값(카드·주민번호 등)은 ●●●● 로 기록</label>
+    </div>
+    <div class="field">
+      <label for="maskValueChars">입력값은 앞 몇 글자만 남기기</label>
+      <input type="number" id="maskValueChars" min="0" max="40" step="1">
+      <p class="faint">0이면 입력한 값을 그대로 기록합니다.</p>
+    </div>
+    <div class="field">
+      <label for="redactSelectors">항상 가릴 영역 (CSS 선택자, 한 줄에 하나)</label>
+      <textarea id="redactSelectors" placeholder=".user-email&#10;#account-number&#10;[data-private]"></textarea>
+      <p class="faint">페이지에 <code>data-clickguide-redact</code> 속성이 있는 요소는 항상 가려집니다.</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>녹화 바</h2>
+    <p class="faint">녹화 중 화면에 뜨는 바는 <strong>끌어서 원하는 자리로 옮길 수 있습니다.</strong> 옮긴 위치는 브라우저에 기억되고, 바를 두 번 클릭하면 오른쪽 아래로 돌아갑니다.</p>
+    <div class="row">
+      <button id="reset-bar-pos" class="sm">바 위치 초기화</button>
+      <span id="bar-pos-state" class="faint"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>하이라이트</h2>
+    <div class="checks">
+      <label class="check"><input type="checkbox" id="highlight"> 클릭한 위치에 테두리 표시</label>
+      <label class="check"><input type="checkbox" id="dimOutside"> 하이라이트 바깥을 살짝 어둡게</label>
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label for="highlightColor">테두리 색</label>
+        <input type="color" id="highlightColor">
+      </div>
+      <div class="field">
+        <label for="highlightWidth">테두리 두께 (px)</label>
+        <input type="number" id="highlightWidth" min="1" max="10" step="1">
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>AI 문장 다듬기 <span class="pill">선택</span></h2>
+    <p class="faint warn-box">켜면 단계 제목·설명과 요소 이름이 아래 주소로 전송됩니다. 사내 정보가 담긴 화면이라면 연동 전에 보안 정책을 확인하세요. 스크린샷은 따로 켜지 않는 한 전송하지 않습니다.</p>
+    <div class="field">
+      <label for="aiProvider">제공자</label>
+      <select id="aiProvider">
+        <option value="none">사용 안 함 (규칙 기반만)</option>
+        <option value="openai">OpenAI 호환 (OpenAI · Azure · LiteLLM · Ollama 등)</option>
+        <option value="anthropic">Anthropic Claude</option>
+      </select>
+    </div>
+    <div id="ai-fields" hidden>
+      <div class="field">
+        <label for="aiEndpoint">서버 주소</label>
+        <div class="row-input">
+          <input type="text" id="aiEndpoint" spellcheck="false" placeholder="http://localhost:4000">
+          <button id="preset-litellm" class="sm" type="button" title="LiteLLM 기본 주소 넣기">LiteLLM</button>
+          <button id="preset-ollama" class="sm" type="button" title="Ollama 기본 주소 넣기">Ollama</button>
+        </div>
+        <p id="resolved-endpoint" class="faint"></p>
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <label for="aiModel">모델</label>
+          <div class="row-input">
+            <input type="text" id="aiModel" spellcheck="false" list="model-list" placeholder="claude-sonnet-5">
+            <button id="load-models" class="sm" type="button">목록 불러오기</button>
+          </div>
+          <datalist id="model-list"></datalist>
+          <p id="model-hint" class="faint"></p>
+        </div>
+        <div class="field">
+          <label for="aiKey">API 키 <span class="faint">(LiteLLM 가상 키 / 마스터 키)</span></label>
+          <input type="password" id="aiKey" spellcheck="false" autocomplete="off">
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="aiImages"> 스크린샷도 함께 보내기 (비용·유출 주의)</label>
+      <div class="field">
+        <label for="aiExtra">추가 지시 (톤, 용어, 대상 독자 등)</label>
+        <textarea id="aiExtra" placeholder="예) 존댓말, 신입 직원 대상, '메뉴'라는 표현 대신 '탭'을 사용"></textarea>
+      </div>
+      <button id="ai-test" class="sm">연결 테스트</button>
+      <span id="ai-test-result" class="faint"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>속도 진단</h2>
+    <p class="faint">이 PC와 화면 크기에서 한 번 촬영하는 데 실제로 얼마나 걸리는지 잽니다. 일반 웹페이지 탭을 열어 둔 상태에서 눌러 주세요.</p>
+    <div class="row">
+      <button id="speed-test" class="sm">측정 시작 (약 4초)</button>
+      <span id="speed-state" class="faint"></span>
+    </div>
+    <div id="speed-result" class="speed-box" hidden></div>
+  </section>
+
+  <section class="card">
+    <h2>데이터</h2>
+    <p class="faint">녹화한 가이드와 스크린샷은 이 브라우저 안에만 저장됩니다. 외부로 전송되지 않습니다.</p>
+    <p id="usage" class="faint"></p>
+    <button id="wipe" class="danger sm">모든 가이드 삭제</button>
+  </section>
+</main>
+<script type="module" src="options.js"></script>
+</body>
+</html>

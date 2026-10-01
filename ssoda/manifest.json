@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Ssoda (쏘다) - API Client",
+  "short_name": "Ssoda",
+  "version": "1.2.1",
+  "description": "API를 쏘다! cURL을 붙여넣어 바로 호출(브라우저 또는 PC의 실제 curl)하고, 헤더·쿠키·파라미터를 설정해 테스트한 뒤 컬렉션으로 저장하는 API 클라이언트",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "declarativeNetRequestWithHostAccess",
+    "webRequest",
+    "cookies",
+    "contextMenus",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Ssoda 열기",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+U"
+      },
+      "description": "Ssoda 열기"
+    }
+  }
+}

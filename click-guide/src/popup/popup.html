@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>ClickGuide</title>
+  <link rel="stylesheet" href="../common/ui.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <span class="mark"></span>
+        <strong>ClickGuide</strong>
+      </div>
+      <span id="status" class="pill">대기 중</span>
+    </header>
+
+    <section id="idle">
+      <p class="lead">이 탭에서 하는 클릭·입력을 자동으로 캡처해 단계별 매뉴얼로 만듭니다.</p>
+      <button id="start" class="primary big">녹화 시작</button>
+      <p id="target-tab" class="faint hint"></p>
+      <p id="start-error" class="error-box" hidden></p>
+      <p class="faint hint">시작하면 현재 탭과 여기서 새로 열리는 탭이 기록됩니다. 비밀번호 칸은 자동으로 흐리게 처리됩니다.</p>
+    </section>
+
+    <section id="live" hidden>
+      <div class="counter"><span id="count">0</span><span class="unit">단계 기록됨</span></div>
+      <div class="live-actions">
+        <button id="pause">일시정지</button>
+        <button id="stop" class="primary">완료하고 편집</button>
+      </div>
+      <div class="live-sub">
+        <button id="toggle-bar" class="ghost sm">화면의 바 숨기기</button>
+        <button id="cancel" class="ghost sm">기록 버리고 중단</button>
+      </div>
+    </section>
+
+    <section id="recent">
+      <h2>최근 가이드</h2>
+      <ul id="recent-list"></ul>
+      <p id="recent-empty" class="faint">아직 만든 가이드가 없습니다.</p>
+    </section>
+
+    <footer>
+      <button id="open-editor" class="ghost sm">편집기 열기</button>
+      <span class="spacer"></span>
+      <button id="open-options" class="ghost sm">설정</button>
+    </footer>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

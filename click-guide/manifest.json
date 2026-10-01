@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "ClickGuide — 클릭 자동 캡처 매뉴얼 생성기",
+  "version": "0.1.7",
+  "description": "웹에서 클릭·입력하는 과정을 자동으로 캡처하고 단계별 설명을 붙여 매뉴얼 가이드를 만듭니다.",
+  "default_locale": "ko",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "ClickGuide",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "src/options/options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "run_at": "document_start",
+      "js": ["src/content/recorder.js"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

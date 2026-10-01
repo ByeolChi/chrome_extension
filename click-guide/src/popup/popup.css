@@ -1,0 +1,40 @@
+body { width: 320px; background: var(--bg-sunken); }
+.wrap { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+header { display: flex; align-items: center; gap: 8px; }
+.brand { display: flex; align-items: center; gap: 7px; font-size: 14px; }
+.mark {
+  width: 18px; height: 18px; border-radius: 5px;
+  background: linear-gradient(135deg, var(--accent), #8b5cf6);
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,.35);
+}
+header .pill { margin-left: auto; }
+section { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px; }
+.lead { margin: 0 0 11px; font-size: 13px; color: var(--text-muted); }
+button.big { width: 100%; padding: 11px; font-size: 14px; border-radius: 9px; }
+.hint { margin: 9px 0 0; line-height: 1.5; }
+.counter { display: flex; align-items: baseline; gap: 6px; margin-bottom: 11px; }
+#count { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.unit { color: var(--text-muted); font-size: 13px; }
+.live-actions { display: grid; grid-template-columns: 1fr 1.3fr; gap: 7px; margin-bottom: 8px; }
+.live-actions button { padding: 9px; }
+.live-sub { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.live-sub button { width: 100%; }
+#recent h2 { font-size: 12px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+#recent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+#recent-list li { display: flex; align-items: center; gap: 8px; }
+#recent-list button.open {
+  flex: 1; text-align: left; justify-content: flex-start; border: none; background: none;
+  padding: 6px 8px; border-radius: 7px; font-weight: 500; overflow: hidden;
+}
+#recent-list button.open:hover { background: var(--bg-sunken); }
+#recent-list .name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+#recent-list .meta { display: block; font-size: 11px; color: var(--text-faint); }
+footer { display: flex; align-items: center; padding: 0 2px; }
+
+#target-tab { margin: 9px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.error-box {
+  margin: 9px 0 0; padding: 9px 11px; border-radius: 8px; font-size: 12px; line-height: 1.6;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  color: var(--text);
+}

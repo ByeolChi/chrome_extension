@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>주간보고 설정</title>
+  <link rel="stylesheet" href="ui.css" />
+  <style>
+    body { padding: 0 16px 96px; }
+    main { max-width: 860px; margin: 0 auto; }
+    .top { display: flex; align-items: center; gap: 12px; padding: 24px 0 8px; }
+    .top img { width: 36px; height: 36px; }
+    .top h1 { font-size: 20px; margin: 0; }
+    .top p { margin: 2px 0 0; color: var(--muted); }
+    section {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      padding: 18px 20px; margin-top: 16px;
+    }
+    section h2 { font-size: 15px; margin: 0 0 4px; }
+    section > p.desc { margin: 0 0 14px; color: var(--muted); }
+    .field { display: grid; grid-template-columns: 180px 1fr; gap: 6px 16px; align-items: start; margin-top: 12px; }
+    .field > label.name { padding-top: 6px; font-weight: 600; }
+    .field .help { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .field input[type=text], .field input[type=email], .field input[type=password], .field select, .field textarea { width: 100%; }
+    .field textarea.jql { font-size: 12px; min-height: 52px; }
+    .checks { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
+    .checks label, .radios label { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+    .radios { display: flex; gap: 18px; padding-top: 6px; flex-wrap: wrap; }
+    .inline { display: flex; gap: 8px; }
+    .inline > :first-child { flex: 1; }
+    #template { min-height: 520px; }
+    table.tokens { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.tokens td { padding: 4px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+    table.tokens td:first-child { font-family: var(--mono); white-space: nowrap; color: var(--accent); width: 1%; }
+    details { margin-top: 10px; }
+    details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+    .token-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+    .token-grid h3 { font-size: 12px; margin: 0 0 4px; color: var(--muted); }
+    #preview {
+      white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-height: 1.55;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px;
+      max-height: 560px; overflow: auto;
+    }
+    .bar {
+      position: fixed; left: 0; right: 0; bottom: 0; background: var(--surface);
+      border-top: 1px solid var(--border); padding: 12px 16px;
+    }
+    .bar .in { max-width: 860px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+    #saveState { flex: 1; color: var(--muted); }
+    #saveState.dirty { color: var(--warn); }
+    #saveState.saved { color: var(--ok); }
+    .result { margin-top: 8px; }
+    @media (max-width: 640px) {
+      .field { grid-template-columns: 1fr; }
+      .field > label.name { padding-top: 0; }
+      .token-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <img src="icons/icon48.png" alt="" />
+    <div>
+      <h1>주간보고 설정</h1>
+      <p>Jira 연결, 이슈 범위, 진척률 계산 방식, 보고서 양식을 정합니다.</p>
+    </div>
+  </div>
+
+  <!-- 1. 연결 -->
+  <section>
+    <h2>Jira 연결</h2>
+    <p class="desc">기본은 크롬에 로그인된 Jira 세션을 그대로 사용합니다. 사내 보안 정책으로 안 되면 API 토큰을 쓰세요.</p>
+
+    <div class="field">
+      <label class="name" for="boardUrl">보드 주소로 채우기</label>
+      <div>
+        <input type="text" id="boardUrl" placeholder="https://raoncorp.atlassian.net/jira/software/c/projects/SAN/boards/281" />
+        <div class="help" id="boardUrlHelp">Jira 보드 화면의 주소를 붙여넣으면 아래 Jira 주소 · 스페이스 키 · 보드가 자동으로 채워집니다.</div>
+      </div>
+
+      <label class="name" for="baseUrl">Jira 주소</label>
+      <div><input type="text" id="baseUrl" data-key="baseUrl" placeholder="https://raoncorp.atlassian.net" /></div>
+
+      <label class="name" for="projectKey">스페이스 키</label>
+      <div>
+        <input type="text" id="projectKey" data-key="projectKey" placeholder="SAN" style="max-width:160px" />
+        <div class="help">이슈 키 앞부분 (SAN-986 → SAN). 이 스페이스의 이슈만 가져옵니다.</div>
+      </div>
+
+      <label class="name">인증 방식</label>
+      <div class="radios">
+        <label><input type="radio" name="authMode" value="session" data-key="authMode" /> 브라우저 로그인 사용 (권장)</label>
+        <label><input type="radio" name="authMode" value="token" data-key="authMode" /> API 토큰</label>
+      </div>
+    </div>
+
+    <div class="field" id="tokenFields">
+      <label class="name" for="email">Atlassian 이메일</label>
+      <div><input type="email" id="email" data-key="email" autocomplete="off" /></div>
+      <label class="name" for="apiToken">API 토큰</label>
+      <div>
+        <input type="password" id="apiToken" data-key="apiToken" autocomplete="off" />
+        <div class="help">
+          <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">여기서 발급</a>합니다.
+          토큰은 이 PC의 크롬에만 저장됩니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="field">
+      <span></span>
+      <div>
+        <button id="testConn">연결 테스트</button>
+        <div id="connResult" class="result"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. 이번 주 작업 -->
+  <section>
+    <h2>이번 주 작업 선정</h2>
+    <p class="desc">
+      ① 작업시작일이 이번 주(월~일)면 포함 → ② 아니면 종료일이 이번 주인지 확인 → ③ 아니면 이번 주에 진행률이 바뀌었는지 확인합니다.
+      목록은 작업시작일 순으로 정리됩니다. 양식에서 {{내작업목록_키}}처럼 "내"를 붙이면 내가 담당인 작업만 나옵니다.
+    </p>
+
+    <div class="field">
+      <label class="name">날짜 기준 사용</label>
+      <div class="checks">
+        <label><input type="checkbox" data-key="useDateFilter" /> 작업시작일 → 종료일 기준으로 이번 주 작업을 고름</label>
+      </div>
+
+      <label class="name date-only" for="startField">작업시작일 필드</label>
+      <div class="date-only">
+        <div class="inline">
+          <select id="startField" data-key="startField"><option value="">(선택 안 함)</option></select>
+          <button class="loadFields">필드 불러오기</button>
+        </div>
+      </div>
+
+      <label class="name date-only" for="endField">종료일 필드</label>
+      <div class="date-only">
+        <select id="endField" data-key="endField"><option value="">(선택 안 함)</option></select>
+        <div class="help">작업시작일이 이번 주가 아닐 때 이 날짜로 확인합니다.</div>
+      </div>
+
+      <label class="name date-only">진행률 변경</label>
+      <div class="checks date-only">
+        <label><input type="checkbox" data-key="includeProgressChanged" /> 두 날짜가 이번 주가 아니어도, 이번 주에 진행률이 바뀐 작업은 포함</label>
+      </div>
+
+      <label class="name" for="dueField">업무 지연 기준</label>
+      <div>
+        <select id="dueField" data-key="dueField"><option value="">기한 (duedate)</option></select>
+        <div class="help">이 날짜가 지났는데 완료·100%가 아니면 {{지연목록}}에 들어갑니다.</div>
+      </div>
+
+      <label class="name" for="sortBy">정렬</label>
+      <div>
+        <select id="sortBy" data-key="sortBy">
+          <option value="start">작업시작일 순 (같은 날은 보드 순서)</option>
+          <option value="status">상태 순 (완료 → 진행 중 → 해야 할 일)</option>
+          <option value="rank">보드 순서</option>
+        </select>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. 범위 -->
+  <section>
+    <h2>스프린트 · 이슈 범위</h2>
+    <p class="desc">스프린트 실적은 기준일이 포함된 스프린트(없으면 진행 중인 스프린트)의 전체 이슈로 계산합니다.</p>
+
+    <div class="field">
+      <label class="name" for="boardId">보드</label>
+      <div>
+        <div class="inline">
+          <select id="boardId" data-key="boardId">
+            <option value="">자동 (스페이스의 첫 번째 스크럼 보드)</option>
+          </select>
+          <button id="loadBoards">보드 불러오기</button>
+        </div>
+      </div>
+
+      <label class="name" for="mainJql">작업 검색 범위 JQL</label>
+      <div>
+        <textarea id="mainJql" class="jql" data-key="mainJql" spellcheck="false"></textarea>
+        <div class="help">이번 주 작업을 찾을 범위. 날짜 조건 · 하위 작업 제외 · 내 이슈만 · 정렬은 자동으로 붙습니다.</div>
+      </div>
+
+      <label class="name" for="sprintJql">스프린트 실적 JQL</label>
+      <div>
+        <textarea id="sprintJql" class="jql" data-key="sprintJql" spellcheck="false"></textarea>
+        <div class="help">{{스프린트실적}} · {{지난주실적}} · {{이전스프린트실적}} 계산 범위.</div>
+      </div>
+
+      <label class="name" for="fallbackJql">스프린트 없을 때 JQL</label>
+      <div>
+        <textarea id="fallbackJql" class="jql" data-key="fallbackJql" spellcheck="false"></textarea>
+        <div class="help">작업 검색 범위 JQL에 {{스프린트ID}}를 넣었는데 기준일에 스프린트가 없을 때만 사용합니다.</div>
+      </div>
+
+      <label class="name" for="totalJql">전체 진척률 JQL</label>
+      <div>
+        <textarea id="totalJql" class="jql" data-key="totalJql" spellcheck="false"></textarea>
+        <div class="help">{{전체실적}} 계산 범위. 비워두면 계산하지 않고 "-"로 표시합니다. (예: project = {{프로젝트}} AND sprint is not EMPTY)</div>
+      </div>
+
+      <label class="name" for="bugTypes">버그 이슈 유형</label>
+      <div>
+        <input type="text" id="bugTypes" data-key="bugTypes" />
+        <div class="help">쉼표로 구분. 이 유형은 {{버그목록}}으로, 나머지는 {{작업목록}}으로 갑니다.</div>
+      </div>
+
+      <label class="name">옵션</label>
+      <div class="checks">
+        <label><input type="checkbox" data-key="includeSubtasks" /> 하위 작업(서브태스크) 포함</label>
+        <label><input type="checkbox" data-key="onlyMine" /> 내가 담당한 이슈만</label>
+      </div>
+    </div>
+
+    <details>
+      <summary>JQL에 쓸 수 있는 항목</summary>
+      <table class="tokens" id="jqlTokens"></table>
+    </details>
+  </section>
+
+  <!-- 4. 진척률 -->
+  <section>
+    <h2>진척률</h2>
+    <p class="desc">각 이슈 옆의 "(90% -> 100%)" 표시와 스프린트 실적 % 를 어떻게 계산할지 정합니다.</p>
+
+    <div class="field">
+      <label class="name" for="progressSource">이슈별 진척률 기준</label>
+      <div>
+        <select id="progressSource" data-key="progressSource">
+          <option value="status">상태 기준 (완료 = 100%, 아래 상태별 값 사용)</option>
+          <option value="field">진척률 필드 (Jira 사용자 정의 필드)</option>
+          <option value="timetracking">Jira 시간 추적 (소요 / 예상 시간)</option>
+        </select>
+      </div>
+
+      <label class="name field-only" for="progressField">진척률 필드</label>
+      <div class="field-only">
+        <div class="inline">
+          <select id="progressField" data-key="progressField">
+            <option value="">(선택 안 함)</option>
+          </select>
+          <button class="loadFields">필드 불러오기</button>
+        </div>
+        <div class="help">숫자(0~100) 또는 "80%" 같은 값이 들어 있는 필드를 고르세요.</div>
+      </div>
+
+      <label class="name" for="statusPctMap">상태별 진척률</label>
+      <div>
+        <textarea id="statusPctMap" data-key="statusPctMap" rows="3" spellcheck="false" placeholder="진행 중=50&#10;코드 리뷰=80&#10;QA=90"></textarea>
+        <div class="help">선택 사항. 한 줄에 "상태 이름=퍼센트". 진척률 필드가 비어 있는 이슈에도 적용됩니다.</div>
+      </div>
+
+      <label class="name">완료 처리</label>
+      <div class="checks">
+        <label><input type="checkbox" data-key="doneIs100" /> 완료 상태인 이슈는 항상 100%로 표시</label>
+      </div>
+
+      <label class="name" for="compareBase">비교 기준 시점</label>
+      <div>
+        <select id="compareBase" data-key="compareBase">
+          <option value="weekStart">이번 주 월요일 0시 → 지금</option>
+          <option value="7days">7일 전 → 지금</option>
+        </select>
+        <div class="help">Jira 변경 이력으로 기준 시점의 값을 되돌려 계산하므로, 처음 쓰는 주부터 "(이전 -> 현재)"가 표시됩니다.</div>
+      </div>
+
+      <label class="name" for="sprintCalc">스프린트 · 전체 실적 계산</label>
+      <div>
+        <select id="sprintCalc" data-key="sprintCalc">
+          <option value="avg">이슈별 진척률 평균</option>
+          <option value="count">완료된 이슈 수 비율</option>
+          <option value="points">스토리 포인트 가중 평균</option>
+        </select>
+        <div class="help">직전 스프린트 실적은 그 스프린트가 끝난 시점의 상태로 계산합니다.</div>
+      </div>
+
+      <label class="name points-only" for="pointsField">스토리 포인트 필드</label>
+      <div class="points-only">
+        <div class="inline">
+          <select id="pointsField" data-key="pointsField">
+            <option value="">(선택 안 함)</option>
+          </select>
+          <button class="loadFields">필드 불러오기</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. 양식 -->
+  <section>
+    <h2>보고서 양식</h2>
+    <p class="desc">
+      고정 문구는 그대로 두고, 바뀌는 부분만 {{항목}}으로 적습니다.
+      "   - {{작업목록}}" 처럼 목록 항목이 들어간 줄은 이슈마다 그 줄이 반복됩니다.
+    </p>
+
+    <div class="field">
+      <label class="name" for="itemFormat">목록 한 줄 형식</label>
+      <div>
+        <input type="text" id="itemFormat" data-key="itemFormat" />
+        <div class="help">{{작업목록}}, {{버그목록}} 등에 사용</div>
+      </div>
+      <label class="name" for="itemFormatKey">키 포함 형식</label>
+      <div>
+        <input type="text" id="itemFormatKey" data-key="itemFormatKey" />
+        <div class="help">{{작업목록_키}} 처럼 "_키"가 붙은 항목에 사용</div>
+      </div>
+    </div>
+
+    <div style="margin-top:14px">
+      <textarea id="template" data-key="template" spellcheck="false" aria-label="보고서 양식"></textarea>
+    </div>
+
+    <details>
+      <summary>양식에 쓸 수 있는 항목</summary>
+      <div class="token-grid">
+        <div><h3>양식 {{항목}}</h3><table class="tokens" id="tplTokens"></table></div>
+        <div><h3>목록 한 줄 {항목}</h3><table class="tokens" id="itemTokens"></table></div>
+      </div>
+    </details>
+
+    <div class="row" style="margin-top:14px">
+      <button id="resetTemplate">기본 양식으로 되돌리기</button>
+      <span class="grow"></span>
+      <button id="previewBtn">현재 설정으로 미리보기</button>
+    </div>
+    <div id="previewNotice" class="result"></div>
+    <div id="preview" class="hidden"></div>
+  </section>
+</main>
+
+<div class="bar">
+  <div class="in">
+    <span id="saveState">변경 사항 없음</span>
+    <button class="primary" id="save">저장</button>
+  </div>
+</div>
+
+<script type="module" src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Jira 주간보고 생성기",
+  "version": "1.0.0",
+  "description": "버튼 한 번으로 이번 주 Jira 스프린트 작업·진척률을 정해진 주간보고 양식으로 정리합니다.",
+  "action": {
+    "default_title": "주간보고 만들기",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options.html",
+  "permissions": ["storage", "clipboardWrite"],
+  "host_permissions": ["https://raoncorp.atlassian.net/*"],
+  "optional_host_permissions": ["https://*/*"]
+}

@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "CleanShot Picker",
+  "version": "1.0.0",
+  "description": "웹페이지의 임시 요소를 클릭으로 지우고 현재 화면을 PNG로 캡처합니다.",
+  "permissions": ["activeTab", "scripting", "downloads", "storage", "alarms"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "임시 요소 정리 후 캡처 (Alt+Shift+S)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "toggle-picker": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "선택 모드 켜기 / 끄기"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+body { background: var(--bg-sunken); }
+main { max-width: 720px; margin: 0 auto; padding: 28px 20px 72px; display: flex; flex-direction: column; gap: 16px; }
+.page-head { display: flex; align-items: center; gap: 10px; }
+.page-head h1 { font-size: 20px; }
+.card { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.card h2 { font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > label { font-size: 13px; }
+.field p { margin: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.checks { display: flex; flex-direction: column; gap: 8px; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 450; font-size: 13px; }
+.check input { width: 15px; height: 15px; accent-color: var(--accent); }
+input[type="color"] { padding: 2px; height: 34px; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+code { background: var(--bg-sunken); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.warn-box {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+  color: var(--text); padding: 10px 12px; border-radius: 8px; margin: 0; line-height: 1.6;
+}
+#ai-fields { display: flex; flex-direction: column; gap: 14px; }
+#saved { background: color-mix(in srgb, #1a9e5c 16%, transparent); color: #1a9e5c; }
+@media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+
+.row-input { display: flex; gap: 6px; align-items: center; }
+.row-input input { flex: 1; min-width: 0; }
+.row-input button { flex: none; white-space: nowrap; }
+#resolved-endpoint, #model-hint { word-break: break-all; }
+#resolved-endpoint code { font-size: 11.5px; }
+#ai-test-result { display: block; margin-top: 8px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+
+.speed-box {
+  background: var(--bg-sunken); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; font-size: 13px; line-height: 1.7;
+}
+.speed-box dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0 0 8px; }
+.speed-box dt { color: var(--text-muted); }
+.speed-box dd { margin: 0; font-variant-numeric: tabular-nums; }
+.speed-box .verdict { margin: 0; font-weight: 550; }
+.speed-box .verdict.good { color: #1a9e5c; }
+.speed-box .verdict.warn { color: var(--warn); }
+.speed-box .verdict.bad { color: var(--danger); }

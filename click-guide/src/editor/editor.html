@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ClickGuide 편집기</title>
+  <link rel="stylesheet" href="../common/ui.css">
+  <link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="mark"></span><strong>ClickGuide</strong></div>
+  <select id="session-select" title="가이드 선택"></select>
+  <span class="spacer"></span>
+  <button id="btn-ai" class="sm" title="LLM으로 단계 문장을 다듬습니다">AI로 문장 다듬기</button>
+  <div class="menu">
+    <button id="btn-export" class="primary sm">내보내기 ▾</button>
+    <div id="export-menu" class="dropdown" hidden>
+      <button data-export="html">HTML 파일 (이미지 포함)</button>
+      <button data-export="pdf">PDF로 인쇄</button>
+      <button data-export="md">Markdown + 이미지 ZIP</button>
+      <button data-export="json">JSON (원본 데이터)</button>
+    </div>
+  </div>
+  <button id="btn-options" class="ghost sm" title="설정">설정</button>
+  <button id="btn-delete" class="ghost sm danger" title="이 가이드 삭제">삭제</button>
+</header>
+
+<main>
+  <div id="empty" class="empty card" hidden>
+    <h2>아직 가이드가 없습니다</h2>
+    <p class="muted">확장 아이콘을 눌러 <strong>녹화 시작</strong>을 누르면, 그때부터의 클릭과 입력이 단계로 기록됩니다.</p>
+  </div>
+
+  <section id="doc" hidden>
+    <div class="doc-head card">
+      <input id="guide-title" placeholder="가이드 제목" aria-label="가이드 제목">
+      <textarea id="guide-desc" placeholder="이 가이드는 무엇을 하는 방법인가요? (선택)" aria-label="가이드 설명"></textarea>
+      <p id="stats" class="faint"></p>
+    </div>
+
+    <ol id="steps"></ol>
+
+    <div class="tail">
+      <button id="add-note" class="sm">메모 단계 추가</button>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<template id="step-tpl">
+  <li class="step card" data-id="">
+    <div class="step-head">
+      <span class="num"></span>
+      <input class="s-title" aria-label="단계 제목">
+      <div class="tools">
+        <button class="sm ghost t-up" title="위로">↑</button>
+        <button class="sm ghost t-down" title="아래로">↓</button>
+        <button class="sm ghost t-hl" title="하이라이트 표시 전환">하이라이트</button>
+        <button class="sm ghost t-redact" title="가릴 영역을 드래그해서 지정">가리기</button>
+        <button class="sm ghost t-reset" title="자동 생성 문장으로 되돌리기">문장 복원</button>
+        <button class="sm ghost t-del danger" title="이 단계 삭제">삭제</button>
+      </div>
+    </div>
+    <textarea class="s-desc" rows="2" aria-label="단계 설명"></textarea>
+    <div class="shot" hidden>
+      <img alt="">
+      <div class="overlay"></div>
+      <div class="redact-hint" hidden>가릴 영역을 드래그하세요 · ESC로 종료</div>
+    </div>
+    <p class="s-meta faint"></p>
+  </li>
+</template>
+
+<script type="module" src="editor.js"></script>
+</body>
+</html>
