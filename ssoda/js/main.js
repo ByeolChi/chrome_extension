@@ -404,9 +404,8 @@ function renderEnvSelector() {
   const env = app.activeEnv();
   clear(dom.envBtn);
   const ssh = app.tunnelOf(env);
-  dom.envBtn.append(
-    ssh ? h('span.env-ssh', { title: `SSH 터널: ${ssh.user}@${ssh.host}:${ssh.port}` }, icon('lock', 12), 'SSH') : null,
-    h('span.env-name' + (env ? '' : '.muted'), env ? env.name : 'No Environment'), icon('chevronDown', 14));
+  if (ssh) dom.envBtn.append(h('span.env-ssh', { title: `SSH 터널: ${ssh.user}@${ssh.host}:${ssh.port}` }, icon('lock', 12), 'SSH'));
+  dom.envBtn.append(h('span.env-name' + (env ? '' : '.muted'), env ? env.name : 'No Environment'), icon('chevronDown', 14));
   dom.envBtn.classList.toggle('has-env', !!env);
   dom.envBtn.title = ssh ? `이 환경의 요청은 SSH 서버 ${ssh.user}@${ssh.host}:${ssh.port} 를 거쳐 실행됩니다` : '환경 선택';
 }
