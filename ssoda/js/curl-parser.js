@@ -735,3 +735,11 @@ export function suggestName(method, url) {
     return `${method} ${url}`.slice(0, 60);
   }
 }
+
+// 옵션 표 (curl-runner 의 추가 인자 검사에서 사용)
+export {
+  SHORT_WITH_VALUE as CURL_SHORT_WITH_VALUE,
+  SHORT_ALIASES as CURL_SHORT_ALIASES,
+  LONG_WITH_VALUE as CURL_LONG_WITH_VALUE,
+  PASSTHROUGH as CURL_PASSTHROUGH,
+};

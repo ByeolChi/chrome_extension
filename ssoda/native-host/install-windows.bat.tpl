@@ -71,6 +71,23 @@ __CS_HOST_SCRIPT__
     Write-Host '  [주의] curl.exe 를 찾지 못했습니다. Windows 10(1803 이상)/11 에는 기본 포함되어 있습니다.' -ForegroundColor Yellow
     Write-Host '         다른 위치에 설치했다면 Ssoda 설정에서 curl 경로를 지정하세요.' -ForegroundColor Yellow
   }
+  $ssh = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'
+  if (-not (Test-Path -LiteralPath $ssh)) {
+    $c = Get-Command -Name 'ssh.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $ssh = if ($c) { $c.Path } else { $null }
+  }
+  if ($ssh) {
+    # ssh -V 는 stderr 로 출력하므로 이 부분만 오류로 취급하지 않음
+    $sv = ''
+    try {
+      $ErrorActionPreference = 'Continue'
+      $sv = (& $ssh -V 2>&1 | Select-Object -First 1 | ForEach-Object { "$_" })
+    } catch { } finally { $ErrorActionPreference = 'Stop' }
+    Write-Host ('  ssh       : ' + $sv) -ForegroundColor Gray
+  } else {
+    Write-Host '  [참고] ssh.exe 가 없어 SSH 터널 기능은 사용할 수 없습니다.' -ForegroundColor Yellow
+    Write-Host '         설정 > 시스템 > 선택적 기능 > "OpenSSH 클라이언트" 를 추가하면 사용할 수 있습니다.' -ForegroundColor Yellow
+  }
   Write-Host ''
   Write-Host '  설치가 완료되었습니다. Ssoda 에서 [연결 확인] 을 눌러 주세요.' -ForegroundColor Green
   Write-Host '  (브라우저를 다시 시작할 필요는 없습니다)'

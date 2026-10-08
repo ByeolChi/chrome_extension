@@ -1,8 +1,8 @@
 // 진입점: 레이아웃, 탭 바, 환경 선택, 단축키, 연결
 import { h, clear, methodClass, methodShort, modKey, copyText, isMac } from './util.js';
-import { app } from './app.js';
+import { app, SSH_SECRET_TTL_MS } from './app.js';
 import { icon } from './ui/icons.js';
-import { toast, openMenu, confirmDialog } from './ui/overlay.js';
+import { toast, openMenu, confirmDialog, openModal } from './ui/overlay.js';
 import { setScopeProvider } from './ui/varinput.js';
 import { ensureDatalists } from './ui/kvtable.js';
 import { Sidebar } from './ui/sidebar.js';
@@ -403,18 +403,71 @@ function landing() {
 function renderEnvSelector() {
   const env = app.activeEnv();
   clear(dom.envBtn);
-  dom.envBtn.append(h('span.env-name' + (env ? '' : '.muted'), env ? env.name : 'No Environment'), icon('chevronDown', 14));
+  const ssh = app.tunnelOf(env);
+  dom.envBtn.append(
+    ssh ? h('span.env-ssh', { title: `SSH 터널: ${ssh.user}@${ssh.host}:${ssh.port}` }, icon('lock', 12), 'SSH') : null,
+    h('span.env-name' + (env ? '' : '.muted'), env ? env.name : 'No Environment'), icon('chevronDown', 14));
   dom.envBtn.classList.toggle('has-env', !!env);
+  dom.envBtn.title = ssh ? `이 환경의 요청은 SSH 서버 ${ssh.user}@${ssh.host}:${ssh.port} 를 거쳐 실행됩니다` : '환경 선택';
 }
 
 function envMenu() {
   const items = [{ label: 'No Environment', checked: !app.state.activeEnvId, onClick: () => app.setActiveEnv(null) }];
   if (app.state.environments.length) items.push({ divider: true });
-  app.state.environments.forEach((e) => items.push({ label: e.name, checked: app.state.activeEnvId === e.id, onClick: () => app.setActiveEnv(e.id) }));
+  app.state.environments.forEach((e) => {
+    const ssh = app.tunnelOf(e);
+    items.push({ label: e.name, hint: ssh ? 'SSH ' + ssh.host : '', checked: app.state.activeEnvId === e.id, onClick: () => app.setActiveEnv(e.id) });
+  });
   items.push({ divider: true });
   items.push({ label: '환경 관리', icon: 'settings', onClick: () => { app.state.workspace.sidebar = 'environments'; app.state.workspace.sidebarCollapsed = false; renderLeft(); } });
   items.push({ label: '새 환경 만들기', icon: 'plus', onClick: () => { const e = app.createEnvironment(); app.state.workspace.sidebar = 'environments'; renderLeft(); app.openEnvironment(e.id); } });
   openMenu(dom.envBtn, items, { alignRight: true, minWidth: 220 });
+}
+
+// SSH 비밀번호 입력 (취소하면 null)
+function askSshPassword(env, ssh) {
+  return new Promise((resolve) => {
+    let result = null;
+    const input = h('input.input', { type: 'password', autocomplete: 'new-password', autofocus: true });
+    const submit = () => {
+      if (!input.value) return input.focus();
+      result = input.value;
+      m.close();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) submit();
+    });
+    const m = openModal({
+      title: 'SSH 비밀번호',
+      subtitle: `${env.name} · ${ssh.user}@${ssh.host}:${ssh.port}`,
+      width: 420,
+      body: h('div',
+        h('label.field', h('span.field-label', '비밀번호'), input),
+        h('div.muted', `비밀번호는 저장하지 않습니다. 이 탭의 메모리에만 두고, ${Math.round(SSH_SECRET_TTL_MS / 60000)}분 동안 쓰지 않거나 탭을 닫으면 지웁니다.`)),
+      footer: [h('button.btn', { onclick: () => m.close() }, '취소'), h('button.btn.btn-primary', { onclick: submit }, '연결')],
+      onClose: () => resolve(result),
+    });
+  });
+}
+
+// 처음 접속하는 SSH 서버의 지문 확인 (신뢰하면 true)
+function askTrustHostKey(env, ssh, scan) {
+  return new Promise((resolve) => {
+    let result = false;
+    const ok = h('button.btn.btn-primary', { onclick: () => { result = true; m.close(); } }, '지문이 같습니다 · 저장하고 접속');
+    const m = openModal({
+      title: '처음 접속하는 SSH 서버',
+      subtitle: `${env.name} · ${ssh.user}@${ssh.host}:${ssh.port}`,
+      width: 600,
+      body: h('div.hostkey-dlg',
+        h('div', '이 PC에서 처음 접속하는 서버입니다. 아래 지문이 실제 서버의 지문과 같은지 확인한 뒤에만 접속하세요. 다르면 다른 서버가 중간에서 응답하고 있는 것일 수 있습니다.'),
+        h('ul.hostkey-list', scan.fingerprints.map((f) => h('li', f))),
+        h('div.muted', '서버 관리자에게 지문을 받거나, 서버에서 ', h('code', 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'),
+          ' (RSA 는 ssh_host_rsa_key.pub) 결과와 비교하세요. 확인하면 이후에는 묻지 않으며, 서버 키가 바뀌면 접속을 막습니다.')),
+      footer: [h('button.btn', { onclick: () => m.close() }, '취소'), ok],
+      onClose: () => resolve(result),
+    });
+  });
 }
 
 function renderCodePanel() {
@@ -627,6 +680,8 @@ function wireUi() {
       });
     },
     copyRequestAsCurl: (req) => copyRequestAsCurl(req),
+    askSshPassword,
+    askTrustHostKey,
     applyTheme,
     applySplitAll,
   };
@@ -639,6 +694,7 @@ function wireUi() {
   app.store.on('environments', () => {
     if (app.state.workspace.sidebar === 'environments') sidebar.render();
     renderEnvSelector();
+    app.ui.refreshEngines();
   });
   app.store.on('history', () => {
     if (app.state.workspace.sidebar === 'history') sidebar.render();
