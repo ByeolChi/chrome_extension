@@ -132,6 +132,8 @@ export class ResponseView {
       meta.append(st, tm, sz);
       if (r.redirected) meta.appendChild(h('span.meta-tag', { title: '리다이렉트됨: ' + r.url }, '↪ Redirected'));
       if (r.engine === 'curl') meta.appendChild(h('span.meta-tag.curl-tag', { title: 'PC의 curl 로 실행됨' + (r.terminal && r.terminal.curlPath ? ': ' + r.terminal.curlPath : '') }, 'cURL'));
+      const ssh = r.terminal && r.terminal.ssh;
+      if (ssh) meta.appendChild(h('span.meta-tag.ssh-tag', { title: `SSH 터널 ${ssh.user}@${ssh.host}:${ssh.port} 를 거쳐 실행됨` }, icon('lock', 11), 'SSH ' + (ssh.label || ssh.host)));
       const save = h('button.btn.btn-sm.btn-ghost', { title: '응답 저장' }, icon('download', 14), '저장', icon('chevronDown', 12));
       save.addEventListener('click', () =>
         openMenu(save, [
@@ -193,11 +195,15 @@ export class ResponseView {
 
   errorActions(e) {
     const r = this.result;
-    const helperMissing = ['NO_HOST', 'HOST_FORBIDDEN', 'HOST_EXITED', 'HOST_ERROR', 'NO_NATIVE'].includes(e.code);
+    const helperMissing = ['NO_HOST', 'HOST_FORBIDDEN', 'HOST_EXITED', 'HOST_ERROR', 'NO_NATIVE', 'HOST_OUTDATED'].includes(e.code);
+    const viaSsh = !!(r.terminal && r.terminal.ssh);
     const out = [];
     if (helperMissing) {
       out.push(h('button.btn.btn-primary', { onclick: () => app.ui.openCurlHelper() }, icon('download', 14), '도우미 설치 / 확인'));
-      if (this.onRetry) out.push(h('button.btn', { onclick: () => this.onRetry('browser') }, '이번만 브라우저로 보내기'));
+      if (this.onRetry && !viaSsh) out.push(h('button.btn', { onclick: () => this.onRetry('browser') }, '이번만 브라우저로 보내기'));
+    } else if (/^SSH_/.test(e.code || '')) {
+      if (app.state.activeEnvId) out.push(h('button.btn.btn-primary', { onclick: () => app.openEnvironment(app.state.activeEnvId) }, icon('lock', 14), 'SSH 설정 열기'));
+      out.push(h('button.btn', { onclick: () => { this.sub = 'timeline'; this.render(); } }, 'Terminal 보기'));
     } else {
       out.push(h('button.btn', { onclick: () => { this.sub = 'timeline'; this.render(); } }, r.engine === 'curl' ? 'Terminal 보기' : 'Timeline 보기'));
       if (r.engine === 'curl' && /^CURL_(51|60|35)$/.test(e.code) && this.onToggleInsecure) {
@@ -326,7 +332,19 @@ export class ResponseView {
       if (!text) return;
       pre.appendChild(cls ? h('span.' + cls, text) : document.createTextNode(text));
     };
-    add('$ ' + (t.command || 'curl') + '\n', 'term-cmd');
+    if (t.ssh) {
+      // SSH 터널: 터미널에서 직접 재현할 수 있는 형태로 표시
+      const s = t.ssh;
+      add(`# SSH 터널${s.label ? ' (' + s.label + ')' : ''}: ${s.user}@${s.host}:${s.port}` +
+        (s.failed ? ' - 연결 실패' : ` · 연결 ${formatMs(s.connectMs || 0)}`) + '\n', s.failed ? 'term-err' : 'term-info');
+      add(`$ ssh -N -D 127.0.0.1:${s.socksPort || 1080} -p ${s.port} ${s.user}@${s.host}\n`, 'term-cmd');
+      String(s.log || '').split(/\r?\n/).filter((l) => l.trim()).forEach((l) => add(l + '\n', s.failed ? 'term-err' : 'term-info'));
+      if (s.failed) {
+        if (r.error) add(`\n${r.error.message}\n`, 'term-err');
+      } else {
+        add(`$ curl --socks5-hostname 127.0.0.1:${s.socksPort} ` + String(t.command || 'curl').replace(/^curl\s+/, '') + '\n', 'term-cmd');
+      }
+    } else add('$ ' + (t.command || 'curl') + '\n', 'term-cmd');
     const stderr = String(t.stderr || '');
     stderr.split('\n').forEach((line, i, arr) => {
       if (i === arr.length - 1 && line === '') return;

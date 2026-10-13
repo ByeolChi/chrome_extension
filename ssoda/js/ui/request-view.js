@@ -11,7 +11,7 @@ import { openMenu, promptDialog, toast } from './overlay.js';
 import { getBrowserCookies } from '../http.js';
 import { prepareRequest } from '../prepare.js';
 import { cookiesForUrl } from '../cookiejar.js';
-import { curlOptsOf } from '../curl-runner.js';
+import { curlOptsOf, parseExtraArgs, describeRemovedArgs } from '../curl-runner.js';
 import { highlight } from '../highlight.js';
 import { copyText } from '../util.js';
 import { app } from '../app.js';
@@ -247,6 +247,20 @@ export class RequestView {
   sendMenu() {
     const engine = app.engineOf(this.tab);
     const other = engine === 'curl' ? 'browser' : 'curl';
+    const ssh = app.tunnelOf();
+    if (ssh) {
+      openMenu(this.sendMore, [
+        { header: `SSH 터널: ${ssh.user}@${ssh.host}:${ssh.port}` },
+        { label: '이 환경은 SSH 서버를 거쳐 cURL 로 실행합니다', disabled: true },
+        { label: 'SSH 설정 열기', icon: 'lock', onClick: () => app.openEnvironment(app.state.activeEnvId) },
+        { divider: true },
+        { label: 'cURL 명령 복사 (bash)', icon: 'copy', onClick: () => this.copyCommand('bash') },
+        { label: 'cURL 명령 복사 (Windows cmd)', icon: 'copy', onClick: () => this.copyCommand('cmd') },
+        { divider: true },
+        { label: 'cURL 실행 도우미 설정…', icon: 'settings', onClick: () => app.ui.openCurlHelper() },
+      ], { alignRight: true, minWidth: 250 });
+      return;
+    }
     openMenu(this.sendMore, [
       { header: '실행 방식 (이 요청에 저장)' },
       { label: '브라우저로 보내기', hint: 'fetch', checked: engine === 'browser', onClick: () => this.setEngine('browser') },
@@ -305,10 +319,14 @@ export class RequestView {
     this.sendMore.classList.toggle('loading', loading);
     this.sendBtn.classList.toggle('engine-curl', curl);
     this.sendMore.classList.toggle('engine-curl', curl);
+    const ssh = app.tunnelOf();
     if (loading) this.sendBtn.append('Cancel');
+    else if (ssh) this.sendBtn.append(icon('lock', 14), 'Send', h('span.engine-tag.ssh-tag', 'SSH'));
     else if (curl) this.sendBtn.append(icon('terminal', 15), 'Send', h('span.engine-tag', 'cURL'));
     else this.sendBtn.append('Send', icon('send', 14));
-    this.sendBtn.title = loading ? '요청 취소' : curl ? 'PC의 curl 로 실행 (Ctrl+Enter)' : '브라우저로 전송 (Ctrl+Enter)';
+    this.sendBtn.title = loading ? '요청 취소'
+      : ssh ? `SSH 서버 ${ssh.user}@${ssh.host}:${ssh.port} 를 거쳐 curl 로 실행 (Ctrl+Enter)`
+        : curl ? 'PC의 curl 로 실행 (Ctrl+Enter)' : '브라우저로 전송 (Ctrl+Enter)';
   }
 
   setLoading(on, engine) {
@@ -635,9 +653,12 @@ export class RequestView {
     const o = (d.settings.curl = curlOptsOf(d));
     const engine = app.engineOf(this.tab);
     const g = app.settings;
+    const ssh = app.tunnelOf();
+    const env = app.activeEnv();
 
     // 실행 방식
-    const seg = h('div.seg.engine-seg',
+    const seg = ssh ? h('div.ssh-chip', icon('lock', 13), `SSH 터널 · ${env.name} (${ssh.user}@${ssh.host}:${ssh.port})`,
+      h('button.link-btn', { onclick: () => app.openEnvironment(env.id) }, '설정')) : h('div.seg.engine-seg',
       h('button.seg-btn' + (engine === 'browser' ? '.active' : ''), { onclick: () => this.setEngine('browser') }, icon('globe', 13), '브라우저'),
       h('button.seg-btn' + (engine === 'curl' ? '.active' : ''), { onclick: () => this.setEngine('curl') }, icon('terminal', 13), 'cURL (PC의 curl 실행)'));
     this.helperChip = h('span.helper-chip.checking', '도우미 확인 중…');
@@ -668,6 +689,7 @@ export class RequestView {
     extra.addEventListener('input', () => {
       o.extra = extra.value;
       this.changed();
+      this.renderCurlNotes();
     });
 
     // 명령어 형식
@@ -694,7 +716,9 @@ export class RequestView {
       h('div.curl-sec',
         h('div.curl-sec-title', '실행 방식'),
         h('div.curl-row', seg, this.helperChip),
-        h('div.curl-help', engine === 'curl'
+        h('div.curl-help', ssh
+          ? `Send 를 누르면 도우미가 SSH 서버(${ssh.host})에 접속해 터널을 열고, PC의 curl 이 그 터널(SOCKS5)로 요청을 보냅니다. URL 의 주소는 SSH 서버 기준으로 해석됩니다. 환경을 바꾸면 SSH 없이 실행할 수 있습니다.`
+          : engine === 'curl'
           ? 'Send 를 누르면 PC에 설치된 curl 이 이 요청을 실행합니다. 브라우저 제약(Body 있는 GET, -k, 프록시, Host 헤더 등) 없이 터미널과 똑같이 동작합니다.'
           : 'Send 를 누르면 브라우저가 요청을 보냅니다. 오른쪽 아래 [cURL로 실행] 으로 이번 요청만 curl 로 실행할 수도 있습니다.')),
       h('div.curl-sec',
@@ -728,6 +752,7 @@ export class RequestView {
     const notes = [];
     if (app.engineOf(this.tab) === 'browser' && o.insecure) notes.push('-k 는 cURL 로 실행할 때만 적용됩니다. 브라우저 전송에서는 인증서 검증을 끌 수 없습니다.');
     if (o.silent || o.include) notes.push('-s / -i 는 명령어에 반영됩니다. 실행 결과는 아래 응답 패널(Body · Headers · Terminal)에 나뉘어 표시됩니다.');
+    notes.push(...describeRemovedArgs(parseExtraArgs(o.extra, { ssh: !!app.tunnelOf() }).removed));
     notes.forEach((n) => this.curlNotes.appendChild(h('div.curl-note', icon('info', 13), n)));
   }
 

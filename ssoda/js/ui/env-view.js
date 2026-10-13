@@ -2,8 +2,9 @@
 import { h, clear, debounce } from '../util.js';
 import { KVTable } from './kvtable.js';
 import { icon } from './icons.js';
-import { openMenu, confirmDialog } from './overlay.js';
-import { app } from '../app.js';
+import { openMenu, confirmDialog, toast } from './overlay.js';
+import { app, SSH_SECRET_TTL_MS } from '../app.js';
+import { normalizeSsh } from '../model.js';
 
 export class EnvironmentView {
   constructor(tab) {
@@ -92,6 +93,144 @@ export class EnvironmentView {
           : '이 환경이 활성화되면 {{변수명}} 으로 URL·헤더·Body·인증에서 사용할 수 있습니다.'),
       h('div.ev-table', table.el)
     );
+    if (!this.isGlobals) this.el.insertBefore(this.sshSection(env), this.el.lastChild);
+  }
+
+  /* ---------------- SSH 터널 ---------------- */
+  sshSection(env) {
+    env.ssh = normalizeSsh(env.ssh);
+    const s = env.ssh;
+    const changed = () => {
+      app.store.changed('environments');
+      app.ui.refreshEngines && app.ui.refreshEngines();
+    };
+    const sec = h('div.ssh-sec' + (s.enabled ? '.on' : ''));
+    const sw = h('input.switch', { type: 'checkbox', checked: s.enabled, 'aria-label': 'SSH 터널 사용' });
+    sw.addEventListener('change', () => {
+      s.enabled = sw.checked;
+      changed();
+      this.build();
+    });
+    sec.appendChild(h('label.ssh-head', sw,
+      h('span.ssh-title', icon('lock', 14), 'SSH 터널'),
+      h('span.muted', s.enabled ? '이 환경의 요청은 SSH 서버를 거쳐 cURL 로 실행됩니다' : '켜면 이 환경의 요청이 SSH 서버를 거쳐 실행됩니다')));
+    if (!s.enabled) return sec;
+
+    const field = (label, input, cls = '') => h('label.field.ssh-field' + cls, h('span.field-label', label), input);
+    const text = (key, placeholder, attrs = {}) => {
+      const el = h('input.input', { value: String(s[key] ?? ''), placeholder, spellcheck: 'false', autocomplete: 'off', ...attrs });
+      el.addEventListener('input', () => {
+        s[key] = key === 'port' ? parseInt(el.value, 10) || 22 : el.value.trim();
+        changed();
+      });
+      return el;
+    };
+    // 비밀번호는 저장하지 않는다. 입력하면 이 탭의 메모리에만 두고, 오래 쓰지 않으면 지운다.
+    const pw = h('input.input', {
+      type: 'password',
+      value: (app.sshSecret(env) || {}).password || '',
+      placeholder: '저장되지 않음 · 보낼 때 물어봄',
+      autocomplete: 'new-password',
+    });
+    const memo = h('div.ssh-memo');
+    const renderMemo = () => {
+      clear(memo);
+      const hit = app.sshSecret(env);
+      const mins = Math.round(SSH_SECRET_TTL_MS / 60000);
+      if (hit) {
+        memo.append(icon('lock', 12), `비밀번호는 디스크에 저장하지 않고 이 탭의 메모리에만 기억 중입니다 (${mins}분 동안 쓰지 않거나 탭을 닫으면 지워짐). `,
+          h('button.link-btn', { type: 'button', onclick: () => { app.forgetSshSecret(env.id); pw.value = ''; renderMemo(); } }, '지금 지우기'));
+      } else {
+        memo.append(icon('lock', 12), `비밀번호는 저장하지 않습니다. 처음 보낼 때 묻고, 이 탭의 메모리에만 ${mins}분까지 기억합니다.`);
+      }
+    };
+    pw.addEventListener('input', () => {
+      if (pw.value) app.rememberSshSecret(env, pw.value);
+      else app.forgetSshSecret(env.id);
+      renderMemo();
+    });
+    const eye = h('button.icon-btn', { title: '비밀번호 보기', type: 'button' }, icon('eye', 15));
+    eye.addEventListener('click', (e) => {
+      e.preventDefault();
+      pw.type = pw.type === 'password' ? 'text' : 'password';
+    });
+    renderMemo();
+
+    const legacy = h('input.cb', { type: 'checkbox', checked: !!s.legacy });
+    legacy.addEventListener('change', () => {
+      s.legacy = legacy.checked;
+      changed();
+    });
+    const status = h('div.ssh-status');
+    const setStatus = (cls, ...children) => {
+      status.className = 'ssh-status ' + cls;
+      clear(status);
+      status.append(...children.filter((c) => c != null));
+    };
+    // 도우미가 없거나 오래된 경우에는 바로 설치할 수 있게 버튼을 같이 보여 준다
+    const HELPER_CODES = ['NO_HOST', 'HOST_FORBIDDEN', 'HOST_EXITED', 'HOST_ERROR', 'NO_NATIVE', 'HOST_OUTDATED', 'TIMEOUT'];
+    const failed = (e) => {
+      const helper = HELPER_CODES.includes(e.code);
+      const legacyBtn = e.code === 'SSH_LEGACY' && !s.legacy
+        ? h('button.btn.btn-sm', { type: 'button', onclick: () => { s.legacy = true; changed(); legacy.checked = true; testBtn.click(); } }, '구형 서버 호환 켜고 다시 테스트')
+        : null;
+      setStatus('bad', icon('alert', 13), e.message,
+        e.hint ? h('div.muted', e.hint) : null,
+        helper ? h('div', h('button.btn.btn-sm.btn-primary', { type: 'button', onclick: () => app.ui.openCurlHelper() }, icon('download', 13), '도우미 설치 / 확인')) : null,
+        legacyBtn ? h('div', legacyBtn) : null);
+    };
+    const testBtn = h('button.btn.btn-sm', { type: 'button' }, icon('bolt', 13), '연결 테스트');
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      setStatus('checking', '연결 중…');
+      try {
+        const r = await app.testSshFor(env);
+        pw.value = (app.sshSecret(env) || {}).password || '';
+        renderMemo();
+        if (!r) setStatus('', '');
+        else if (r.ok) {
+          setStatus('ok', icon('check', 13), `연결 성공 (${(r.connectMs / 1000).toFixed(1)}초)`,
+            r.fingerprint ? h('div.ssh-fp', '서버 지문: ' + r.fingerprint.split(/\r?\n/)[0]) : null);
+        } else failed(r);
+      } catch (e) {
+        failed(e);
+      } finally {
+        testBtn.disabled = false;
+      }
+    });
+    const forgetBtn = h('button.btn.btn-sm.btn-ghost', { type: 'button', title: '서버를 재설치해 호스트 키가 바뀐 경우에 사용' }, icon('refresh', 13), '호스트 키 초기화');
+    forgetBtn.addEventListener('click', async () => {
+      if (!s.host) return toast('서버 주소를 먼저 입력하세요.', 'error');
+      const ok = await confirmDialog({
+        title: '호스트 키 초기화',
+        message: `${s.host}:${s.port} 의 저장된 호스트 키를 지웁니다. 다음 접속 때 서버 지문을 다시 확인합니다. 서버 키가 바뀐 이유를 알고 있을 때만 진행하세요.`,
+        okText: '초기화',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const n = await app.forgetSshHostFor(env);
+        toast(n ? '저장된 호스트 키를 지웠습니다.' : '저장된 호스트 키가 없습니다.', 'success');
+      } catch (e) {
+        toast(e.message, 'error', 4000);
+      }
+    });
+
+    sec.append(
+      h('div.ssh-grid',
+        field('SSH 서버 주소', text('host', '예) 10.10.1.20')),
+        field('포트', text('port', '22', { inputmode: 'numeric' }), '.ssh-port'),
+        field('사용자', text('user', '예) deploy')),
+        field('비밀번호', h('div.ssh-pw', pw, eye))),
+      memo,
+      h('label.check.ssh-legacy', legacy, h('span', '구형 서버 호환 (ssh-rsa)'),
+        h('span.muted', '오래된 서버가 "no matching host key type found" 로 접속을 거부할 때만 켜세요. SHA-1 기반이라 보안이 약합니다.')),
+      h('div.ssh-actions', testBtn, forgetBtn),
+      status,
+      h('div.ssh-help', icon('info', 13),
+        h('span', 'URL·헤더·Body 는 SSH 서버에서 보내는 것처럼 동작합니다. 아래 변수에 SSH 서버 기준 주소를 넣어 두고 ',
+          h('code', '{{baseUrl}}/api/...'), ' 처럼 쓰세요. 예) ', h('code', 'baseUrl = http://10.0.0.5:8080'), ' · 서버 자신은 ', h('code', 'http://localhost:8080'))));
+    return sec;
   }
 
   refresh() {

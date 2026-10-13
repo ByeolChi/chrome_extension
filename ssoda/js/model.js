@@ -112,7 +112,25 @@ export function newRequestItem(name = '새 요청', request) {
 }
 
 export function newEnvironment(name = '새 환경') {
-  return { id: uid('env'), name, variables: [] };
+  return { id: uid('env'), name, variables: [], ssh: newSsh() };
+}
+
+// 환경별 SSH 터널 설정. enabled 이면 이 환경에서 보내는 요청은 SSH 서버를 거쳐 curl 로 실행된다.
+// 비밀번호는 저장하지 않는다 (app.sshSecrets 에 메모리로만 잠시 보관).
+export function newSsh() {
+  return { enabled: false, host: '', port: 22, user: '', legacy: false };
+}
+
+export function normalizeSsh(ssh) {
+  const src = ssh && typeof ssh === 'object' ? ssh : {};
+  return {
+    enabled: !!src.enabled,
+    host: String(src.host || '').trim(),
+    port: Math.min(65535, Math.max(1, parseInt(src.port, 10) || 22)),
+    user: String(src.user || '').trim(),
+    // 구형 서버 호환: SHA-1 기반 ssh-rsa 호스트 키 허용 (사용자가 켠 환경에서만)
+    legacy: !!src.legacy,
+  };
 }
 
 /* ---------------- 트리 헬퍼 ---------------- */

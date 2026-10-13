@@ -255,7 +255,7 @@ export function openSettings() {
     row('최대 히스토리 개수', null, num('historyLimit', '300')),
     h('div.set-sec', '데이터'),
     h('div.set-data',
-      h('button.btn', { onclick: () => download(`ssoda-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(app.backupData(), null, 2)) }, icon('download', 14), '전체 백업 내보내기'),
+      h('button.btn', { title: 'SSH 비밀번호는 저장하지 않으므로 백업에도 들어가지 않습니다', onclick: () => download(`ssoda-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(app.backupData(), null, 2)) }, icon('download', 14), '전체 백업 내보내기'),
       h('button.btn', { onclick: () => restoreIn.click() }, icon('upload', 14), '백업에서 복원'),
       h('button.btn.btn-danger-ghost', {
         onclick: async () => {

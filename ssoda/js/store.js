@@ -124,6 +124,15 @@ class Store {
     const d = DEFAULTS();
     for (const k of KEYS) if (data[k] !== undefined) d[k] = data[k];
     d.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+    // curl 실행 파일 경로는 백업에서 가져오지 않는다 (조작된 백업으로 다른 프로그램을 실행시키지 못하게)
+    d.settings.curlPath = this.state.settings.curlPath || '';
+    // 예전 버전 백업의 SSH 비밀번호는 버린다
+    for (const e of d.environments || []) {
+      if (e && e.ssh) {
+        delete e.ssh.password;
+        delete e.ssh.savePassword;
+      }
+    }
     this.state = d;
     KEYS.forEach((k) => this.pending.add(k));
     await this.flush();

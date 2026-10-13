@@ -2,7 +2,8 @@
   "manifest_version": 3,
   "name": "Ssoda (쏘다) - API Client",
   "short_name": "Ssoda",
-  "version": "1.2.1",
+  "version": "1.3.3",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhWNcTn/SIp1+EQ04BYbDs3ohozRM2I+WSIcQLv+gUAH1n9WheoixRqSD6H85SUQWXWNukMOFxlUFfqP2pXhRqT68D/TSh2fl74iqg0wWaq02Fz+I5sCYS4dBIz1SkhF8mslJtWk8THDmu3dgg6RFmZ+i5yfNlOj8YHDKLu1y7cewkKo930sMMsvkjwE35bYN/+UDqciP+hSvPU6FAoS2uOHJzXtABwzZwFh5mj4MLFHOylpH89oVTMu4ttcXHfWi+EdqBVh0WFvmzQx0Twm+xemZJ9YCzxeZKmEBBC9FedPoHGtwkd9gbw7PyCD5OHmsbU0C0FQePirYazwjGcQkHwIDAQAB",
   "description": "API를 쏘다! cURL을 붙여넣어 바로 호출(브라우저 또는 PC의 실제 curl)하고, 헤더·쿠키·파라미터를 설정해 테스트한 뒤 컬렉션으로 저장하는 API 클라이언트",
   "minimum_chrome_version": "116",
   "permissions": [

@@ -92,7 +92,9 @@ export function genCurl(p, opts = {}) {
     rest.push('--data-binary ' + q('@' + fileName(b.file)));
   }
   if (p.settings?.timeout) rest.push('--max-time ' + Math.max(1, Math.ceil(p.settings.timeout / 1000)));
-  if (c.extra && String(c.extra).trim()) rest.push(String(c.extra).trim());
+  if (Array.isArray(c.extraArgs)) {
+    if (c.extraArgs.length) rest.push(c.extraArgs.map((a) => (/^[A-Za-z0-9_\-.,:\/@%+=]+$/.test(a) ? a : q(a))).join(' '));
+  } else if (c.extra && String(c.extra).trim()) rest.push(String(c.extra).trim());
   const first = 'curl ' + head.join(' ');
   if (!multiline) return [first, ...rest].join(' ');
   const cont = shell === 'cmd' ? ' ^' : ' \\';

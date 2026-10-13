@@ -3,12 +3,18 @@ import { store } from './store.js';
 import { uid, clone, download } from './util.js';
 import {
   newRequest, newRequestItem, newCollection, newFolder, newEnvironment, findInCollections, reassignIds,
-  isDescendant, requestSignature, normalizeRequest,
+  isDescendant, requestSignature, normalizeRequest, normalizeSsh,
 } from './model.js';
 import { buildScope } from './variables.js';
 import { prepareRequest } from './prepare.js';
 import { sendRequest, getBrowserCookies, initHttpEngine } from './http.js';
-import { runCurl, curlOptsOf, pingHelper } from './curl-runner.js';
+import {
+  runCurl, curlOptsOf, pingHelper, testSsh, forgetSshHost, scanSshHost, trustSshHost, parseExtraArgs, versionAtLeast, SSH_HOST_VERSION,
+  SSH_LEGACY_HOST_VERSION, CurlRunError,
+} from './curl-runner.js';
+
+// SSH 비밀번호는 저장하지 않고 이 탭의 메모리에만 둔다. 마지막으로 쓴 뒤 이 시간이 지나면 지운다.
+export const SSH_SECRET_TTL_MS = 30 * 60 * 1000;
 import { genCurl } from './codegen.js';
 import { parseSetCookie, storeCookie, cookiesForUrl, purgeExpired } from './cookiejar.js';
 import { detectImport, exportPostmanCollection, exportPostmanEnvironment } from './postman.js';
@@ -19,6 +25,7 @@ export const app = {
   views: new Map(), // tabId → view
   responses: new Map(), // tabId → response
   controllers: new Map(), // tabId → AbortController
+  sshSecrets: new Map(), // envId → { password, server, lastUsed } (메모리에만 보관, 저장하지 않음)
   ui: {}, // 렌더러 훅 (main.js에서 주입)
 
   get state() {
@@ -34,6 +41,11 @@ export const app = {
   /* ---------------- 스코프/변수 ---------------- */
   activeEnv() {
     return store.state.environments.find((e) => e.id === store.state.activeEnvId) || null;
+  },
+
+  // 활성 환경의 SSH 터널 설정 (사용 중일 때만)
+  tunnelOf(env = this.activeEnv()) {
+    return env && env.ssh && env.ssh.enabled ? normalizeSsh(env.ssh) : null;
   },
 
   collectionOfTab(tab) {
@@ -252,17 +264,20 @@ export const app = {
 
   /* ---------------- 전송 ---------------- */
   engineOf(tab) {
+    // SSH 터널은 PC의 curl 로만 사용할 수 있음
+    if (this.tunnelOf()) return 'curl';
     const e = tab && tab.draft && tab.draft.settings.engine;
     return e === 'curl' || e === 'browser' ? e : this.settings.defaultEngine === 'curl' ? 'curl' : 'browser';
   },
 
   // 표시용 cURL 명령 (cURL 탭 / Terminal)
   curlCommandFor(tab, prepared, { shell, multiline } = {}) {
+    const curl = curlOptsOf(tab.draft);
     return genCurl(prepared, {
       shell: shell || this.settings.curlShell || 'bash',
       multiline: multiline ?? this.settings.curlMultiline !== false,
       short: true,
-      curl: curlOptsOf(tab.draft),
+      curl: { ...curl, extraArgs: parseExtraArgs(curl.extra, { ssh: !!this.tunnelOf() }).args },
     });
   },
 
@@ -299,6 +314,15 @@ export const app = {
       this.ui.toast('URL을 입력하세요.', 'error');
       return;
     }
+    const env = this.activeEnv();
+    let ssh = null;
+    if (this.tunnelOf(env)) {
+      if (engine === 'browser') this.ui.toast(`"${env.name}" 환경은 SSH 터널을 사용하므로 cURL로 실행합니다.`, 'info', 3500);
+      engine = 'curl';
+      ssh = await this.sshConfigFor(env);
+      if (!ssh) return;
+      if (this.controllers.has(tab.id)) return;
+    }
     const view = this.views.get(tab.id);
     const ctrl = new AbortController();
     this.controllers.set(tab.id, ctrl);
@@ -313,7 +337,11 @@ export const app = {
       }
       if (engine === 'curl') {
         command = this.curlCommandFor(tab, prepared, { shell: 'bash', multiline: true });
-        result = await runCurl(prepared, curlOptsOf(tab.draft), { signal: ctrl.signal, curlPath: this.settings.curlPath || '', command });
+        const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal: ctrl.signal, curlPath: this.settings.curlPath || '', command, ssh });
+        if (ssh) {
+          await this.ensureSshHelper(ssh);
+          result = await this.withHostKeyTrust(env, ssh, run);
+        } else result = await run();
       } else {
         result = await sendRequest(prepared, { signal: ctrl.signal, removeOrigin: this.settings.removeOrigin });
       }
@@ -325,12 +353,14 @@ export const app = {
         error: { message: err.message || String(err), code: err.code || 'ERROR', hint: err.hint || '' },
         timing: { total: err.elapsed },
         hops: err.capture ? err.capture.hops : [],
-        terminal: err.terminal || (engine === 'curl' ? { command, stderr: '', exitCode: null } : null),
+        terminal: err.terminal || (engine === 'curl' ? { command, stderr: '', exitCode: null, ssh: ssh ? { label: ssh.label, host: ssh.host, port: ssh.port, user: ssh.user, failed: true, log: '' } : undefined } : null),
         warnings: err.warnings || (prepared ? prepared.warnings : []),
         sentUrl: prepared ? prepared.url : tab.draft.url,
         method: prepared ? prepared.method : tab.draft.method,
         ts: Date.now(),
       };
+      // 비밀번호가 틀렸다면 다음 전송 때 다시 묻는다
+      if (err.code === 'SSH_AUTH' && env) this.forgetSshSecret(env.id);
     } finally {
       this.controllers.delete(tab.id);
     }
@@ -342,6 +372,112 @@ export const app = {
       v.showResponse(result);
     }
     return result;
+  },
+
+  /* ---------------- SSH ---------------- */
+  // 메모리에 있는 비밀번호 (서버 정보가 바뀌었거나 오래 쓰지 않았으면 버림)
+  sshSecret(env) {
+    const hit = this.sshSecrets.get(env.id);
+    if (!hit) return null;
+    const s = normalizeSsh(env.ssh);
+    if (hit.server !== `${s.user}@${s.host}:${s.port}` || Date.now() - hit.lastUsed > SSH_SECRET_TTL_MS) {
+      this.sshSecrets.delete(env.id);
+      return null;
+    }
+    return hit;
+  },
+
+  rememberSshSecret(env, password) {
+    const s = normalizeSsh(env.ssh);
+    this.sshSecrets.set(env.id, { password, server: `${s.user}@${s.host}:${s.port}`, lastUsed: Date.now() });
+  },
+
+  forgetSshSecret(envId) {
+    this.sshSecrets.delete(envId);
+  },
+
+  purgeSshSecrets() {
+    for (const env of store.state.environments) this.sshSecret(env);
+    for (const id of [...this.sshSecrets.keys()]) if (!store.state.environments.some((e) => e.id === id)) this.sshSecrets.delete(id);
+  },
+
+  // SSH 접속 정보 (비밀번호가 없으면 물어봄). 취소하면 null
+  async sshConfigFor(env) {
+    const s = normalizeSsh(env.ssh);
+    if (!s.host || !s.user) {
+      this.ui.toast(`"${env.name}" 환경의 SSH 서버 주소와 사용자를 입력하세요.`, 'error', 4000);
+      this.openEnvironment(env.id);
+      return null;
+    }
+    let hit = this.sshSecret(env);
+    if (!hit) {
+      const password = await this.ui.askSshPassword(env, s);
+      if (password == null) return null;
+      this.rememberSshSecret(env, password);
+      hit = this.sshSecrets.get(env.id);
+    }
+    hit.lastUsed = Date.now();
+    return { host: s.host, port: s.port, user: s.user, password: hit.password, legacy: s.legacy, label: env.name };
+  },
+
+  // 처음 접속하는 서버면 지문을 보여 주고, 사용자가 확인하면 저장한 뒤 다시 시도
+  async withHostKeyTrust(env, ssh, fn) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e.code !== 'SSH_HOSTKEY_UNKNOWN') throw e;
+      if (!(await this.confirmHostKey(env, ssh))) {
+        e.message = '서버 지문을 확인하지 않아 접속하지 않았습니다.';
+        throw e;
+      }
+      return fn();
+    }
+  },
+
+  async confirmHostKey(env, ssh) {
+    const scan = await scanSshHost(ssh);
+    if (!scan.keys) {
+      throw new CurlRunError('서버의 호스트 키를 가져오지 못했습니다.', {
+        code: 'SSH_ERROR',
+        hint: scan.error || 'SSH 서버 주소와 포트를 확인하세요.',
+      });
+    }
+    if (!(await this.ui.askTrustHostKey(env, ssh, scan))) return false;
+    await trustSshHost(ssh, scan.keys);
+    return true;
+  },
+
+  // SSH 터널을 지원하는 도우미인지 확인 (구버전 도우미는 터널 없이 바로 요청을 보내 버리므로 실행 전에 막는다)
+  async ensureSshHelper(ssh) {
+    const need = ssh && ssh.legacy ? SSH_LEGACY_HOST_VERSION : SSH_HOST_VERSION;
+    let st = await this.ui.helperStatus();
+    if (!st.ok || !versionAtLeast(st.hostVersion, need)) st = await this.ui.helperStatus({ force: true });
+    if (!st.ok) throw new CurlRunError(st.message || 'cURL 실행 도우미에 연결할 수 없습니다.', { code: st.code || 'NO_HOST', hint: st.hint || 'SSH 터널은 cURL 실행 도우미가 있어야 사용할 수 있습니다.' });
+    if (!versionAtLeast(st.hostVersion, need)) {
+      throw new CurlRunError(`설치된 cURL 실행 도우미(v${st.hostVersion || '?'})가 ${ssh && ssh.legacy ? '구형 서버 호환을' : 'SSH 터널을'} 지원하지 않습니다.`, {
+        code: 'HOST_OUTDATED',
+        hint: `도우미 v${need} 이상이 필요합니다. 아래 [도우미 설치 / 확인] 버튼으로 설치 파일을 다시 받아 실행해 주세요.`,
+      });
+    }
+  },
+
+  async testSshFor(env) {
+    const ssh = await this.sshConfigFor(env);
+    if (!ssh) return null;
+    await this.ensureSshHelper(ssh);
+    let r = await testSsh(ssh);
+    if (!r.ok && r.code === 'SSH_HOSTKEY_UNKNOWN') {
+      if (!(await this.confirmHostKey(env, ssh))) return { ok: false, code: 'SSH_HOSTKEY_UNKNOWN', message: '서버 지문을 확인하지 않아 접속하지 않았습니다.', hint: '' };
+      r = await testSsh(ssh);
+    }
+    if (!r.ok && r.code === 'SSH_AUTH') this.forgetSshSecret(env.id);
+    return r;
+  },
+
+  async forgetSshHostFor(env) {
+    const s = normalizeSsh(env.ssh);
+    await this.ensureSshHelper();
+    return forgetSshHost({ host: s.host, port: s.port, user: s.user || 'x', password: '' });
   },
 
   cancel(tab) {
@@ -566,9 +702,11 @@ export const app = {
     store.changed('activeEnvId');
     this.ui.renderEnvSelector && this.ui.renderEnvSelector();
     this.ui.refreshVars && this.ui.refreshVars();
+    this.ui.refreshEngines && this.ui.refreshEngines();
   },
 
   deleteEnvironment(id) {
+    this.forgetSshSecret(id);
     store.state.environments = store.state.environments.filter((e) => e.id !== id);
     if (store.state.activeEnvId === id) store.state.activeEnvId = null;
     for (const t of [...this.tabs]) if (t.type === 'environment' && t.refId === id) this.closeTab(t.id, { force: true });
@@ -642,6 +780,19 @@ export const app = {
   async init() {
     await store.load();
     await initHttpEngine();
+    // 예전에 저장된 SSH 비밀번호(평문) 삭제
+    let dirty = false;
+    for (const e of store.state.environments) {
+      if (e.ssh && ('password' in e.ssh || 'savePassword' in e.ssh)) {
+        e.ssh = normalizeSsh(e.ssh);
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      store.save('environments');
+      await store.flush();
+    }
+    setInterval(() => this.purgeSshSecrets(), 60 * 1000);
     // 저장된 탭 정규화
     for (const t of this.tabs) {
       if (t.type === 'request') t.draft = normalizeRequest(t.draft);
@@ -656,7 +807,7 @@ export const app = {
       exportedAt: new Date().toISOString(),
       data: {
         collections: s.collections,
-        environments: s.environments,
+        environments: s.environments.map((e) => (e.ssh ? { ...e, ssh: normalizeSsh(e.ssh) } : e)),
         globals: s.globals,
         activeEnvId: s.activeEnvId,
         history: s.history,
