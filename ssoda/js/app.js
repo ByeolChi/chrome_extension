@@ -263,16 +263,28 @@ export const app = {
   },
 
   /* ---------------- 전송 ---------------- */
+  // SSL 인증서 검증 무시: 요청별 -k 또는 활성 환경의 설정. 브라우저 fetch 로는 끌 수 없어 PC의 curl 로만 적용된다.
+  insecureOf(tab) {
+    const env = this.activeEnv();
+    return !!(env && env.insecure) || !!(tab && tab.draft && curlOptsOf(tab.draft).insecure);
+  },
+
+  // 환경 설정까지 반영한 실제 실행용 cURL 옵션
+  curlOptsFor(tab) {
+    return { ...curlOptsOf(tab.draft), insecure: this.insecureOf(tab) };
+  },
+
   engineOf(tab) {
-    // SSH 터널은 PC의 curl 로만 사용할 수 있음
+    // SSH 터널, SSL 무시(-k)는 PC의 curl 로만 사용할 수 있음
     if (this.tunnelOf()) return 'curl';
+    if (tab && this.insecureOf(tab)) return 'curl';
     const e = tab && tab.draft && tab.draft.settings.engine;
     return e === 'curl' || e === 'browser' ? e : this.settings.defaultEngine === 'curl' ? 'curl' : 'browser';
   },
 
   // 표시용 cURL 명령 (cURL 탭 / Terminal)
   curlCommandFor(tab, prepared, { shell, multiline } = {}) {
-    const curl = curlOptsOf(tab.draft);
+    const curl = this.curlOptsFor(tab);
     return genCurl(prepared, {
       shell: shell || this.settings.curlShell || 'bash',
       multiline: multiline ?? this.settings.curlMultiline !== false,
@@ -308,6 +320,7 @@ export const app = {
 
   async send(tab = this.activeTab(), { engine } = {}) {
     if (!tab || tab.type !== 'request') return;
+    const explicit = !!engine;
     engine = engine || this.engineOf(tab);
     if (this.controllers.has(tab.id)) return this.cancel(tab);
     if (!String(tab.draft.url).trim()) {
@@ -322,6 +335,8 @@ export const app = {
       ssh = await this.sshConfigFor(env);
       if (!ssh) return;
       if (this.controllers.has(tab.id)) return;
+    } else if (!explicit && engine === 'browser' && this.insecureOf(tab)) {
+      engine = 'curl';
     }
     const view = this.views.get(tab.id);
     const ctrl = new AbortController();
@@ -337,7 +352,7 @@ export const app = {
       }
       if (engine === 'curl') {
         command = this.curlCommandFor(tab, prepared, { shell: 'bash', multiline: true });
-        const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal: ctrl.signal, curlPath: this.settings.curlPath || '', command, ssh });
+        const run = () => runCurl(prepared, this.curlOptsFor(tab), { signal: ctrl.signal, curlPath: this.settings.curlPath || '', command, ssh });
         if (ssh) {
           await this.ensureSshHelper(ssh);
           result = await this.withHostKeyTrust(env, ssh, run);

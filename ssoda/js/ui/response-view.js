@@ -206,8 +206,9 @@ export class ResponseView {
       out.push(h('button.btn', { onclick: () => { this.sub = 'timeline'; this.render(); } }, 'Terminal 보기'));
     } else {
       out.push(h('button.btn', { onclick: () => { this.sub = 'timeline'; this.render(); } }, r.engine === 'curl' ? 'Terminal 보기' : 'Timeline 보기'));
-      if (r.engine === 'curl' && /^CURL_(51|60|35)$/.test(e.code) && this.onToggleInsecure) {
-        out.push(h('button.btn', { onclick: () => this.onToggleInsecure() }, '-k (SSL 무시) 켜고 다시 실행'));
+      const certErr = r.engine === 'curl' ? /^CURL_(51|60|35)$/.test(e.code) : /^net::ERR_(CERT_|SSL_)/.test(e.code || '');
+      if (certErr && this.onToggleInsecure) {
+        out.push(h('button.btn', { onclick: () => this.onToggleInsecure() }, '-k (SSL 무시) 켜고 cURL 로 다시 실행'));
       }
     }
     return out;

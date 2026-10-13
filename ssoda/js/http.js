@@ -172,7 +172,7 @@ const ERROR_HINTS = {
   'net::ERR_CONNECTION_RESET': '연결이 재설정되었습니다.',
   'net::ERR_CONNECTION_CLOSED': '서버가 연결을 닫았습니다.',
   'net::ERR_EMPTY_RESPONSE': '서버가 빈 응답을 보냈습니다.',
-  'net::ERR_CERT_AUTHORITY_INVALID': 'SSL 인증서를 신뢰할 수 없습니다. 브라우저에서 해당 주소를 한 번 열어 인증서 예외를 허용한 뒤 다시 시도하세요.',
+  'net::ERR_CERT_AUTHORITY_INVALID': 'SSL 인증서를 신뢰할 수 없습니다. 아래 [-k (SSL 무시) 켜고 cURL 로 다시 실행] 을 누르거나, 브라우저에서 해당 주소를 한 번 열어 인증서 예외를 허용한 뒤 다시 시도하세요.',
   'net::ERR_CERT_COMMON_NAME_INVALID': 'SSL 인증서의 도메인이 일치하지 않습니다.',
   'net::ERR_CERT_DATE_INVALID': 'SSL 인증서가 만료되었거나 아직 유효하지 않습니다.',
   'net::ERR_SSL_PROTOCOL_ERROR': 'SSL 프로토콜 오류입니다. http/https 스킴을 확인하세요.',

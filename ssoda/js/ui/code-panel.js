@@ -1,7 +1,6 @@
 // 오른쪽 코드 스니펫 패널
 import { h, clear, debounce, copyText } from '../util.js';
 import { CODEGEN_LANGS, generateCode } from '../codegen.js';
-import { curlOptsOf } from '../curl-runner.js';
 import { codeView } from './code-editor.js';
 import { icon } from './icons.js';
 import { toast } from './overlay.js';
@@ -41,7 +40,7 @@ export class CodePanel {
     } else {
       try {
         const p = await app.buildPrepared(tab, { engine: langId.startsWith('curl') ? 'curl' : 'browser' });
-        this.code = generateCode(langId, p, { curl: curlOptsOf(tab.draft) });
+        this.code = generateCode(langId, p, { curl: app.curlOptsFor(tab) });
         const lang = (CODEGEN_LANGS.find((l) => l.id === langId) || {}).lang || 'text';
         content.appendChild(codeView(this.code, lang, { wrap: false, lineNumbers: true }));
         if (p.unresolved.length) note = h('div.cp-note.warn', icon('alert', 13), `정의되지 않은 변수: ${p.unresolved.join(', ')}`);

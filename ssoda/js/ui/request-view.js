@@ -253,6 +253,7 @@ export class RequestView {
         { header: `SSH 터널: ${ssh.user}@${ssh.host}:${ssh.port}` },
         { label: '이 환경은 SSH 서버를 거쳐 cURL 로 실행합니다', disabled: true },
         { label: 'SSH 설정 열기', icon: 'lock', onClick: () => app.openEnvironment(app.state.activeEnvId) },
+        this.insecureMenuItem(),
         { divider: true },
         { label: 'cURL 명령 복사 (bash)', icon: 'copy', onClick: () => this.copyCommand('bash') },
         { label: 'cURL 명령 복사 (Windows cmd)', icon: 'copy', onClick: () => this.copyCommand('cmd') },
@@ -272,6 +273,8 @@ export class RequestView {
         onClick: () => app.send(this.tab, { engine: other }),
       },
       { divider: true },
+      this.insecureMenuItem(),
+      { divider: true },
       { label: 'cURL 명령 복사 (bash)', icon: 'copy', onClick: () => this.copyCommand('bash') },
       { label: 'cURL 명령 복사 (Windows cmd)', icon: 'copy', onClick: () => this.copyCommand('cmd') },
       { divider: true },
@@ -279,7 +282,38 @@ export class RequestView {
     ], { alignRight: true, minWidth: 250 });
   }
 
+  insecureMenuItem() {
+    const env = app.activeEnv();
+    if (env && env.insecure) {
+      return { label: `SSL 인증서 검증 무시 (환경 "${env.name}" 설정)`, icon: 'alert', checked: true, disabled: true };
+    }
+    return {
+      label: 'SSL 인증서 검증 무시 (-k)',
+      hint: 'cURL 로 실행',
+      checked: !!curlOptsOf(this.draft).insecure,
+      onClick: () => this.toggleInsecure(),
+    };
+  }
+
+  // 이 요청의 SSL 인증서 검증 무시(-k) 켜기/끄기
+  toggleInsecure() {
+    const o = (this.draft.settings.curl = curlOptsOf(this.draft));
+    o.insecure = !o.insecure;
+    this.changed();
+    this.renderSendBtn(app.controllers.has(this.tab.id));
+    if (this.sub === 'curl') this.renderPane();
+    else this.updateCurlPreview();
+    if (o.insecure) {
+      toast('SSL 인증서 검증을 무시합니다. 이 요청은 PC의 curl 로 실행됩니다.', 'info', 3500);
+      app.ui.ensureCurlHelper && app.ui.ensureCurlHelper();
+    }
+  }
+
   setEngine(engine) {
+    if (engine === 'browser' && app.insecureOf(this.tab)) {
+      toast('SSL 무시(-k)가 켜져 있어 cURL 로 실행됩니다. -k 를 끄면 브라우저로 보낼 수 있습니다.', 'info', 3500);
+      return;
+    }
     this.draft.settings.engine = engine;
     this.changed();
     this.renderSendBtn(app.controllers.has(this.tab.id));
@@ -326,7 +360,8 @@ export class RequestView {
     else this.sendBtn.append('Send', icon('send', 14));
     this.sendBtn.title = loading ? '요청 취소'
       : ssh ? `SSH 서버 ${ssh.user}@${ssh.host}:${ssh.port} 를 거쳐 curl 로 실행 (Ctrl+Enter)`
-        : curl ? 'PC의 curl 로 실행 (Ctrl+Enter)' : '브라우저로 전송 (Ctrl+Enter)';
+        : app.insecureOf(this.tab) ? 'SSL 인증서 검증을 무시하고 PC의 curl 로 실행 (-k, Ctrl+Enter)'
+          : curl ? 'PC의 curl 로 실행 (Ctrl+Enter)' : '브라우저로 전송 (Ctrl+Enter)';
   }
 
   setLoading(on, engine) {
@@ -665,11 +700,19 @@ export class RequestView {
     this.updateHelperChip();
 
     // 옵션 체크박스 (스크린샷의 "추가 옵션"과 동일)
+    const envInsecure = !!(env && env.insecure);
     const opt = (key, label, title) => {
-      const cb = h('input.cb', { type: 'checkbox', checked: !!o[key] });
+      const forced = key === 'insecure' && envInsecure;
+      const cb = h('input.cb', { type: 'checkbox', checked: forced || !!o[key], disabled: forced });
+      if (forced) title = `환경 "${env.name}" 에서 SSL 인증서 검증 무시가 켜져 있습니다`;
       cb.addEventListener('change', () => {
         o[key] = cb.checked;
         this.changed();
+        if (key === 'insecure') {
+          this.renderSendBtn(app.controllers.has(this.tab.id));
+          this.renderPane();
+          return;
+        }
         this.renderCurlNotes();
       });
       return h('label.check.curl-opt', { title }, cb, h('span', label));
@@ -725,7 +768,7 @@ export class RequestView {
         h('div.curl-sec-title', '추가 옵션'),
         h('div.curl-opts',
           opt('verbose', '-v (Verbose)', '요청/응답 과정을 상세히 출력 (Terminal 탭)'),
-          opt('insecure', '-k (SSL 무시)', '인증서 검증 생략 - cURL 실행 시에만 적용'),
+          opt('insecure', '-k (SSL 무시)', '인증서 검증 생략 - 켜면 Send 도 PC의 curl 로 실행됩니다'),
           opt('silent', '-s (Silent)', '진행 표시줄 숨김 (명령어에 반영)'),
           opt('include', '-i (Response 헤더 포함)', '출력에 응답 헤더 포함 (Terminal 탭)'),
           opt('compressed', '--compressed', '압축 응답 요청 및 자동 해제'),
@@ -750,7 +793,7 @@ export class RequestView {
     clear(this.curlNotes);
     const o = curlOptsOf(this.draft);
     const notes = [];
-    if (app.engineOf(this.tab) === 'browser' && o.insecure) notes.push('-k 는 cURL 로 실행할 때만 적용됩니다. 브라우저 전송에서는 인증서 검증을 끌 수 없습니다.');
+    if (app.insecureOf(this.tab) && !app.tunnelOf()) notes.push('-k (SSL 무시)가 켜져 있어 Send 도 PC의 curl 로 실행됩니다. 브라우저 전송에서는 인증서 검증을 끌 수 없습니다.');
     if (o.silent || o.include) notes.push('-s / -i 는 명령어에 반영됩니다. 실행 결과는 아래 응답 패널(Body · Headers · Terminal)에 나뉘어 표시됩니다.');
     notes.push(...describeRemovedArgs(parseExtraArgs(o.extra, { ssh: !!app.tunnelOf() }).removed));
     notes.forEach((n) => this.curlNotes.appendChild(h('div.curl-note', icon('info', 13), n)));

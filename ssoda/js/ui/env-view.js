@@ -93,7 +93,27 @@ export class EnvironmentView {
           : '이 환경이 활성화되면 {{변수명}} 으로 URL·헤더·Body·인증에서 사용할 수 있습니다.'),
       h('div.ev-table', table.el)
     );
-    if (!this.isGlobals) this.el.insertBefore(this.sshSection(env), this.el.lastChild);
+    if (!this.isGlobals) {
+      this.el.insertBefore(this.insecureSection(env), this.el.lastChild);
+      this.el.insertBefore(this.sshSection(env), this.el.lastChild);
+    }
+  }
+
+  /* ---------------- SSL 인증서 검증 무시 ---------------- */
+  insecureSection(env) {
+    const sw = h('input.switch', { type: 'checkbox', checked: !!env.insecure, 'aria-label': 'SSL 인증서 검증 무시' });
+    sw.addEventListener('change', () => {
+      env.insecure = sw.checked;
+      app.store.changed('environments');
+      app.ui.refreshEngines && app.ui.refreshEngines();
+      if (sw.checked) app.ui.ensureCurlHelper && app.ui.ensureCurlHelper();
+    });
+    return h('div.ssh-sec' + (env.insecure ? '.on' : ''),
+      h('label.ssh-head', sw,
+        h('span.ssh-title', icon('alert', 14), 'SSL 인증서 검증 무시 (-k)'),
+        h('span.muted', env.insecure
+          ? '이 환경의 모든 요청이 인증서 검증 없이 PC의 curl 로 실행됩니다'
+          : '켜면 자체 서명·만료 인증서 서버도 호출할 수 있습니다 (cURL 로 실행됨). 테스트 서버에만 사용하세요.')));
   }
 
   /* ---------------- SSH 터널 ---------------- */

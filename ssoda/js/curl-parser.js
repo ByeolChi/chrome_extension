@@ -486,7 +486,7 @@ export function parseCurl(text) {
         break;
       case 'insecure':
         curlOpts.insecure = !o.negated;
-        warnings.push('-k (SSL 무시): cURL 로 실행할 때만 적용됩니다. 브라우저 전송에서는 인증서 검증을 끌 수 없습니다.');
+        warnings.push('-k (SSL 무시): 켜져 있는 동안 이 요청은 PC의 curl 로 실행됩니다. 브라우저 전송에서는 인증서 검증을 끌 수 없습니다.');
         break;
       case 'verbose':
         curlOpts.verbose = !o.negated;
