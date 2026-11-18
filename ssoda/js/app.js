@@ -302,6 +302,7 @@ export const app = {
       jarCookies,
       browserCookies,
       allowBodyForGet: forCurl,
+      forCurl,
       defaults: { followRedirects: this.settings.followRedirects, timeout: this.settings.timeout },
     });
   },

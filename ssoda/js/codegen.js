@@ -73,6 +73,8 @@ export function genCurl(p, opts = {}) {
   if (p.method === 'HEAD') head.push(short ? '-I' : '--head');
   else if (p.method !== (hasBody ? 'POST' : 'GET')) head.push((short ? '-X ' : '--request ') + p.method);
   head.push(q(p.url));
+  // --ntlm 등 인증 옵션을 쓸 때의 사용자 정보 (prepare.js 참고)
+  if (p.curlUser) rest.push((short ? '-u ' : '--user ') + q(`${p.curlUser.username}:${p.curlUser.password}`));
   for (const h of p.headers) {
     if (b.mode === 'formdata' && h.key.toLowerCase() === 'content-type' && /multipart/i.test(h.value)) continue;
     rest.push((short ? '-H ' : '--header ') + q(h.value === '' ? `${h.key};` : `${h.key}: ${h.value}`));

@@ -11,7 +11,7 @@ import { openMenu, promptDialog, toast } from './overlay.js';
 import { getBrowserCookies } from '../http.js';
 import { prepareRequest } from '../prepare.js';
 import { cookiesForUrl } from '../cookiejar.js';
-import { curlOptsOf, parseExtraArgs, describeRemovedArgs } from '../curl-runner.js';
+import { curlOptsOf, parseExtraArgs, describeRemovedArgs, userAuthOpt } from '../curl-runner.js';
 import { highlight } from '../highlight.js';
 import { copyText } from '../util.js';
 import { app } from '../app.js';
@@ -452,9 +452,12 @@ export class RequestView {
     } catch (e) {
       /* ignore */
     }
-    const p = prepareRequest(tab.draft, { scope: app.getScope(tab), inheritedAuth: inh ? inh.auth : null, jarCookies: jar, defaults: app.settings });
+    const p = prepareRequest(tab.draft, {
+      scope: app.getScope(tab), inheritedAuth: inh ? inh.auth : null, jarCookies: jar, defaults: app.settings, forCurl: app.engineOf(tab) === 'curl',
+    });
     const userKeys = new Set(d_keys(tab.draft.headers));
     const auto = p.headers.filter((x) => !userKeys.has(x.key.toLowerCase()) || x.key.toLowerCase() === 'cookie').map((x) => ({ ...x, note: autoNote(x.key) }));
+    if (p.curlUser) auto.unshift({ key: 'Authorization', value: `(curl 이 ${p.curlUser.via} 방식으로 만듦)`, note: 'Authorization 탭 → --user' });
     if (tab.draft.settings.useBrowserCookies) auto.push({ key: 'Cookie', value: '(+ 브라우저 쿠키)', note: 'Chrome 쿠키' });
     const lower = new Set(p.headers.map((x) => x.key.toLowerCase()));
     if (!lower.has('user-agent')) auto.push({ key: 'User-Agent', value: navigator.userAgent, note: '브라우저 기본값' });
@@ -752,6 +755,11 @@ export class RequestView {
     const notes = [];
     if (app.engineOf(this.tab) === 'browser' && o.insecure) notes.push('-k 는 cURL 로 실행할 때만 적용됩니다. 브라우저 전송에서는 인증서 검증을 끌 수 없습니다.');
     if (o.silent || o.include) notes.push('-s / -i 는 명령어에 반영됩니다. 실행 결과는 아래 응답 패널(Body · Headers · Terminal)에 나뉘어 표시됩니다.');
+    const ua = userAuthOpt(o.extra);
+    if (ua) {
+      const browserNote = app.engineOf(this.tab) === 'browser' && ua !== '--anyauth' ? ' 브라우저로 보내면 인증 정보를 보내지 않습니다.' : '';
+      notes.push(`${ua}: Authorization 탭의 Basic 사용자 이름·비밀번호를 헤더 대신 --user 로 curl 에 넘깁니다.${browserNote}`);
+    }
     notes.push(...describeRemovedArgs(parseExtraArgs(o.extra, { ssh: !!app.tunnelOf() }).removed));
     notes.forEach((n) => this.curlNotes.appendChild(h('div.curl-note', icon('info', 13), n)));
   }

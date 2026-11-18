@@ -15,6 +15,7 @@ import { generateCode } from './codegen.js';
 import { prepareRequest } from './prepare.js';
 import { findInCollections } from './model.js';
 import { parseCurl } from './curl-parser.js';
+import { curlOptsOf, parseExtraArgs } from './curl-runner.js';
 
 const MOD = isMac() ? '⌘' : 'Ctrl';
 let sidebar;
@@ -517,8 +518,10 @@ async function copyAsCurl(tab) {
 }
 async function copyRequestAsCurl(request, itemId = null) {
   const inh = app.getInheritedAuth(itemId);
-  const p = prepareRequest(request, { scope: app.getScope(itemId ? { type: 'request', itemId } : null), inheritedAuth: inh ? inh.auth : null, defaults: app.settings });
-  const ok = await copyText(generateCode('curl', p));
+  const p = prepareRequest(request, { scope: app.getScope(itemId ? { type: 'request', itemId } : null), inheritedAuth: inh ? inh.auth : null, defaults: app.settings, forCurl: true });
+  // 탭의 cURL 복사와 같게 cURL 탭 옵션(-k, --ntlm 같은 추가 인자 등)을 반영
+  const curl = curlOptsOf(request);
+  const ok = await copyText(generateCode('curl', p, { curl: { ...curl, extraArgs: parseExtraArgs(curl.extra).args } }));
   toast(ok ? 'cURL 명령을 복사했습니다.' : '복사 실패', ok ? 'success' : 'error');
 }
 function copyItemAsCurl(itemId) {

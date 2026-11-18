@@ -1,5 +1,6 @@
 // 에디터 상태(draft) → 실제 전송용 요청(prepared) 변환 (순수 함수)
 import { resolveRequest, resolveString, unresolvedVariables } from './variables.js';
+import { userAuthOpt } from './curl-runner.js';
 
 export const RAW_CONTENT_TYPES = {
   json: 'application/json',
@@ -27,7 +28,9 @@ export function hasScheme(url) {
  *   jarCookies: [{name, value}],
  *   browserCookies: [{name, value}],
  *   defaults: { followRedirects, timeout },
+ *   forCurl: PC의 curl 로 실행·표시할 요청이면 true,
  * }
+ * 반환의 curlUser: { username, password, via } — cURL 추가 인자의 --ntlm 등과 함께 --user 로 넘길 사용자 정보
  */
 export function prepareRequest(draft, ctx = {}) {
   const scope = ctx.scope || new Map();
@@ -56,9 +59,21 @@ export function prepareRequest(draft, ctx = {}) {
   if (auth?.type === 'inherit') {
     auth = ctx.inheritedAuth ? resolveAuth(ctx.inheritedAuth, scope) : null;
   }
+  // cURL 추가 인자에 --ntlm·--digest·--negotiate·--anyauth·--aws-sigv4 가 있으면 curl 이 -u 사용자 정보로 직접 인증한다.
+  // 이때 Basic 헤더를 넣으면 curl 이 그 헤더를 그대로 보내 인증이 실패하고, 비밀번호가 Basic(평문)으로 나간다.
+  // 그래서 curl 실행에서는 헤더 대신 curlUser(--user)로 넘기고, 브라우저 전송에서는 보내지 않는다.
+  // --anyauth 는 Basic 도 고를 수 있는 방식이라 브라우저 전송에서는 예전처럼 Basic 헤더로 보낸다.
+  const userAuth = auth?.type === 'basic' ? userAuthOpt(draft.settings?.curl?.extra) : null;
+  const hasCreds = !!(auth?.basic?.username || auth?.basic?.password);
+  let curlUser = null;
   if (auth && auth.type === 'bearer' && auth.bearer?.token) {
     if (!has('authorization')) headers.push({ key: 'Authorization', value: 'Bearer ' + auth.bearer.token });
-  } else if (auth && auth.type === 'basic' && (auth.basic?.username || auth.basic?.password)) {
+  } else if (userAuth && ctx.forCurl) {
+    if (!has('authorization')) curlUser = { username: auth.basic?.username || '', password: auth.basic?.password || '', via: userAuth };
+  } else if (userAuth && userAuth !== '--anyauth') {
+    if (hasCreds && !has('authorization'))
+      warnings.push(`${userAuth} 인증은 cURL 로 실행할 때만 적용됩니다. 브라우저로 보낼 때는 Authorization 탭의 사용자 이름·비밀번호를 보내지 않습니다.`);
+  } else if (auth && auth.type === 'basic' && hasCreds) {
     if (!has('authorization'))
       headers.push({ key: 'Authorization', value: 'Basic ' + base64Utf8(`${auth.basic.username || ''}:${auth.basic.password || ''}`) });
   } else if (auth && auth.type === 'apikey' && auth.apikey?.key) {
@@ -135,7 +150,7 @@ export function prepareRequest(draft, ctx = {}) {
     timeout: draft.settings?.timeout ?? defaults.timeout ?? 0,
   };
 
-  return { method, url, headers, body, settings, warnings, unresolved: [...unresolved] };
+  return { method, url, headers, body, settings, warnings, unresolved: [...unresolved], curlUser };
 }
 
 function resolveAuth(auth, scope) {
