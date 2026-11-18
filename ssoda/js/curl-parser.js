@@ -649,6 +649,8 @@ const PASSTHROUGH = new Set([
   'retry-max-time', 'retry-all-errors', 'limit-rate', 'max-redirs', 'path-as-is', 'anyauth', 'fail', 'fail-with-body', 'globoff',
   'keepalive-time', 'no-keepalive', 'local-port', 'tcp-nodelay', 'raw', 'ssl-no-revoke', 'request-target', 'unix-socket', 'abstract-unix-socket',
   'location-trusted', 'post301', 'post302', 'post303', 'aws-sigv4', 'doh-url', 'dns-servers',
+  // 인증 방식 (-u 사용자 정보는 헤더가 아니라 --user 로 넘긴다: prepare.js 참고)
+  'digest', 'ntlm', 'negotiate',
 ]);
 
 function shellQuote(v) {

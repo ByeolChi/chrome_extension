@@ -114,6 +114,16 @@ export function parseExtraArgs(extra, { ssh = false } = {}) {
   return { args, removed };
 }
 
+// -u 사용자 정보로 curl 이 직접 인증 헤더를 만드는 옵션.
+// 이 옵션과 함께 Basic 헤더를 -H 로 넣으면 curl 은 직접 넣은 헤더를 우선해 그대로 보내므로 인증이 실패한다.
+const USER_AUTH_OPTS = ['--ntlm', '--digest', '--negotiate', '--anyauth', '--aws-sigv4'];
+
+/** 추가 인자 중 실제로 전달되는 인증 옵션(--ntlm 등)을 찾는다. 없으면 null */
+export function userAuthOpt(extra) {
+  const { args } = parseExtraArgs(extra);
+  return USER_AUTH_OPTS.find((o) => args.includes(o)) || null;
+}
+
 export function describeRemovedArgs(removed) {
   const out = [];
   const unsafe = removed.filter((r) => r.reason === 'unsafe').map((r) => r.arg);
@@ -175,6 +185,8 @@ export function buildCurlExec(p, opts = DEFAULT_CURL_OPTS, { ssh = false } = {})
     if (b.mode === 'formdata' && h.key.toLowerCase() === 'content-type' && /multipart\/form-data/i.test(h.value) && !/boundary=/i.test(h.value)) continue;
     argv.push('-H', h.value === '' ? `${h.key};` : `${h.key}: ${h.value}`);
   }
+  // --ntlm 등 인증 옵션을 쓸 때의 사용자 정보 (prepare.js 참고)
+  if (p.curlUser) argv.push('--user', `${p.curlUser.username}:${p.curlUser.password}`);
 
   if (b.mode === 'raw') {
     argv.push('--data-binary', '@' + addFile(utf8B64(b.text)));
@@ -580,6 +592,16 @@ const SSH_CURL_HINTS = {
   97: 'SSH 터널(SOCKS)을 통한 연결에 실패했습니다. URL 의 주소가 SSH 서버에서 접근 가능한지, 서버에서 포트 포워딩이 허용되는지 확인하세요.',
 };
 
+function unsupportedOptionHint(opt, curlPath) {
+  const sysCurl = /\\System32\\curl\.exe$/i.test(curlPath || '');
+  return (
+    (sysCurl ? `Windows 에 기본으로 들어 있는 curl(${curlPath})은 ${opt} 옵션을 지원하지 않습니다. ` : '') +
+    `cURL 탭 → 도우미 설정의 "curl 실행 파일 경로"에 ${opt} 옵션을 지원하는 curl 을 지정하세요` +
+    (sysCurl && /ntlm/i.test(opt) ? ' (예: Git for Windows 의 C:\\Program Files\\Git\\mingw64\\bin\\curl.exe)' : '') +
+    '. 지원 여부는 curl -V 의 Features 줄에서 확인할 수 있습니다.'
+  );
+}
+
 function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh) {
   if (!meta) throw new CurlRunError('도우미가 결과를 보내지 않았습니다.', { code: 'HOST_ERROR' });
   const stderr = b64ToText(meta.stderrB64);
@@ -623,6 +645,18 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
   }
   const warnings = [...(prepared.warnings || []).filter((w) => !/Body가 제외/.test(w)), ...exec.warnings];
   if (meta.exitCode !== 0 || meta.timedOut) {
+    // 이 curl 빌드가 지원하지 않는 옵션 (예: Windows 기본 curl 의 --ntlm)
+    const unsupported = !meta.timedOut && stderr.match(/curl: option (-{1,2}[\w.-]+): the installed libcurl version does(?: not|n't) support this/);
+    if (unsupported) {
+      throw new CurlRunError(`이 PC의 curl 이 ${unsupported[1]} 옵션을 지원하지 않습니다.`, {
+        code: 'CURL_UNSUPPORTED_OPTION',
+        hint: unsupportedOptionHint(unsupported[1], curlPath),
+        elapsed,
+        terminal,
+        engine: 'curl',
+        warnings,
+      });
+    }
     const lastErr = (stderr.match(/curl: \(\d+\)[^\n]*/g) || []).pop();
     const code = meta.timedOut ? 28 : meta.exitCode;
     throw new CurlRunError(lastErr || (meta.timedOut ? '시간이 초과되었습니다.' : `curl 이 종료 코드 ${meta.exitCode} 로 끝났습니다.`), {
