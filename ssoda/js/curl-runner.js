@@ -50,10 +50,11 @@ const EXTRA_FLAGS = new Set([
   'verbose', 'insecure', 'silent', 'show-error', 'compressed', 'location', 'http1.0', 'http1.1', 'http2', 'max-time',
   'no-progress-meter',
 ]);
-// SSH 터널을 거치지 않게 만드는 옵션
+// SSH 터널을 거치지 않게 만드는 옵션과, 터널로 실행할 때는 쓰지 않는 프록시 설정(사용자 정보·인증 방식 등)
 const ROUTING_OPTS = new Set([
   'proxy', 'preproxy', 'noproxy', 'socks4', 'socks4a', 'socks5', 'socks5-hostname', 'proxytunnel', 'proxy-user', 'proxy-header',
   'proxy-insecure', 'proxy-cacert', 'proxy-cert', 'proxy-key', 'unix-socket', 'abstract-unix-socket', 'doh-url', 'dns-servers',
+  'proxy-basic', 'proxy-digest', 'proxy-ntlm', 'proxy-negotiate', 'proxy-anyauth',
 ]);
 
 /**
@@ -602,6 +603,21 @@ function unsupportedOptionHint(opt, curlPath) {
   );
 }
 
+// 프록시가 407 로 인증을 요구했을 때의 안내. 응답 헤더(Proxy-Authenticate)에서 프록시가 받는 방식을 읽어 넣을 옵션을 알려 준다.
+const PROXY_AUTH_OPTS = { digest: '--proxy-digest', ntlm: '--proxy-ntlm', negotiate: '--proxy-negotiate' };
+function proxyAuthHint(headersText) {
+  const schemes = [...new Set((String(headersText || '').match(/^proxy-authenticate:[ \t]*[\w-]+/gim) || []).map((l) => l.replace(/^[^:]*:[ \t]*/, '')))];
+  const opts = [...new Set(schemes.map((s) => PROXY_AUTH_OPTS[s.toLowerCase()]).filter(Boolean))];
+  return (
+    '프록시가 인증을 요구했습니다 (407).' +
+    (schemes.length ? ` 프록시가 받는 인증 방식: ${schemes.join(', ')}.` : '') +
+    ' cURL 탭 추가 인자에 프록시 사용자 정보(-U 사용자:비밀번호)' +
+    (opts.length ? `와 인증 방식(${opts.join(' 또는 ')})을` : '를') +
+    ' 넣었는지, 사용자 이름·비밀번호가 맞는지 확인하세요.' +
+    (opts.some((o) => o === '--proxy-ntlm' || o === '--proxy-negotiate') ? ' Windows 로그인 계정으로 인증하려면 -U 값에 콜론(:)만 넣으세요.' : '')
+  );
+}
+
 function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh) {
   if (!meta) throw new CurlRunError('도우미가 결과를 보내지 않았습니다.', { code: 'HOST_ERROR' });
   const stderr = b64ToText(meta.stderrB64);
@@ -659,9 +675,11 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
     }
     const lastErr = (stderr.match(/curl: \(\d+\)[^\n]*/g) || []).pop();
     const code = meta.timedOut ? 28 : meta.exitCode;
+    // CONNECT 로 터널을 열 때 프록시가 407 을 돌려주면 curl 은 연결 실패(7, 이전 버전은 56)로 끝난다
+    const proxy407 = !meta.timedOut && /CONNECT tunnel failed, response 407|Received HTTP code 407 from proxy after CONNECT/.test(stderr);
     throw new CurlRunError(lastErr || (meta.timedOut ? '시간이 초과되었습니다.' : `curl 이 종료 코드 ${meta.exitCode} 로 끝났습니다.`), {
       code: 'CURL_' + code,
-      hint: (terminal.ssh && tunnelHint(terminal.ssh.log)) || (terminal.ssh && SSH_CURL_HINTS[code]) || CURL_HINTS[code] || '',
+      hint: (proxy407 && proxyAuthHint(headersText)) || (terminal.ssh && tunnelHint(terminal.ssh.log)) || (terminal.ssh && SSH_CURL_HINTS[code]) || CURL_HINTS[code] || '',
       elapsed,
       terminal,
       engine: 'curl',
@@ -671,6 +689,7 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
   const finalBlocks = parseHeaderBlocks(headersText).filter((b) => !(b.status >= 100 && b.status < 200));
   const last = finalBlocks[finalBlocks.length - 1] || { statusLine: '', status: wo ? wo.httpCode : 0, reason: '', headers: [], httpVersion: '' };
   const status = wo && wo.httpCode ? wo.httpCode : last.status;
+  if (status === 407) warnings.push(proxyAuthHint(headersText));
   const headers = last.headers;
   const setCookies = headers.filter((x) => x.name.toLowerCase() === 'set-cookie').map((x) => x.value);
   const hopCookies = [];

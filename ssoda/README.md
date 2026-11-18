@@ -59,6 +59,10 @@ cURL 명령을 붙여넣어 바로 호출하고, **헤더 · 쿠키 · 파라미
 - **NTLM · Digest · Negotiate 인증 (v1.3.4)**: 추가 인자에 `--ntlm` `--digest` `--negotiate` `--anyauth` `--aws-sigv4` 가 있으면, Authorization 탭의 Basic 사용자 이름·비밀번호를 헤더 대신 `--user` 로 curl 에 넘깁니다. 붙여넣은 cURL 의 `-u` 도 그대로 이어집니다.
   - cURL 로 실행할 때만 적용됩니다. 브라우저로 보내면 이 인증 정보를 보내지 않습니다. 비밀번호가 Basic(평문)으로 나가지 않게 하기 위해서입니다. `--anyauth` 만 예외로 Basic 으로 보냅니다.
   - Windows 기본 curl(`C:\Windows\System32\curl.exe`)은 버전에 따라 NTLM 을 지원하지 않습니다. 2026-11 기준 8.22.0 은 지원하지 않습니다. 이때는 도우미 설정의 **curl 실행 파일 경로**에 NTLM 을 지원하는 curl 을 지정하세요. 예: Git for Windows 의 `C:\Program Files\Git\mingw64\bin\curl.exe`. `curl -V` 의 `Features` 줄에 `NTLM` 이 있으면 지원합니다.
+- **프록시 인증**: 추가 인자의 `--proxy-ntlm` `--proxy-digest` `--proxy-negotiate` `--proxy-anyauth` `--proxy-basic` 도 curl 에 그대로 넘깁니다. 붙여넣은 cURL 의 옵션도 그대로 옮겨집니다.
+  - 프록시 사용자 정보는 추가 인자에 `-U 사용자:비밀번호` 로 넣습니다. Windows 로그인 계정으로 인증하려면 `-U :` 처럼 콜론만 넣습니다 (NTLM · Negotiate).
+  - `--proxy-ntlm` 도 NTLM 을 지원하는 curl 이 있어야 합니다 (위 안내 참고).
+  - 프록시가 407 로 인증을 요구하면, 프록시가 받는 인증 방식과 넣어야 할 옵션을 응답에 안내합니다.
 
 #### cURL 실행 도우미 설치 (한 번만)
 크롬 확장 프로그램은 보안상 PC 프로그램을 직접 실행할 수 없습니다. 그래서 Chrome 공식 기능인 **Native Messaging** 으로 이 확장 프로그램만 호출할 수 있는 작은 도우미를 설치해야 합니다.
@@ -143,7 +147,7 @@ cURL 명령을 붙여넣어 바로 호출하고, **헤더 · 쿠키 · 파라미
 
 ### 보안 관련 동작 (v1.3)
 - **추가 인자는 허용된 옵션만 전달합니다.**
-  - 허용: 연결·TLS·타임아웃·재시도 옵션 (예: `--connect-timeout` `--resolve` `--cacert` `--retry`)과 인증 방식 옵션 (`--ntlm` `--digest` `--negotiate` `--anyauth` `--aws-sigv4`)
+  - 허용: 연결·TLS·타임아웃·재시도 옵션 (예: `--connect-timeout` `--resolve` `--cacert` `--retry`)과 인증 방식 옵션 (`--ntlm` `--digest` `--negotiate` `--anyauth` `--aws-sigv4`, 프록시용 `--proxy-ntlm` `--proxy-digest` `--proxy-negotiate` `--proxy-anyauth` `--proxy-basic`)
   - 제외: PC 파일을 읽거나 쓰는 옵션(`-T` `-d @파일` `--trace` `-c` `--libcurl` 등)과 추가 URL. 제외되면 cURL 탭과 응답에 안내가 나옵니다.
 - **백업에서 복원해도 curl 실행 파일 경로는 바뀌지 않습니다.** 조작된 백업으로 다른 프로그램이 실행되지 않게 하기 위해서입니다.
 - 도우미는 이름이 `curl.exe`(macOS·Linux 는 `curl`)인 로컬 파일만 실행합니다. 네트워크 경로(`\\서버\...`)는 쓸 수 없습니다.

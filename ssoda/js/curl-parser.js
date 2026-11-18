@@ -651,6 +651,8 @@ const PASSTHROUGH = new Set([
   'location-trusted', 'post301', 'post302', 'post303', 'aws-sigv4', 'doh-url', 'dns-servers',
   // 인증 방식 (-u 사용자 정보는 헤더가 아니라 --user 로 넘긴다: prepare.js 참고)
   'digest', 'ntlm', 'negotiate',
+  // 프록시 인증 방식 (프록시 사용자 정보는 -U/--proxy-user 로 함께 넘어간다)
+  'proxy-basic', 'proxy-digest', 'proxy-ntlm', 'proxy-negotiate', 'proxy-anyauth',
 ]);
 
 function shellQuote(v) {
