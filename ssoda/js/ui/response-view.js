@@ -4,6 +4,7 @@ import { codeView } from './code-editor.js';
 import { icon } from './icons.js';
 import { openMenu, popover, toast } from './overlay.js';
 import { parseSetCookie } from '../cookiejar.js';
+import { formatJson } from '../json-format.js';
 import { app } from '../app.js';
 
 export class ResponseView {
@@ -25,7 +26,14 @@ export class ResponseView {
   setLoading(on, onCancel, engine) {
     this.loading = on;
     this.loadingEngine = engine || 'browser';
+    this.waitingHost = null;
     if (onCancel) this.onCancel = onCancel;
+    this.render();
+  }
+
+  setWaiting(host) {
+    if (!this.loading || (this.waitingHost || null) === (host || null)) return;
+    this.waitingHost = host || null;
     this.render();
   }
 
@@ -60,7 +68,8 @@ export class ResponseView {
     let pretty = text;
     if (lang === 'json') {
       try {
-        pretty = JSON.stringify(JSON.parse(text), null, 2);
+        // 큰 정수(Java Long ID 등)·소수 자릿수를 바꾸지 않는 정렬
+        pretty = formatJson(text, 2);
       } catch (e) {
         pretty = text;
       }
@@ -77,8 +86,10 @@ export class ResponseView {
       this.el.appendChild(
         h('div.resp-empty.loading',
           h('div.spinner'),
-          h('div.resp-empty-title', this.loadingEngine === 'curl' ? 'curl 실행 중…' : '요청을 보내는 중…'),
-          this.loadingEngine === 'curl' ? h('div.resp-empty-sub', 'PC의 curl 이 요청을 실행하고 있습니다') : null,
+          h('div.resp-empty-title', this.waitingHost ? '같은 서버로 보낸 이전 요청을 기다리는 중…' : this.loadingEngine === 'curl' ? 'curl 실행 중…' : '요청을 보내는 중…'),
+          this.waitingHost
+            ? h('div.resp-empty-sub', `${this.waitingHost} 로 가는 요청은 헤더가 섞이지 않도록 하나씩 보냅니다. 이전 요청이 응답 헤더를 받으면 바로 보냅니다.`)
+            : this.loadingEngine === 'curl' ? h('div.resp-empty-sub', 'PC의 curl 이 요청을 실행하고 있습니다') : null,
           h('button.btn', { onclick: () => this.onCancel && this.onCancel() }, '취소'))
       );
       return;
@@ -447,7 +458,7 @@ function looksTextual(bytes) {
 function reformat(text, lang) {
   if (lang === 'json') {
     try {
-      return JSON.stringify(JSON.parse(text), null, 2);
+      return formatJson(text, 2);
     } catch (e) {
       return text;
     }

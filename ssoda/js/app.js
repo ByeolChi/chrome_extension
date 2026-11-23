@@ -10,7 +10,7 @@ import { prepareRequest } from './prepare.js';
 import { sendRequest, getBrowserCookies, initHttpEngine } from './http.js';
 import {
   runCurl, curlOptsOf, pingHelper, testSsh, forgetSshHost, scanSshHost, trustSshHost, parseExtraArgs, versionAtLeast, SSH_HOST_VERSION,
-  SSH_LEGACY_HOST_VERSION, CurlRunError,
+  SSH_LEGACY_HOST_VERSION, LATEST_HOST_VERSION, CurlRunError,
 } from './curl-runner.js';
 
 // SSH 비밀번호는 저장하지 않고 이 탭의 메모리에만 둔다. 마지막으로 쓴 뒤 이 시간이 지나면 지운다.
@@ -48,9 +48,19 @@ export const app = {
     return env && env.ssh && env.ssh.enabled ? normalizeSsh(env.ssh) : null;
   },
 
+  // 변수·인증 상속의 기준이 되는 컬렉션 항목 id. 저장된 요청이면 그 항목, 히스토리·복제로 연 탭이면 원래 요청 항목
+  // (contextId 는 상속에만 쓰고 저장 위치로는 쓰지 않는다)
+  contextIdOf(tab) {
+    if (!tab) return null;
+    if (tab.itemId) return tab.itemId;
+    if (tab.contextId && findInCollections(store.state.collections, tab.contextId)) return tab.contextId;
+    return null;
+  },
+
   collectionOfTab(tab) {
-    if (!tab || !tab.itemId) return null;
-    const hit = findInCollections(store.state.collections, tab.itemId);
+    const id = this.contextIdOf(tab);
+    if (!id) return null;
+    const hit = findInCollections(store.state.collections, id);
     return hit ? hit.collection : null;
   },
 
@@ -131,9 +141,10 @@ export const app = {
     return tab;
   },
 
-  newRequestTab(partial = {}, name = 'Untitled Request') {
+  newRequestTab(partial = {}, name = 'Untitled Request', { contextId = null } = {}) {
     const draft = normalizeRequest(newRequest(partial));
     const tab = { id: uid('tab'), type: 'request', itemId: null, name, draft, dirty: false };
+    if (contextId) tab.contextId = contextId;
     tab.savedSig = requestSignature(tab.name, tab.draft);
     return this.addTab(tab);
   },
@@ -164,7 +175,9 @@ export const app = {
   },
 
   openHistory(entry) {
-    const tab = this.newRequestTab(clone(entry.request), entry.name || suggestName(entry.request.method, entry.request.url));
+    const tab = this.newRequestTab(clone(entry.request), entry.name || suggestName(entry.request.method, entry.request.url), {
+      contextId: entry.itemId || entry.contextId || null,
+    });
     return tab;
   },
 
@@ -210,7 +223,7 @@ export const app = {
 
   duplicateTab(tab) {
     if (tab.type !== 'request') return;
-    return this.newRequestTab(clone(tab.draft), tab.name + ' 복사본');
+    return this.newRequestTab(clone(tab.draft), tab.name + ' 복사본', { contextId: this.contextIdOf(tab) });
   },
 
   // 에디터 변경 시 호출
@@ -284,7 +297,7 @@ export const app = {
   async buildPrepared(tab, { engine } = {}) {
     const forCurl = (engine || this.engineOf(tab)) === 'curl';
     const scope = this.getScope(tab);
-    const inh = this.getInheritedAuth(tab.itemId);
+    const inh = this.getInheritedAuth(this.contextIdOf(tab));
     const base = prepareRequest(tab.draft, { scope, inheritedAuth: inh ? inh.auth : null, defaults: this.settings });
     let jarCookies = [];
     let browserCookies = [];
@@ -324,6 +337,8 @@ export const app = {
       if (!ssh) return;
       if (this.controllers.has(tab.id)) return;
     }
+    // 히스토리에는 보낸 시점의 요청을 남긴다 (응답을 기다리는 동안 편집한 내용이 섞이지 않게)
+    const sentDraft = clone(tab.draft);
     const view = this.views.get(tab.id);
     const ctrl = new AbortController();
     this.controllers.set(tab.id, ctrl);
@@ -344,7 +359,11 @@ export const app = {
           result = await this.withHostKeyTrust(env, ssh, run);
         } else result = await run();
       } else {
-        result = await sendRequest(prepared, { signal: ctrl.signal, removeOrigin: this.settings.removeOrigin });
+        result = await sendRequest(prepared, {
+          signal: ctrl.signal,
+          removeOrigin: this.settings.removeOrigin,
+          onWait: (host) => this.views.get(tab.id)?.setWaiting?.(host),
+        });
       }
       this.captureCookies(result);
     } catch (err) {
@@ -366,7 +385,7 @@ export const app = {
       this.controllers.delete(tab.id);
     }
     this.responses.set(tab.id, result);
-    this.addHistory(tab, result);
+    this.addHistory(tab, result, sentDraft);
     const v = this.views.get(tab.id);
     if (v) {
       v.setLoading(false);
@@ -431,8 +450,25 @@ export const app = {
         e.message = '서버 지문을 확인하지 않아 접속하지 않았습니다.';
         throw e;
       }
-      return fn();
+      try {
+        return await fn();
+      } catch (e2) {
+        if (e2.code === 'SSH_HOSTKEY_UNKNOWN') Object.assign(e2, await this.staleHostKeyInfo());
+        throw e2;
+      }
     }
+  },
+
+  // 서버 키를 방금 저장했는데도 "처음 접속하는 서버" 가 나오는 경우: 구버전 도우미는 서버 키 파일 경로에 공백이 있으면
+  // (macOS 기본 설치 경로, 이름에 공백이 있는 Windows 사용자 폴더) 저장한 키를 읽지 못한다.
+  async staleHostKeyInfo() {
+    const st = await this.ui.helperStatus();
+    if (!st || !st.ok || versionAtLeast(st.hostVersion, LATEST_HOST_VERSION)) return {};
+    return {
+      code: 'HOST_OUTDATED',
+      message: `설치된 cURL 실행 도우미(v${st.hostVersion || '?'})가 저장한 서버 키를 읽지 못했습니다.`,
+      hint: `도우미 v${LATEST_HOST_VERSION} 미만은 설치 경로에 공백이 있으면(macOS 는 항상) 서버 키 파일을 찾지 못합니다. 아래 [도우미 설치 / 확인] 버튼으로 설치 파일을 다시 받아 실행해 주세요.`,
+    };
   },
 
   async confirmHostKey(env, ssh) {
@@ -470,6 +506,7 @@ export const app = {
     if (!r.ok && r.code === 'SSH_HOSTKEY_UNKNOWN') {
       if (!(await this.confirmHostKey(env, ssh))) return { ok: false, code: 'SSH_HOSTKEY_UNKNOWN', message: '서버 지문을 확인하지 않아 접속하지 않았습니다.', hint: '' };
       r = await testSsh(ssh);
+      if (!r.ok && r.code === 'SSH_HOSTKEY_UNKNOWN') r = { ...r, ...(await this.staleHostKeyInfo()) };
     }
     if (!r.ok && r.code === 'SSH_AUTH') this.forgetSshSecret(env.id);
     return r;
@@ -510,9 +547,9 @@ export const app = {
     }
   },
 
-  addHistory(tab, result) {
+  addHistory(tab, result, draft = tab.draft) {
     if (!this.settings.historyEnabled) return;
-    const req = clone(tab.draft);
+    const req = clone(draft);
     // 히스토리에는 파일 데이터 저장하지 않음
     (req.body.formdata || []).forEach((f) => {
       if (f.file) f.file = { name: f.file.name, missing: true };
@@ -523,6 +560,7 @@ export const app = {
       ts: Date.now(),
       name: tab.itemId ? tab.name : '',
       itemId: tab.itemId || null,
+      contextId: tab.itemId ? null : this.contextIdOf(tab),
       request: req,
       status: result.ok ? result.status : 0,
       statusText: result.ok ? result.statusText : result.error?.message,

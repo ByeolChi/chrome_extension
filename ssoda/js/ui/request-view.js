@@ -14,6 +14,7 @@ import { cookiesForUrl } from '../cookiejar.js';
 import { curlOptsOf, parseExtraArgs, describeRemovedArgs, userAuthOpt } from '../curl-runner.js';
 import { highlight } from '../highlight.js';
 import { copyText } from '../util.js';
+import { formatJson } from '../json-format.js';
 import { app } from '../app.js';
 
 const SUBTABS = [
@@ -334,6 +335,11 @@ export class RequestView {
     this.response.setLoading(on, null, engine || app.engineOf(this.tab));
   }
 
+  // 같은 서버로 보낸 이전 요청을 기다리는 중(host) / 기다림 끝(null)
+  setWaiting(host) {
+    this.response.setWaiting(host);
+  }
+
   showResponse(result) {
     this.response.show(result);
   }
@@ -410,7 +416,7 @@ export class RequestView {
       getScope: () => app.getScope(this.tab),
       allowInherit: true,
       inheritInfo: () => {
-        const inh = app.getInheritedAuth(this.tab.itemId);
+        const inh = app.getInheritedAuth(app.contextIdOf(this.tab));
         if (!inh) return null;
         return { label: authLabel(inh.auth.type), from: inh.from.name };
       },
@@ -444,7 +450,7 @@ export class RequestView {
 
   computeAutoHeaders() {
     const tab = this.tab;
-    const inh = app.getInheritedAuth(tab.itemId);
+    const inh = app.getInheritedAuth(app.contextIdOf(tab));
     let jar = [];
     try {
       const url0 = prepareRequest(tab.draft, { scope: app.getScope(tab) }).url;
@@ -892,7 +898,8 @@ export function beautifyJsonWithVars(src) {
     }
     tmp += c;
   }
-  let out = JSON.stringify(JSON.parse(tmp), null, 2);
+  // 숫자·이스케이프를 원문 그대로 두고 들여쓰기만 바꾼다 (큰 정수 ID 가 바뀐 채 전송되지 않게)
+  let out = formatJson(tmp, 2);
   vars.forEach((x, i) => {
     const ph = `__CSVAR_${i}__`;
     out = x.bare ? out.replace(`"${ph}"`, () => x.v) : out.replace(ph, () => x.v);

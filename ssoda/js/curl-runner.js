@@ -11,6 +11,8 @@ export const HOST_NAME = 'com.ssoda.runner';
 export const SSH_HOST_VERSION = '1.3.0';
 // 구형 서버 호환(ssh-rsa) 옵션을 지원하는 도우미 버전
 export const SSH_LEGACY_HOST_VERSION = '1.3.1';
+// 1.3.2: 서버 키 파일 경로에 공백이 있어도(macOS 기본 설치 경로 등) 저장한 키를 읽음, curl 인자 이중 검사(--proto 고정 등)
+export const LATEST_HOST_VERSION = '1.3.2';
 
 export function versionAtLeast(v, min) {
   const a = String(v || '0').split('.').map((n) => parseInt(n, 10) || 0);
@@ -76,6 +78,9 @@ export function parseExtraArgs(extra, { ssh = false } = {}) {
     const base = name.startsWith('no-') && !CURL_PASSTHROUGH.has(name) ? name.slice(3) : name;
     if (!CURL_PASSTHROUGH.has(name) && !CURL_PASSTHROUGH.has(base) && !EXTRA_FLAGS.has(name)) {
       removed.push({ arg: raw, reason: 'unsafe' });
+    } else if (value != null && String(value).startsWith('@')) {
+      // curl 은 "@파일" 값을 PC 파일 내용으로 바꿔 보낸다 (예: --proxy-header @.kube/config → 파일 내용이 프록시로 전송)
+      removed.push({ arg: raw, reason: 'file' });
     } else if (ssh && (ROUTING_OPTS.has(name) || ROUTING_OPTS.has(base))) {
       removed.push({ arg: raw, reason: 'ssh' });
     } else {
@@ -128,8 +133,10 @@ export function userAuthOpt(extra) {
 export function describeRemovedArgs(removed) {
   const out = [];
   const unsafe = removed.filter((r) => r.reason === 'unsafe').map((r) => r.arg);
+  const file = removed.filter((r) => r.reason === 'file').map((r) => r.arg);
   const ssh = removed.filter((r) => r.reason === 'ssh').map((r) => r.arg);
-  if (unsafe.length) out.push(`허용되지 않아 제외된 추가 인자: ${unsafe.join(' ')} (파일을 읽거나 쓰는 옵션, 추가 URL, 결과 표시와 충돌하는 옵션은 사용할 수 없습니다)`);
+  if (unsafe.length) out.push(`허용되지 않아 제외된 추가 인자: ${unsafe.join(' ')} (파일을 읽거나 쓰는 옵션, 로컬 소켓, 추가 URL, 결과 표시와 충돌하는 옵션은 사용할 수 없습니다)`);
+  if (file.length) out.push(`PC 파일에서 값을 읽는 형식(@파일)이라 제외된 추가 인자: ${file.join(' ')}`);
   if (ssh.length) out.push(`SSH 터널을 우회하게 만들어 제외된 추가 인자: ${ssh.join(' ')}`);
   return out;
 }
@@ -155,12 +162,27 @@ function safeFileName(name) {
   return String(name || 'file').replace(/[";\r\n\\]/g, '_');
 }
 
+// HTTP 헤더 이름(token) 규칙 (http.js 의 브라우저 전송 검사와 같음)
+const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
 /**
  * prepared(prepareRequest 결과) + curl 옵션 → 실행용 인자 배열
  * 반환: { argv, files:[{name, b64}], warnings }
  */
 export function buildCurlExec(p, opts = DEFAULT_CURL_OPTS, { ssh = false } = {}) {
-  const argv = ['-sS'];
+  let url;
+  try {
+    url = new URL(p.url);
+  } catch (e) {
+    throw new CurlRunError('URL 형식이 올바르지 않습니다: ' + p.url, { code: 'INVALID_URL' });
+  }
+  // file:// 로 PC 파일을 읽거나 gopher:// dict:// 로 PC 안의 다른 서비스(Redis 등)에 임의 데이터를 보내지 못하게 http/https 만 실행
+  if (!/^https?:$/.test(url.protocol)) {
+    throw new CurlRunError(`지원하지 않는 프로토콜입니다: ${url.protocol} (http, https 만 실행할 수 있습니다)`, { code: 'INVALID_URL' });
+  }
+  url = url.href; // 한글 등 비ASCII 는 퍼센트 인코딩
+  // 리다이렉트로 다른 프로토콜로 넘어가는 것도 막는다
+  const argv = ['-sS', '--proto', '=http,https', '--proto-redir', '=http,https'];
   const files = [];
   const warnings = [];
   const addFile = (b64) => {
@@ -183,6 +205,8 @@ export function buildCurlExec(p, opts = DEFAULT_CURL_OPTS, { ssh = false } = {})
   else if (p.method !== (hasBody ? 'POST' : 'GET')) argv.push('-X', p.method);
 
   for (const h of p.headers || []) {
+    // 브라우저 전송과 같은 규칙. 특히 "@" 로 시작하는 이름은 curl 이 -H @파일 로 읽어 PC 파일 내용을 헤더로 보낸다.
+    if (!HEADER_NAME_RE.test(h.key)) throw new CurlRunError(`헤더 이름이 올바르지 않습니다: "${h.key}"`, { code: 'INVALID_HEADER' });
     if (b.mode === 'formdata' && h.key.toLowerCase() === 'content-type' && /multipart\/form-data/i.test(h.value) && !/boundary=/i.test(h.value)) continue;
     argv.push('-H', h.value === '' ? `${h.key};` : `${h.key}: ${h.value}`);
   }
@@ -219,12 +243,6 @@ export function buildCurlExec(p, opts = DEFAULT_CURL_OPTS, { ssh = false } = {})
   warnings.push(...describeRemovedArgs(extra.removed));
   argv.push(...extra.args);
 
-  let url = p.url;
-  try {
-    url = new URL(p.url).href; // 한글 등 비ASCII 는 퍼센트 인코딩
-  } catch (e) {
-    throw new CurlRunError('URL 형식이 올바르지 않습니다: ' + p.url, { code: 'INVALID_URL' });
-  }
   argv.push('-D', '__CS_HDR__', '-o', '__CS_BODY__', '-w', WRITEOUT, '--url', url);
   return { argv, files, warnings, url };
 }

@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$HostVersion = '1.3.1'
+$HostVersion = '1.3.2'
 $script:stdin = [Console]::OpenStandardInput()
 $script:stdout = [Console]::OpenStandardOutput()
 $script:utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -153,9 +153,11 @@ function Start-SshTunnel($cfg) {
   $conf = Join-Path $script:work 'ssh_config'
   [IO.File]::WriteAllText($conf, '', (New-Object System.Text.ASCIIEncoding))
   $port = Get-FreePort
+  # The path is quoted for OpenSSH: unquoted, a space in it (C:\Users\Hong Gildong\...) splits it into two file names,
+  # so the trusted key is never found and every request asks to trust the server again.
   $argv = @(
     '-F', $conf, '-N', '-T', '-D', ('127.0.0.1:' + $port), '-p', [string]$t.Port, '-l', $t.User,
-    '-o', 'StrictHostKeyChecking=yes', '-o', ('UserKnownHostsFile=' + $script:knownHosts),
+    '-o', 'StrictHostKeyChecking=yes', '-o', ('UserKnownHostsFile="' + $script:knownHosts + '"'),
     '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2',
     '-o', 'NumberOfPasswordPrompts=1', '-o', 'PubkeyAuthentication=no', '-o', 'GSSAPIAuthentication=no',
     '-o', 'PreferredAuthentications=keyboard-interactive,password')
@@ -226,6 +228,35 @@ function Assert-NoRoutingArgs($argv) {
     $name = $s.Split('=')[0]
     if ($long -contains $name) { throw ('option not allowed with an SSH tunnel: ' + $name) }
     if ($s -match '^-[A-Za-z0-9#:]+$' -and -not $s.StartsWith('--') -and $s -cmatch '[xpKq]') { throw ('option not allowed with an SSH tunnel: ' + $s) }
+  }
+}
+
+# Defense in depth: the extension already passes only allowed curl options. A request must still never make curl
+# read or write local files, talk to a local socket, or start a second transfer (--next) that skips --proto.
+# Comparisons are case-sensitive on purpose: -o / -O, -k / -K and -c / -C are different curl options.
+function Assert-SafeArgs($argv) {
+  $deny = @('--next', '-:', '--config', '-K', '--unix-socket', '--abstract-unix-socket', '--variable', '--output', '--dump-header',
+    '--trace', '--trace-ascii', '--trace-config', '--stderr', '--libcurl', '--upload-file', '-T', '--cookie-jar', '-c', '--netrc',
+    '-n', '--netrc-file', '--netrc-optional', '--etag-save', '--etag-compare', '--hsts', '--alt-svc', '--output-dir', '--create-dirs',
+    '--remote-name', '-O', '--remote-name-all', '--remote-header-name', '-J', '--ssl-sessions', '--proto-default', '-q', '--disable')
+  $userOpts = @('--user', '-u', '--proxy-user', '-U')
+  $prev = ''
+  foreach ($a in $argv) {
+    $s = [string]$a
+    if ($deny -ccontains $s -or $s.StartsWith('--expand-', [StringComparison]::Ordinal)) { throw ('curl option not allowed: ' + $s) }
+    # Short option bundles such as -sSo would hide one of the options above
+    if ($s -cmatch '^-[A-Za-z0-9#:]{2,}$' -and $s -cmatch '[KTcnOJqo:D]') { throw ('curl option not allowed: ' + $s) }
+    if (@('-F', '--form') -ccontains $prev) {
+      # name=@file / name=<file: only the temporary files sent by the extension
+      $eq = $s.IndexOf('=')
+      if ($eq -lt 1 -or $s.Substring($eq + 1) -cnotmatch '^[@<]__CS_[A-Za-z0-9_]{1,40}__(;|$)') { throw 'form fields must use the files sent by the extension' }
+    }
+    elseif ($s.StartsWith('@', [StringComparison]::Ordinal) -and $s -cnotmatch '^@__CS_[A-Za-z0-9_]{1,40}__$' -and $userOpts -cnotcontains $prev) {
+      # -H @file, --proxy-header @file, --data @file ...
+      throw ('curl argument must not read a local file: ' + $s)
+    }
+    if (@('-o', '-D') -ccontains $prev -and $s -cnotmatch '^__CS_(BODY|HDR)__$') { throw ('curl output path not allowed: ' + $s) }
+    $prev = $s
   }
 }
 
@@ -349,7 +380,10 @@ function Run-Request($msg) {
       $map['__CS_' + $n + '__'] = (Join-Path $script:work $n)
     }
   }
+  Assert-SafeArgs @($msg.args)
   $argv = New-Object 'System.Collections.Generic.List[string]'
+  # Only http/https, also after redirects: no file://, and no gopher:// or dict:// to services on this PC
+  foreach ($a in @('--proto', '=http,https', '--proto-redir', '=http,https')) { $argv.Add($a) }
   foreach ($a in @($msg.args)) {
     $s = [string]$a
     foreach ($k in $map.Keys) { $s = $s.Replace($k, $map[$k]) }

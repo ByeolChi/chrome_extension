@@ -71,6 +71,14 @@ export async function initHttpEngine() {
     hop.redirectUrl = d.redirectUrl;
     hop.ip = d.ip;
     hop.fromCache = d.fromCache;
+    // 다른 서버로 리다이렉트되는데 그 서버로 가는 다른 요청이 헤더 규칙을 쓰는 중이면, 그 규칙이 이 요청에도 적용될 수 있다.
+    // (헤더 규칙은 요청을 구별할 수 없어 주소로만 고른다) 막을 수는 없으므로 결과에 알린다.
+    try {
+      const to = new URL(d.redirectUrl).host;
+      if (to !== cap.host && hostLocks.has(to)) cap.mixedRedirect = to;
+    } catch (e) {
+      /* ignore */
+    }
   }, filter, ['responseHeaders', 'extraHeaders']);
 
   chrome.webRequest.onResponseStarted.addListener((d) => {
@@ -105,18 +113,29 @@ function normalizeUrl(u) {
   }
 }
 
-// 요청별 헤더 규칙: 정확한 URL 규칙(우선순위 2) + 같은 출처 리다이렉트용 규칙(우선순위 1)
-async function addDnrRules(url, requestHeaders) {
-  if (!hasChrome || !requestHeaders.length) return [];
+// 요청별 헤더 규칙: 정확한 URL 규칙(우선순위 2) + 같은 호스트 리다이렉트용 규칙(우선순위 1)
+// http ↔ https 로만 바뀌는 리다이렉트(http://api.example.com → https://api.example.com)에도 User-Agent·Referer 등은
+// curl 처럼 계속 보낸다. Cookie 는 curl(7.83+)도 스킴·포트가 바뀌면 빼므로 그쪽 규칙에서는 뺀다.
+export function buildDnrRules(url, requestHeaders, { tabId = null, extId = '' } = {}) {
+  if (!requestHeaders.length) return [];
   const u = new URL(url);
-  const base = { resourceTypes: ['xmlhttprequest'], initiatorDomains: [chrome.runtime.id] };
-  if (myTabId != null) base.tabIds = [myTabId];
+  const base = { resourceTypes: ['xmlhttprequest'], initiatorDomains: [extId] };
+  if (tabId != null) base.tabIds = [tabId];
   const rnd = () => 1 + Math.floor(Math.random() * 2000000000);
   const rules = [];
-  if (!/[*^|]/.test(url)) {
-    rules.push({ id: rnd(), priority: 2, condition: { ...base, urlFilter: '|' + url + '|' }, action: { type: 'modifyHeaders', requestHeaders } });
-  }
-  rules.push({ id: rnd(), priority: 1, condition: { ...base, urlFilter: '|' + u.protocol + '//' + u.host + '/' }, action: { type: 'modifyHeaders', requestHeaders } });
+  const add = (priority, urlFilter, headers) => {
+    if (headers.length) rules.push({ id: rnd(), priority, condition: { ...base, urlFilter }, action: { type: 'modifyHeaders', requestHeaders: headers } });
+  };
+  if (!/[*^|]/.test(url)) add(2, '|' + url + '|', requestHeaders);
+  add(1, '|' + u.protocol + '//' + u.host + '/', requestHeaders);
+  const other = u.protocol === 'https:' ? 'http:' : 'https:';
+  add(1, '|' + other + '//' + u.host + '/', requestHeaders.filter((x) => x.header !== 'cookie' && x.header !== 'cookie2'));
+  return rules;
+}
+
+async function addDnrRules(url, requestHeaders) {
+  if (!hasChrome || !requestHeaders.length) return [];
+  const rules = buildDnrRules(url, requestHeaders, { tabId: myTabId, extId: chrome.runtime.id });
   await chrome.declarativeNetRequest.updateSessionRules({ addRules: rules });
   return rules.map((r) => r.id);
 }
@@ -130,8 +149,17 @@ async function removeDnrRules(ids) {
   }
 }
 
-function acquireHost(host, signal) {
-  const prev = hostLocks.get(host) || Promise.resolve();
+// onWait: 같은 호스트로 보낸 이전 요청이 아직 헤더 규칙을 쓰고 있어 기다려야 할 때 한 번 호출
+function acquireHost(host, signal, onWait) {
+  const busy = hostLocks.get(host);
+  if (busy && onWait) {
+    try {
+      onWait(host);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  const prev = busy || Promise.resolve();
   let release;
   const mine = new Promise((r) => (release = r));
   const tail = prev.then(() => mine);
@@ -195,7 +223,8 @@ export class RequestError extends Error {
 
 /**
  * prepared: prepareRequest() 결과
- * opts: { signal, removeOrigin }
+ * opts: { signal, removeOrigin, onWait(host | null) }
+ *   onWait: 같은 호스트로 보낸 이전 요청 때문에 기다려야 하면 host 로, 기다림이 끝나 전송을 시작하면 null 로 호출
  */
 export async function sendRequest(prepared, opts = {}) {
   const warnings = [...(prepared.warnings || [])];
@@ -271,8 +300,7 @@ export async function sendRequest(prepared, opts = {}) {
     body = b.file.blob || (b.file.dataUrl ? dataURLtoBlob(b.file.dataUrl) : undefined);
   }
 
-  // 같은 호스트로 진행 중인 요청이 있으면 끝날 때까지 대기
-  const releaseHost = await acquireHost(url.host, opts.signal);
+  // 타임아웃은 같은 호스트의 이전 요청을 기다리는 시간도 포함한다 (응답 없는 요청 하나가 뒤 요청을 끝없이 막지 않게)
   const controller = new AbortController();
   let timedOut = false;
   let timer = null;
@@ -284,10 +312,41 @@ export async function sendRequest(prepared, opts = {}) {
     opts.signal.addEventListener('abort', onAbort);
   }
 
+  // 같은 호스트로 보낸 요청이 헤더 규칙을 쓰는 동안(응답 헤더를 받을 때까지) 대기
+  const tQueued = performance.now();
+  let releaseHost;
+  let waited = false;
+  try {
+    releaseHost = await acquireHost(url.host, controller.signal, opts.onWait ? (host) => { waited = true; opts.onWait(host); } : null);
+    if (waited) opts.onWait(null); // 기다림 끝 → 전송 시작
+  } catch (e) {
+    if (timer) clearTimeout(timer);
+    if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
+    if (timedOut) {
+      throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms). 같은 서버(${url.host})로 보낸 이전 요청의 응답을 기다리는 중이었습니다.`, {
+        code: 'TIMEOUT',
+        hint: '같은 서버로 가는 요청은 헤더가 섞이지 않도록 하나씩 보냅니다. 응답이 오지 않는 이전 요청을 취소한 뒤 다시 보내세요.',
+        elapsed: performance.now() - tQueued,
+        warnings,
+      });
+    }
+    throw e;
+  }
+  const queuedMs = performance.now() - tQueued;
+
   const follow = prepared.settings?.followRedirects !== false;
-  const cap = { url: finalUrl, method: prepared.method, requestId: null, hops: [], netError: null };
+  const cap = { url: finalUrl, host: url.host, method: prepared.method, requestId: null, hops: [], netError: null };
   captures.add(cap);
   let ruleIds = [];
+  let networkReleased = false;
+  // 요청 헤더를 모두 보낸 뒤(응답 헤더 수신, 리다이렉트 포함) 헤더 규칙을 지우고 같은 호스트의 다음 요청을 보낼 수 있게 한다.
+  // 본문을 오래 받는 응답(대용량 파일, 끝나지 않는 SSE)이 다른 요청을 막지 않게 하기 위해서다.
+  const releaseNetwork = async () => {
+    if (networkReleased) return;
+    networkReleased = true;
+    await removeDnrRules(ruleIds);
+    releaseHost();
+  };
   const t0 = performance.now();
   let tHeaders = null;
   let tEnd = null;
@@ -324,6 +383,7 @@ export async function sendRequest(prepared, opts = {}) {
       throw new RequestError(msg, { code: net || 'NETWORK', hint, elapsed, capture: cap, warnings });
     }
     tHeaders = performance.now();
+    await releaseNetwork();
     let buf;
     try {
       buf = new Uint8Array(await res.arrayBuffer());
@@ -371,6 +431,9 @@ export async function sendRequest(prepared, opts = {}) {
       });
     });
     const headersSize = rawHeaders.reduce((n, x) => n + x.name.length + String(x.value).length + 4, statusLine.length + 2);
+    if (cap.mixedRedirect) {
+      warnings.push(`${cap.mixedRedirect} 로 리다이렉트되는 동안 그 서버로 가는 다른 요청이 진행 중이어서, 그 요청의 Cookie·User-Agent 같은 헤더가 이 요청에 섞였을 수 있습니다. 정확한 결과가 필요하면 다른 요청이 끝난 뒤 다시 보내세요.`);
+    }
     const contentType = (rawHeaders.find((x) => x.name.toLowerCase() === 'content-type') || {}).value || res.headers.get('content-type') || '';
 
     return {
@@ -393,6 +456,7 @@ export async function sendRequest(prepared, opts = {}) {
         ttfb: tHeaders - tStart,
         download: tEnd - tHeaders,
         prepare: tStart - t0,
+        queued: queuedMs,
       },
       hops: cap.hops,
       remoteIp: cap.ip || lastHop?.ip || '',
@@ -406,8 +470,7 @@ export async function sendRequest(prepared, opts = {}) {
   } finally {
     if (timer) clearTimeout(timer);
     if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
-    await removeDnrRules(ruleIds);
-    releaseHost();
+    await releaseNetwork();
     captures.delete(cap);
     if (cap.requestId) setTimeout(() => byRequestId.delete(cap.requestId), 2000);
   }

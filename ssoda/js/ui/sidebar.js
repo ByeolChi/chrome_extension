@@ -466,7 +466,7 @@ export class Sidebar {
           await app.saveTab(tab, { saveAs: true });
         },
       },
-      { label: 'cURL로 복사', icon: 'terminal', onClick: () => app.ui.copyRequestAsCurl(e.request) },
+      { label: 'cURL로 복사', icon: 'terminal', onClick: () => app.ui.copyRequestAsCurl(e.request, e.itemId || e.contextId) },
       { divider: true },
       {
         label: '삭제',
