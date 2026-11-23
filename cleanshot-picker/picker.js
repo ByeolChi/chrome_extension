@@ -5,6 +5,7 @@
  *
  * 원본 DOM 구조는 건드리지 않는다. 모든 변경은 인라인 스타일 한 줄이거나
  * 오버레이 위의 박스이고, 모든 조작은 하나의 작업 스택에 쌓여 Ctrl+Z 로 풀린다.
+ * 텍스트 도구만 글자를 바꾸는데, 되돌릴 때 원래 노드 객체를 그대로 제자리에 돌려놓는다.
  *
  * 같은 파일이 다시 주입되면 (아이콘 재클릭) 토글로 동작한다.
  */
@@ -23,6 +24,7 @@
   const MAX_ESCALATE = 6;        // 자동 승격 최대 단계
   const AREA_RATIO = 0.9;        // 부모 면적의 이 비율 이상이면 부모를 대신 선택
   const NUDGE_MERGE_MS = 400;    // 이 안에 이어진 방향키는 한 작업으로 묶는다
+  const FRAME_TAGS = 'iframe, frame, object, embed';
 
   const TOOLS = [
     { id: 'hide',   key: '1', label: '지우기', cursor: 'crosshair' },
@@ -47,9 +49,9 @@
     forceRemove: false,      // true 면 지우기가 항상 display:none
     barTop: false,
     candidate: null,
-    pointer: { x: 0, y: 0 },
+    pointer: { x: 0, y: 0 }, // 최상위 화면 좌표
     history: [],             // { kind, el, undo, t }
-    masks: [],               // { x, y, w, h, el } — x/y 는 문서 좌표
+    masks: [],               // { box, anchor, size, view, last } — "5 가리기" 참고
     drag: null,
     editing: null,
     editSnapshot: null,
@@ -64,11 +66,15 @@
   const host = document.createElement('div');
   host.id = HOST_ID;
   host.setAttribute('aria-hidden', 'true');
+  /* popover 로 띄워 top layer 에 올린다. <dialog>(showModal)·popover 는 z-index 와
+     상관없이 그 위에 그려지므로, 그냥 두면 툴바와 가리기 박스가 그 아래에 깔린다. */
+  host.setAttribute('popover', 'manual');
   host.style.cssText =
     'all:initial;position:fixed;top:0;left:0;right:0;bottom:0;overflow:hidden;' +
     'z-index:2147483647;pointer-events:none;';
 
-  const root = host.attachShadow({ mode: 'open' });
+  /* closed — 페이지 스크립트가 host.shadowRoot 로 들어와 버튼을 누를 수 없게 */
+  const root = host.attachShadow({ mode: 'closed' });
   root.innerHTML = `
     <style>
       :host, * { box-sizing: border-box; }
@@ -243,7 +249,7 @@
     h.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      startResize(e, h.dataset.dir);
+      startResize(pt(e), h.dataset.dir);
     })
   );
 
@@ -251,11 +257,60 @@
   const cursorStyle = document.createElement('style');
   cursorStyle.id = '__cleanshot_cursor__';
 
-  function paintCursor() {
+  function cursorCss() {
     const t = TOOLS.find((x) => x.id === state.tool);
-    cursorStyle.textContent =
-      `*:not(#${HOST_ID}):not(#${HOST_ID} *) { cursor: ${t ? t.cursor : 'crosshair'} !important; }`;
+    return `*:not(#${HOST_ID}):not(#${HOST_ID} *) { cursor: ${t ? t.cursor : 'crosshair'} !important; }`;
   }
+
+  function paintCursor() {
+    const css = cursorCss();
+    cursorStyle.textContent = css;
+    for (const s of frameStyles.values()) s.textContent = css;
+  }
+
+  /* 오버레이를 붙일 자리. 모달 <dialog> 가 열려 있으면 그 바깥은 전부 inert 라서
+     top layer 에 올려도 툴바를 누를 수 없다. 그때는 가장 위의 모달 안에 붙인다. */
+  function hostParent() {
+    let modal = null;
+    try {
+      const list = document.querySelectorAll('dialog:modal');
+      modal = list.length ? list[list.length - 1] : null;
+    } catch (_) { /* :modal 을 모르는 브라우저 */ }
+    return modal || document.body || document.documentElement;
+  }
+
+  function mountHost() {
+    const parent = hostParent();
+    if (host.parentNode !== parent) parent.appendChild(host);
+    raise();
+  }
+
+  /* top layer 는 나중에 연 것이 위다. 닫았다 다시 열어 맨 위로 올린다. */
+  function raise() {
+    if (typeof host.showPopover !== 'function') return; // 지원하지 않으면 z-index 로 버틴다
+    try {
+      if (host.matches(':popover-open')) host.hidePopover();
+      host.showPopover();
+    } catch (_) { /* 연결되지 않았거나 이미 열린 상태 */ }
+  }
+
+  /* 모달이 열리고 닫히는 것(open 속성)과 새로 생기는 iframe 을 지켜본다 */
+  const pageWatch = new MutationObserver((records) => {
+    if (!state.active) return;
+    let remount = !host.isConnected;
+    for (const r of records) {
+      if (r.type === 'attributes') {
+        if (r.target.localName === 'dialog') remount = true;
+        continue;
+      }
+      for (const n of r.addedNodes) {
+        if (n.nodeType !== 1 || n === host) continue;
+        if (n.matches(FRAME_TAGS)) watchFrame(n);
+        else if (n.firstElementChild) n.querySelectorAll(FRAME_TAGS).forEach(watchFrame);
+      }
+    }
+    if (remount) mountHost();
+  });
 
   /* ============================================================ 켜고 끄기 */
 
@@ -268,7 +323,7 @@
     if (state.active) return;
     state.active = true;
 
-    (document.body || document.documentElement).appendChild(host);
+    mountHost();
     paintCursor();
     // 전역 커서 규칙은 문서 전체 스타일 재계산을 부른다. 툴바를 먼저 띄우고 다음 프레임에 건다.
     requestAnimationFrame(() => {
@@ -276,13 +331,12 @@
       (document.head || document.documentElement).appendChild(cursorStyle);
     });
 
-    document.addEventListener('pointermove', onPointerMove, true);
-    document.addEventListener('pointerdown', onPointerDown, true);
-    document.addEventListener('pointerup', onPointerUp, true);
-    BLOCKED.forEach((t) => document.addEventListener(t, onBlocked, true));
-    document.addEventListener('keydown', onKey, true);
-    window.addEventListener('scroll', reposition, true);
-    window.addEventListener('resize', reposition, true);
+    attachDoc(document);
+    try {
+      pageWatch.observe(document.documentElement, {
+        subtree: true, childList: true, attributes: true, attributeFilter: ['open']
+      });
+    } catch (_) { /* 무시 */ }
 
     readSettings();
     setTool(state.tool);
@@ -323,13 +377,9 @@
     restoreAll();
     setCandidate(null);
 
-    document.removeEventListener('pointermove', onPointerMove, true);
-    document.removeEventListener('pointerdown', onPointerDown, true);
-    document.removeEventListener('pointerup', onPointerUp, true);
-    BLOCKED.forEach((t) => document.removeEventListener(t, onBlocked, true));
-    document.removeEventListener('keydown', onKey, true);
-    window.removeEventListener('scroll', reposition, true);
-    window.removeEventListener('resize', reposition, true);
+    pageWatch.disconnect();
+    for (const d of [...docs]) detachDoc(d);
+    unblindAll();
 
     host.classList.remove('capturing');
     host.remove();
@@ -360,6 +410,238 @@
         barTop: state.barTop
       }).catch(() => {});
     } catch (_) { /* 무시 */ }
+  }
+
+  /* ============================================================ 프레임
+   * 같은 출처 iframe 은 안쪽 문서에도 같은 리스너를 걸어 그 안의 요소까지 고른다.
+   * 다른 출처 iframe 은 안을 볼 수 없다. 선택 모드 동안 pointer-events 를 꺼서
+   * 클릭이 iframe 안으로 새지 않게 하고, iframe 전체를 한 요소로 고르게 한다.
+   */
+
+  const docs = new Set();          // 리스너를 건 문서 (최상위 포함)
+  const frameStyles = new Map();   // iframe 문서 → 커서 <style>
+  const blinded = new Map();       // 다른 출처 iframe → 원래 pointer-events
+
+  function attachDoc(doc) {
+    if (!doc || docs.has(doc)) return;
+    const win = doc.defaultView;
+    if (!win) return;
+    docs.add(doc);
+
+    doc.addEventListener('pointermove', onPointerMove, true);
+    doc.addEventListener('pointerdown', onPointerDown, true);
+    doc.addEventListener('pointerup', onPointerUp, true);
+    BLOCKED.forEach((t) => doc.addEventListener(t, onBlocked, true));
+    doc.addEventListener('keydown', onKey, true);
+    doc.addEventListener('load', onFrameLoad, true);
+    win.addEventListener('scroll', reposition, true);
+    win.addEventListener('resize', reposition, true);
+
+    if (doc !== document) {
+      try {
+        const s = doc.createElement('style');
+        s.textContent = cursorCss();
+        (doc.head || doc.documentElement).appendChild(s);
+        frameStyles.set(doc, s);
+      } catch (_) { /* 무시 */ }
+    }
+    try { doc.querySelectorAll(FRAME_TAGS).forEach(watchFrame); } catch (_) { /* 무시 */ }
+  }
+
+  function detachDoc(doc) {
+    docs.delete(doc);
+    try {
+      doc.removeEventListener('pointermove', onPointerMove, true);
+      doc.removeEventListener('pointerdown', onPointerDown, true);
+      doc.removeEventListener('pointerup', onPointerUp, true);
+      BLOCKED.forEach((t) => doc.removeEventListener(t, onBlocked, true));
+      doc.removeEventListener('keydown', onKey, true);
+      doc.removeEventListener('load', onFrameLoad, true);
+      const win = doc.defaultView;
+      if (win) {
+        win.removeEventListener('scroll', reposition, true);
+        win.removeEventListener('resize', reposition, true);
+      }
+    } catch (_) { /* 이미 사라진 문서 */ }
+    const s = frameStyles.get(doc);
+    if (s) { s.remove(); frameStyles.delete(doc); }
+  }
+
+  /* iframe 안 문서를 고를 수 있으면 리스너를 걸고, 못 보면 눈을 가린다 */
+  function watchFrame(f) {
+    if (!state.active || !f || f.nodeType !== 1) return;
+    const d = f.localName === 'embed' ? null : frameDoc(f);
+    if (d) { unblind(f); attachDoc(d); }
+    else blind(f);
+  }
+
+  function onFrameLoad(e) {
+    const f = e.target;
+    if (f && f.nodeType === 1 && f.matches(FRAME_TAGS)) watchFrame(f);
+  }
+
+  function frameDoc(f) {
+    try {
+      const d = f.contentDocument;
+      return d && d.documentElement ? d : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function isFrameEl(el) {
+    return el.localName === 'iframe' || el.localName === 'frame' || el.localName === 'object';
+  }
+
+  function blind(f) {
+    if (blinded.has(f)) return;
+    blinded.set(f, {
+      value: f.style.getPropertyValue('pointer-events'),
+      priority: f.style.getPropertyPriority('pointer-events')
+    });
+    f.style.setProperty('pointer-events', 'none', 'important');
+  }
+
+  function unblind(f) {
+    const prev = blinded.get(f);
+    if (!prev) return;
+    blinded.delete(f);
+    if (prev.value) f.style.setProperty('pointer-events', prev.value, prev.priority);
+    else f.style.removeProperty('pointer-events');
+    tidyStyle(f);
+  }
+
+  function unblindAll() {
+    for (const f of [...blinded.keys()]) unblind(f);
+  }
+
+  /* ============================================================ 좌표
+   * 모든 좌표는 "최상위 화면 좌표"(최상위 문서의 viewport 기준 CSS px)로 다룬다.
+   * iframe 안 요소는 그 iframe 의 내용 영역 위치를 더해 바꾼다.
+   */
+
+  function styleOf(el) {
+    const v = el.ownerDocument && el.ownerDocument.defaultView;
+    return (v || window).getComputedStyle(el);
+  }
+
+  function frameOf(doc) {
+    try {
+      return (doc && doc !== document && doc.defaultView && doc.defaultView.frameElement) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /* iframe 의 내용 영역 — 안쪽 문서의 화면 — 을 iframe 이 속한 문서의 화면 좌표로 */
+  function contentBox(f) {
+    const r = f.getBoundingClientRect();
+    const cs = styleOf(f);
+    const pl = parseFloat(cs.paddingLeft) || 0;
+    const pt = parseFloat(cs.paddingTop) || 0;
+    const pr = parseFloat(cs.paddingRight) || 0;
+    const pb = parseFloat(cs.paddingBottom) || 0;
+    return {
+      x: r.left + f.clientLeft + pl,
+      y: r.top + f.clientTop + pt,
+      w: Math.max(0, f.clientWidth - pl - pr),
+      h: Math.max(0, f.clientHeight - pt - pb)
+    };
+  }
+
+  /* 문서 doc 의 화면 원점이 최상위 화면 좌표로 어디인지 */
+  function docOffset(doc) {
+    let x = 0;
+    let y = 0;
+    for (let d = doc, i = 0; d && d !== document && i < 16; i++) {
+      const f = frameOf(d);
+      if (!f) break;
+      const b = contentBox(f);
+      x += b.x;
+      y += b.y;
+      d = f.ownerDocument;
+    }
+    return { x, y };
+  }
+
+  function viewSize(doc) {
+    const e = doc.compatMode === 'BackCompat' ? doc.body : doc.documentElement;
+    const w = e ? e.clientWidth : 0;
+    const h = e ? e.clientHeight : 0;
+    const v = doc.defaultView;
+    return { w: w || (v ? v.innerWidth : 0), h: h || (v ? v.innerHeight : 0) };
+  }
+
+  function rectOf(el) {
+    const r = el.getBoundingClientRect();
+    const o = docOffset(el.ownerDocument);
+    return { x: r.left + o.x, y: r.top + o.y, w: r.width, h: r.height };
+  }
+
+  /* 이벤트 좌표를 최상위 화면 좌표로 */
+  function pt(e) {
+    const doc = (e.view && e.view.document) || (e.target && e.target.ownerDocument) || document;
+    if (doc === document) return { x: e.clientX, y: e.clientY };
+    const o = docOffset(doc);
+    return { x: e.clientX + o.x, y: e.clientY + o.y };
+  }
+
+  function intersect(a, b, cx, cy) {
+    let x0 = a.x, y0 = a.y, x1 = a.x + a.w, y1 = a.y + a.h;
+    if (cx) { x0 = Math.max(x0, b.x); x1 = Math.min(x1, b.x + b.w); }
+    if (cy) { y0 = Math.max(y0, b.y); y1 = Math.min(y1, b.y + b.h); }
+    if (x1 - x0 <= 0 || y1 - y0 <= 0) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  /* box 를 실제로 보이는 부분만 남게 자른다.
+     el 의 조상 중 overflow 가 visible 이 아닌 것과, 문서마다 그 화면(iframe 내용 영역)으로 자른다.
+     position 이 fixed·absolute 인 것을 만나면 그 위 조상은 따지지 않는다.
+     어느 조상이 정말 자르는지 확실하지 않을 때는 자르지 않는다 — 덜 가리는 쪽으로 틀리면 안 된다. */
+  function clipVisible(el, doc, box) {
+    let r = box;
+    let cur = el;
+    let d = doc;
+    for (let hop = 0; d && hop < 16; hop++) {
+      const off = docOffset(d);
+      if (cur) {
+        const htmlClips = styleOf(d.documentElement).overflowX !== 'visible' ||
+          styleOf(d.documentElement).overflowY !== 'visible';
+        let pos = styleOf(cur).position;
+        let p = parentOf(cur);
+        while (p && p !== d.documentElement) {
+          if (pos === 'fixed' || pos === 'absolute') break;
+          const cs = styleOf(p);
+          const hasBox = cs.display !== 'inline' && cs.display !== 'contents';
+          // body 의 overflow 는 html 이 visible 이면 화면으로 넘어가고 body 자신은 자르지 않는다
+          const passes = p === d.body && !htmlClips;
+          if (hasBox && !passes) {
+            const cx = cs.overflowX !== 'visible';
+            const cy = cs.overflowY !== 'visible';
+            if (cx || cy) {
+              const pr = p.getBoundingClientRect();
+              r = intersect(r, {
+                x: pr.left + p.clientLeft + off.x,
+                y: pr.top + p.clientTop + off.y,
+                w: p.clientWidth,
+                h: p.clientHeight
+              }, cx, cy);
+              if (!r) return null;
+            }
+          }
+          if (cs.display !== 'contents') pos = cs.position;
+          p = parentOf(p);
+        }
+      }
+      const vs = viewSize(d);
+      r = intersect(r, { x: off.x, y: off.y, w: vs.w, h: vs.h }, true, true);
+      if (!r) return null;
+      const f = frameOf(d);
+      if (!f) break;
+      cur = f;
+      d = f.ownerDocument;
+    }
+    return r;
   }
 
   /* ============================================================ 도구 전환 */
@@ -462,10 +744,71 @@
 
   /* ============================================================ 후보 고르기 */
 
+  /* 최상위 화면 좌표 (x, y) 아래에 실제로 보이는 가장 깊은 요소와, 그 요소가 속한 문서·문서 안 좌표.
+     shadow DOM(open·closed)과 같은 출처 iframe 안까지 내려간다. */
+  function probe(x, y) {
+    let doc = document;
+    let lx = x;
+    let ly = y;
+    let el = null;
+    for (let depth = 0; depth < 8; depth++) {
+      el = doc.elementFromPoint(lx, ly);
+      if (!el || el === host) return { el: null, doc, x: lx, y: ly };
+      el = blindedAt(doc, lx, ly, el) || el;
+      for (let i = 0; i < 32; i++) {
+        const sr = shadowOf(el);
+        if (!sr) break;
+        const inner = sr.elementFromPoint(lx, ly);
+        if (!inner || inner === el) break;
+        el = inner;
+      }
+      if (!isFrameEl(el)) break;
+      const d = frameDoc(el);
+      if (!d) break;
+      const b = contentBox(el);
+      if (lx < b.x || ly < b.y || lx >= b.x + b.w || ly >= b.y + b.h) break; // 테두리를 맞혔다
+      const inner = d.elementFromPoint(lx - b.x, ly - b.y);
+      if (!inner || isRoot(inner)) break; // 안이 비어 있으면 iframe 자체를 고른다
+      doc = d;
+      lx -= b.x;
+      ly -= b.y;
+    }
+    return { el, doc, x: lx, y: ly };
+  }
+
+  function hitAt(x, y) {
+    return probe(x, y).el;
+  }
+
+  function shadowOf(el) {
+    if (el === host) return null;
+    if (el.shadowRoot) return el.shadowRoot;
+    try {
+      return (chrome.dom && chrome.dom.openOrClosedShadowRoot)
+        ? chrome.dom.openOrClosedShadowRoot(el) || null
+        : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /* pointer-events 를 끈 다른 출처 iframe 은 elementFromPoint 에 잡히지 않는다.
+     좌표가 그 iframe 안이고, 맞은 요소가 iframe 을 품고 있으면(= iframe 이 그 위에 그려져 있으면) iframe 을 고른다. */
+  function blindedAt(doc, x, y, top) {
+    let best = null;
+    for (const f of blinded.keys()) {
+      if (f.ownerDocument !== doc || !f.isConnected) continue;
+      const r = f.getBoundingClientRect();
+      if (x < r.left || y < r.top || x >= r.right || y >= r.bottom) continue;
+      if (top !== f && !isRoot(top) && !top.contains(f)) continue;
+      best = f;
+    }
+    return best;
+  }
+
   function pickAt(x, y) {
-    const el = document.elementFromPoint(x, y);
-    if (!el || el === host) return null;
-    if (el === document.body || el === document.documentElement) return null;
+    const el = hitAt(x, y);
+    if (!usable(el)) return null;
     return escalate(el);
   }
 
@@ -473,14 +816,40 @@
   function escalate(el) {
     let cur = el;
     for (let i = 0; i < MAX_ESCALATE; i++) {
-      const p = cur.parentElement;
-      if (!p || p === document.body || p === document.documentElement) break;
+      const p = parentOf(cur);
+      if (!p || isRoot(p)) break;
       const a = areaOf(cur);
       const pa = areaOf(p);
       if (pa > 0 && a / pa >= AREA_RATIO) cur = p;
       else break;
     }
     return cur;
+  }
+
+  /* shadow root 의 맨 위 요소는 parentElement 가 없다. 그 위는 호스트다. */
+  function parentOf(el) {
+    if (el.parentElement) return el.parentElement;
+    const r = el.parentNode;
+    return r && r.nodeType === 11 && r.host ? r.host : null;
+  }
+
+  /* ↑ 키로 올라갈 때: iframe 안 맨 위 요소의 위는 그 iframe 이다 */
+  function upOf(el) {
+    const p = parentOf(el);
+    if (p && !isRoot(p)) return p;
+    return frameOf(el.ownerDocument);
+  }
+
+  function containsDeep(anc, el) {
+    for (let cur = el, i = 0; cur && i < 256; cur = parentOf(cur), i++) {
+      if (cur === anc) return true;
+    }
+    return false;
+  }
+
+  function isRoot(el) {
+    const d = el.ownerDocument;
+    return !d || el === d.documentElement || el === d.body;
   }
 
   function areaOf(el) {
@@ -506,22 +875,22 @@
       ui.tag.style.display = 'none';
       return;
     }
-    const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) {
+    const r = rectOf(el);
+    if (r.w <= 0 || r.h <= 0) {
       ui.hl.style.display = 'none';
       ui.tag.style.display = 'none';
       return;
     }
     ui.hl.style.display = 'block';
-    ui.hl.style.left = r.left + 'px';
-    ui.hl.style.top = r.top + 'px';
-    ui.hl.style.width = r.width + 'px';
-    ui.hl.style.height = r.height + 'px';
+    ui.hl.style.left = r.x + 'px';
+    ui.hl.style.top = r.y + 'px';
+    ui.hl.style.width = r.w + 'px';
+    ui.hl.style.height = r.h + 'px';
 
     ui.tag.style.display = 'block';
-    ui.tag.style.left = Math.max(2, r.left) + 'px';
-    ui.tag.style.top = Math.max(16, r.top) + 'px';
-    ui.tag.textContent = `${label(el)}  ${Math.round(r.width)}×${Math.round(r.height)}`;
+    ui.tag.style.left = Math.max(2, r.x) + 'px';
+    ui.tag.style.top = Math.max(16, r.y) + 'px';
+    ui.tag.textContent = `${label(el)}  ${Math.round(r.w)}×${Math.round(r.h)}`;
   }
 
   function layoutHandles() {
@@ -531,9 +900,9 @@
       ui.handles.forEach((h) => { h.style.display = 'none'; });
       return;
     }
-    const r = el.getBoundingClientRect();
-    const px = { w: r.left, e: r.right, n: r.top, s: r.bottom };
-    const mid = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    const r = rectOf(el);
+    const px = { w: r.x, e: r.x + r.w, n: r.y, s: r.y + r.h };
+    const mid = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
     ui.handles.forEach((h) => {
       const d = h.dataset.dir;
       const x = d.includes('w') ? px.w : d.includes('e') ? px.e : mid.x;
@@ -558,7 +927,7 @@
   function hideEl(el) {
     if (!usable(el)) return;
 
-    const pos = getComputedStyle(el).position;
+    const pos = styleOf(el).position;
     const outOfFlow = pos === 'fixed' || pos === 'sticky' || pos === 'absolute';
     const removeSpace = state.forceRemove || outOfFlow;
     const restore = snapStyle(el);
@@ -586,23 +955,23 @@
     el.style.setProperty('transform', `translate(${Math.round(tx)}px, ${Math.round(ty)}px)`, 'important');
   }
 
-  function startMove(e) {
+  function startMove(p) {
     const el = state.candidate;
     if (!usable(el)) return;
     const o = getOffset(el);
     state.drag = {
       kind: 'move', el,
-      x0: e.clientX, y0: e.clientY,
+      x0: p.x, y0: p.y,
       tx0: o.tx, ty0: o.ty,
       restore: snapStyle(el),
       moved: false
     };
   }
 
-  function updateMove(e) {
+  function updateMove(p) {
     const d = state.drag;
-    const dx = e.clientX - d.x0;
-    const dy = e.clientY - d.y0;
+    const dx = p.x - d.x0;
+    const dy = p.y - d.y0;
     if (Math.abs(dx) > 2 || Math.abs(dy) > 2) d.moved = true;
     setOffset(d.el, d.tx0 + dx, d.ty0 + dy);
     reposition();
@@ -620,14 +989,14 @@
 
   /* ============================================================ 3 크기 */
 
-  function startResize(e, dir) {
+  function startResize(p, dir) {
     const el = state.candidate;
     if (!usable(el)) return;
     const r = el.getBoundingClientRect();
     const o = getOffset(el);
     state.drag = {
       kind: 'resize', el, dir,
-      x0: e.clientX, y0: e.clientY,
+      x0: p.x, y0: p.y,
       w0: r.width, h0: r.height,
       tx0: o.tx, ty0: o.ty,
       ratio: r.height > 0 ? r.width / r.height : 1,
@@ -636,10 +1005,10 @@
     };
   }
 
-  function updateResize(e) {
+  function updateResize(p, shiftKey) {
     const d = state.drag;
-    let dw = e.clientX - d.x0;
-    let dh = e.clientY - d.y0;
+    let dw = p.x - d.x0;
+    let dh = p.y - d.y0;
     if (d.dir.includes('w')) dw = -dw;
     if (d.dir.includes('n')) dh = -dh;
     if (!d.dir.includes('e') && !d.dir.includes('w')) dw = 0;
@@ -648,7 +1017,7 @@
 
     let w = Math.max(8, d.w0 + dw);
     let h = Math.max(8, d.h0 + dh);
-    if (e.shiftKey && d.ratio > 0) {
+    if (shiftKey && d.ratio > 0) {
       if (dw !== 0) h = w / d.ratio;
       else w = h * d.ratio;
     }
@@ -661,6 +1030,15 @@
     reposition();
   }
 
+  /* 레이아웃상의 부모. shadow DOM 의 slot 과 display:contents 를 건너뛴다. */
+  function layoutParent(el) {
+    let p = el.assignedSlot || parentOf(el);
+    for (let i = 0; p && i < 32 && styleOf(p).display === 'contents'; i++) {
+      p = p.assignedSlot || parentOf(p);
+    }
+    return p;
+  }
+
   function applySize(el, w, h) {
     el.style.setProperty('width', Math.round(w) + 'px', 'important');
     el.style.setProperty('height', Math.round(h) + 'px', 'important');
@@ -669,8 +1047,8 @@
     el.style.setProperty('min-width', '0', 'important');
     el.style.setProperty('min-height', '0', 'important');
 
-    const parent = el.parentElement;
-    const pd = parent ? getComputedStyle(parent).display : '';
+    const parent = layoutParent(el);
+    const pd = parent ? styleOf(parent).display : '';
     if (pd === 'flex' || pd === 'inline-flex') el.style.setProperty('flex', '0 0 auto', 'important');
     if (pd === 'grid' || pd === 'inline-grid') el.style.setProperty('grid-area', 'auto', 'important');
 
@@ -692,13 +1070,44 @@
 
   /* ============================================================ 4 텍스트 */
 
+  /* 커서 위치. shadow DOM 안이면 그 shadow root 들을 넘겨야 안쪽 위치를 돌려준다(Chrome 128+).
+     그렇지 않으면 caretRangeFromPoint 는 호스트 바깥 위치를 돌려준다. */
+  function caretAt(doc, x, y, deep) {
+    const roots = [];
+    for (let n = deep, i = 0; n && i < 32; i++) {
+      const r = n.getRootNode();
+      if (!r || !r.host) break;
+      roots.push(r);
+      n = r.host;
+    }
+    if (roots.length && typeof doc.caretPositionFromPoint === 'function') {
+      try {
+        const p = doc.caretPositionFromPoint(x, y, { shadowRoots: roots });
+        if (p && p.offsetNode && p.offsetNode.nodeType === 3) {
+          const range = doc.createRange();
+          range.setStart(p.offsetNode, p.offset);
+          range.collapse(true);
+          return range;
+        }
+      } catch (_) { /* 옛 브라우저 */ }
+    }
+    try {
+      return doc.caretRangeFromPoint ? doc.caretRangeFromPoint(x, y) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function startTextEdit(x, y) {
+    const spot = probe(x, y);
+    let range = caretAt(spot.doc, spot.x, spot.y, spot.el);
     let target = null;
-    const range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
     if (range && range.startContainer && range.startContainer.nodeType === 3) {
       target = range.startContainer.parentElement;
     }
-    if (!target) target = pickAt(x, y);
+    // shadow DOM 안의 글자를 눌렀는데 위치를 못 받았으면, 맞은 요소를 그대로 쓴다
+    if (!target && spot.el && spot.el.getRootNode() !== spot.el.ownerDocument) target = spot.el;
+    if (!target) { target = pickAt(x, y); range = null; }
     if (!usable(target)) return;
 
     endTextEdit();
@@ -707,6 +1116,7 @@
     state.editSnapshot = {
       el: target,
       html: target.innerHTML,
+      tree: snapTree(target),
       ce: target.getAttribute('contenteditable'),
       spell: target.getAttribute('spellcheck')
     };
@@ -716,7 +1126,7 @@
     try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); }
 
     if (range) {
-      const sel = window.getSelection();
+      const sel = target.ownerDocument.getSelection();
       if (sel) { sel.removeAllRanges(); sel.addRange(range); }
     }
 
@@ -730,7 +1140,7 @@
     state.editSnapshot = null;
     if (!snap) return;
 
-    const { el, html, ce, spell } = snap;
+    const { el, html, tree, ce, spell } = snap;
     const changed = el.innerHTML !== html;
 
     if (ce === null) el.removeAttribute('contenteditable');
@@ -741,27 +1151,66 @@
 
     if (!changed) return;
     push('text', el, () => {
-      el.innerHTML = html;
+      restoreTree(tree);
       if (ce === null) el.removeAttribute('contenteditable');
       else el.setAttribute('contenteditable', ce);
     });
   }
 
-  /* ============================================================ 5 가리기 */
+  /* 편집 전의 자식 노드 목록과 글자 값을 노드 객체째 기억한다.
+     innerHTML 을 다시 넣으면 하위 노드가 새 객체로 바뀌어 이벤트 리스너와
+     React 같은 프레임워크가 쥔 참조가 끊긴다. */
+  function snapTree(top) {
+    const kids = [];   // [요소, 원래 자식 노드들]
+    const texts = [];  // [글자·주석 노드, 원래 값]
+    const stack = [top];
+    while (stack.length) {
+      const node = stack.pop();
+      const list = Array.from(node.childNodes);
+      kids.push([node, list]);
+      for (const c of list) {
+        if (c.nodeType === 1) stack.push(c);
+        else if (c.nodeType === 3 || c.nodeType === 4 || c.nodeType === 8) texts.push([c, c.data]);
+      }
+    }
+    return { kids, texts };
+  }
 
-  function addMask(docRect) {
-    const el = document.createElement('div');
-    el.className = 'mask';
-    ui.masks.appendChild(el);
+  function restoreTree(tree) {
+    for (const [node, list] of tree.kids) {
+      const now = node.childNodes;
+      const same = now.length === list.length && list.every((c, i) => now[i] === c);
+      if (!same) node.replaceChildren(...list);
+    }
+    for (const [node, data] of tree.texts) {
+      if (node.data !== data) node.data = data;
+    }
+  }
 
-    const m = { ...docRect, el };
+  /* ============================================================ 5 가리기
+   * 박스는 페이지 좌표에 고정하지 않고 기준을 따라간다.
+   *   요소를 가린 박스 — 그 요소의 지금 위치와 크기. 고정·sticky 요소, 내부 스크롤,
+   *                    빈자리 제거로 밀린 레이아웃, 이동·크기 도구를 모두 따라간다.
+   *   영역을 가린 박스 — 영역을 통째로 품는 가장 안쪽 요소에 붙는다(스크롤 영역이면 그 내용에).
+   *                    그런 요소가 없으면 문서 좌표.
+   * 스크롤 영역 밖으로 나간 부분은 잘라서 그린다. 요소가 접혀(display:none) 보이지 않으면 숨기고,
+   * 페이지가 요소를 DOM 에서 떼어 내면 마지막 위치(문서 좌표)에 남긴다.
+   * 캡처할 때는 이 사각형을 service worker 로 보내 PNG 에 한 번 더 직접 칠한다.
+   */
+
+  function addMask(anchor, size) {
+    const box = document.createElement('div');
+    box.className = 'mask';
+    ui.masks.appendChild(box);
+
+    const m = { box, anchor, size, view: null, last: null };
     state.masks.push(m);
     layoutMasks();
 
     push('mask', null, () => {
       const i = state.masks.indexOf(m);
       if (i >= 0) state.masks.splice(i, 1);
-      m.el.remove();
+      m.box.remove();
     });
   }
 
@@ -770,31 +1219,132 @@
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
     setCandidate(null);
-    addMask({
-      x: r.left + window.scrollX,
-      y: r.top + window.scrollY,
-      w: r.width,
-      h: r.height
-    });
+    addMask({ el }, null);
   }
 
+  /* 스크롤 영역이면 내용이 움직이므로 박스도 스크롤 위치를 따라가야 한다 */
+  function scrolls(el) {
+    const cs = styleOf(el);
+    return cs.overflowX !== 'visible' || cs.overflowY !== 'visible';
+  }
 
-  function startMarquee(e) {
+  function originOf(el) {
+    const r = rectOf(el);
+    if (!scrolls(el)) return { x: r.x, y: r.y };
+    return {
+      x: r.x + el.clientLeft - el.scrollLeft,
+      y: r.y + el.clientTop - el.scrollTop
+    };
+  }
+
+  /* 영역(최상위 화면 좌표)을 통째로 품는 가장 안쪽 요소를 기준으로 삼는다 */
+  function regionAnchor(rect) {
+    const spot = probe(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    let el = spot.el;
+    for (let i = 0; el && i < 128; i++) {
+      if (isRoot(el)) {
+        // iframe 문서의 맨 위까지 왔다. 영역이 그 iframe 화면 안이면 그 문서 좌표에 붙인다.
+        const d = el.ownerDocument;
+        const f = frameOf(d);
+        if (!f) break;
+        const o = docOffset(d);
+        const vs = viewSize(d);
+        if (rect.x >= o.x - 0.5 && rect.y >= o.y - 0.5 &&
+            rect.x + rect.w <= o.x + vs.w + 0.5 && rect.y + rect.h <= o.y + vs.h + 0.5) {
+          return docAnchor(d, rect);
+        }
+        el = f;
+        continue;
+      }
+      const r = rectOf(el);
+      if (r.x <= rect.x + 0.5 && r.y <= rect.y + 0.5 &&
+          r.x + r.w >= rect.x + rect.w - 0.5 && r.y + r.h >= rect.y + rect.h - 0.5) {
+        const o = originOf(el);
+        return { el, dx: rect.x - o.x, dy: rect.y - o.y };
+      }
+      el = upOf(el);
+    }
+    return docAnchor(document, rect);
+  }
+
+  function docAnchor(doc, rect) {
+    const win = doc.defaultView || window;
+    const o = docOffset(doc);
+    return { doc, x: rect.x - o.x + win.scrollX, y: rect.y - o.y + win.scrollY };
+  }
+
+  /* 기준이 사라졌으면 마지막으로 그린 자리를 최상위 문서 좌표로 붙든다 */
+  function pinToDocument(m) {
+    const v = m.last;
+    m.anchor = v
+      ? { doc: document, x: v.x + window.scrollX, y: v.y + window.scrollY }
+      : { doc: document, x: -1e6, y: -1e6 };
+    m.size = v ? { w: v.w, h: v.h } : { w: 0, h: 0 };
+  }
+
+  /* 박스가 지금 그려질 자리(최상위 화면 좌표). 보이는 부분이 없으면 null. */
+  function maskRect(m) {
+    const a = m.anchor;
+    if (a.el) {
+      const el = a.el;
+      if (!el.isConnected || !el.ownerDocument.defaultView) {
+        pinToDocument(m);
+        return maskRect(m);
+      }
+      let box;
+      let self = null; // 기준이 스크롤 영역이면 그 영역 밖으로 나간 부분도 잘라야 한다
+      if (m.size) {
+        const r = rectOf(el);
+        if (r.w <= 0 || r.h <= 0) return null; // 기준 요소가 접혔다
+        const o = originOf(el);
+        box = { x: o.x + a.dx, y: o.y + a.dy, w: m.size.w, h: m.size.h };
+        if (scrolls(el)) {
+          const cs = styleOf(el);
+          self = {
+            rect: { x: r.x + el.clientLeft, y: r.y + el.clientTop, w: el.clientWidth, h: el.clientHeight },
+            cx: cs.overflowX !== 'visible',
+            cy: cs.overflowY !== 'visible'
+          };
+        }
+      } else {
+        box = rectOf(el);
+        if (box.w <= 0 || box.h <= 0) return null; // 지워졌거나 접혔다
+      }
+      m.last = box;
+      if (self) {
+        box = intersect(box, self.rect, self.cx, self.cy);
+        if (!box) return null;
+      }
+      return clipVisible(el, el.ownerDocument, box);
+    }
+    const win = a.doc.defaultView;
+    if (!win) {
+      pinToDocument(m);
+      return maskRect(m);
+    }
+    const o = docOffset(a.doc);
+    const box = { x: a.x - win.scrollX + o.x, y: a.y - win.scrollY + o.y, w: m.size.w, h: m.size.h };
+    if (box.w <= 0 || box.h <= 0) return null;
+    m.last = box;
+    return clipVisible(null, a.doc, box);
+  }
+
+  function startMarquee(p) {
     state.drag = {
       kind: 'marquee',
-      x0: e.clientX, y0: e.clientY,
+      x0: p.x, y0: p.y,
       moved: false
     };
     ui.marquee.style.display = 'block';
-    updateMarquee(e);
+    updateMarquee(p);
   }
 
-  function updateMarquee(e) {
+  function updateMarquee(p) {
     const d = state.drag;
-    const x = Math.min(d.x0, e.clientX);
-    const y = Math.min(d.y0, e.clientY);
-    const w = Math.abs(e.clientX - d.x0);
-    const h = Math.abs(e.clientY - d.y0);
+    const x = Math.min(d.x0, p.x);
+    const y = Math.min(d.y0, p.y);
+    const w = Math.abs(p.x - d.x0);
+    const h = Math.abs(p.y - d.y0);
     if (w > 3 || h > 3) d.moved = true;
     Object.assign(ui.marquee.style, {
       left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px'
@@ -805,33 +1355,29 @@
   function endMarquee(d) {
     ui.marquee.style.display = 'none';
     if (d.moved && d.rect && d.rect.w > 4 && d.rect.h > 4) {
-      addMask({
-        x: d.rect.x + window.scrollX,
-        y: d.rect.y + window.scrollY,
-        w: d.rect.w,
-        h: d.rect.h
-      });
+      addMask(regionAnchor(d.rect), { w: d.rect.w, h: d.rect.h });
     }
   }
 
   function layoutMasks() {
-    const sx = window.scrollX;
-    const sy = window.scrollY;
     for (const m of state.masks) {
-      Object.assign(m.el.style, {
-        left: (m.x - sx) + 'px',
-        top: (m.y - sy) + 'px',
-        width: m.w + 'px',
-        height: m.h + 'px'
-      });
+      let r = null;
+      try { r = maskRect(m); } catch (_) { r = m.view; } // 계산이 깨지면 직전 자리를 지킨다
+      m.view = r;
+      const s = m.box.style;
+      if (!r) { s.display = 'none'; continue; }
+      s.display = 'block';
+      s.left = r.x + 'px';
+      s.top = r.y + 'px';
+      s.width = r.w + 'px';
+      s.height = r.h + 'px';
     }
   }
 
   /* ============================================================ 이벤트 */
 
   function usable(el) {
-    return !!el && el.isConnected && el !== host &&
-      el !== document.body && el !== document.documentElement;
+    return !!el && el.nodeType === 1 && el.isConnected && el !== host && !isRoot(el);
   }
 
   function inOurUI(e) {
@@ -839,8 +1385,14 @@
   }
 
   function inEditing(e) {
-    if (!state.editing || typeof e.composedPath !== 'function') return false;
-    return e.composedPath().includes(state.editing);
+    const ed = state.editing;
+    if (!ed) return false;
+    if (typeof e.composedPath === 'function' && e.composedPath().includes(ed)) return true;
+    // closed shadow DOM 안은 composedPath 에 보이지 않는다 — 좌표로 확인한다
+    if (typeof e.clientX !== 'number') return false;
+    const p = pt(e);
+    const hit = hitAt(p.x, p.y);
+    return !!hit && containsDeep(ed, hit);
   }
 
   function block(e) {
@@ -850,18 +1402,20 @@
   }
 
   function onPointerMove(e) {
+    const p = pt(e);
     if (state.drag) {
       block(e);
-      if (state.drag.kind === 'move') updateMove(e);
-      else if (state.drag.kind === 'resize') updateResize(e);
-      else if (state.drag.kind === 'marquee') updateMarquee(e);
+      if (state.drag.kind === 'move') updateMove(p);
+      else if (state.drag.kind === 'resize') updateResize(p, e.shiftKey);
+      else if (state.drag.kind === 'marquee') updateMarquee(p);
       return;
     }
     if (inOurUI(e)) return;
-    state.pointer.x = e.clientX;
-    state.pointer.y = e.clientY;
+    state.pointer.x = p.x;
+    state.pointer.y = p.y;
     if (state.busy || state.editing) return;
-    setCandidate(pickAt(e.clientX, e.clientY));
+    if (!host.isConnected) mountHost();
+    setCandidate(pickAt(p.x, p.y));
   }
 
   function onPointerDown(e) {
@@ -869,9 +1423,10 @@
     if (state.busy) { block(e); return; }
     block(e);
 
-    if (state.tool === 'move') startMove(e);
-    else if (state.tool === 'mask' && e.shiftKey) startMarquee(e);
-    else if (state.tool === 'mask' && !state.candidate) startMarquee(e);
+    const p = pt(e);
+    if (state.tool === 'move') startMove(p);
+    else if (state.tool === 'mask' && e.shiftKey) startMarquee(p);
+    else if (state.tool === 'mask' && !state.candidate) startMarquee(p);
   }
 
   function onPointerUp(e) {
@@ -895,9 +1450,10 @@
 
     if (e.type !== 'click' || state.busy || state.justDragged) return;
 
-    if (state.tool === 'hide') hideEl(state.candidate || pickAt(e.clientX, e.clientY));
-    else if (state.tool === 'text') startTextEdit(e.clientX, e.clientY);
-    else if (state.tool === 'mask') maskElement(state.candidate || pickAt(e.clientX, e.clientY));
+    const p = pt(e);
+    if (state.tool === 'hide') hideEl(state.candidate || pickAt(p.x, p.y));
+    else if (state.tool === 'text') startTextEdit(p.x, p.y);
+    else if (state.tool === 'mask') maskElement(state.candidate || pickAt(p.x, p.y));
   }
 
   function onKey(e) {
@@ -946,8 +1502,8 @@
 
     // 지우기 · 텍스트 · 가리기에서는 선택 범위를 오르내린다
     if (e.key === 'ArrowUp') {
-      const p = state.candidate && state.candidate.parentElement;
-      if (p && p !== document.body && p !== document.documentElement) setCandidate(p);
+      const p = state.candidate && upOf(state.candidate);
+      if (p) setCandidate(p);
     } else if (e.key === 'ArrowDown') {
       descend();
     }
@@ -955,13 +1511,15 @@
 
   /* 커서 아래의 가장 깊은 요소를 향해 한 단계 내려간다. */
   function descend() {
-    const deep = document.elementFromPoint(state.pointer.x, state.pointer.y);
-    if (!deep || deep === host || !state.candidate) return;
-    if (deep === state.candidate) return;
+    const deep = hitAt(state.pointer.x, state.pointer.y);
+    if (!deep || !state.candidate || deep === state.candidate) return;
 
     let cur = deep;
-    while (cur.parentElement && cur.parentElement !== state.candidate) cur = cur.parentElement;
-    if (cur.parentElement === state.candidate) setCandidate(cur);
+    for (let i = 0; cur && i < 256; i++) {
+      const up = upOf(cur);
+      if (up === state.candidate) { setCandidate(cur); return; }
+      cur = up;
+    }
   }
 
   /* ============================================================ 캡처 */
@@ -988,9 +1546,22 @@
     setStatus('캡처 중…');
 
     host.classList.add('capturing');
+    mountHost(); // 그사이 열린 dialog·popover 보다 위로
     await uiGone();
 
-    const res = await send({ type: 'CLEANSHOT_CAPTURE', pageUrl: location.href });
+    // 찍기 직전의 가리기 사각형. service worker 가 PNG 에 직접 칠한다.
+    layoutMasks();
+    const masks = state.masks
+      .map((m) => m.view)
+      .filter(Boolean)
+      .map((r) => ({ x: r.x, y: r.y, w: r.w, h: r.h }));
+
+    const res = await send({
+      type: 'CLEANSHOT_CAPTURE',
+      pageUrl: location.href,
+      masks,
+      viewport: { w: window.innerWidth, h: window.innerHeight }
+    });
 
     host.classList.remove('capturing');
     setStatus('');
@@ -998,7 +1569,35 @@
     state.busy = false;
 
     if (res && res.ok) { finish(`저장했습니다 · ${short(res.filename)}`); return; }
+
+    // downloads API 가 실패하면 페이지에서 직접 내려받는다
+    if (res && res.fallback && res.dataUrl) {
+      const err = saveInPage(res.dataUrl, res.filename);
+      if (!err) { finish(`브라우저 다운로드로 저장했습니다 · ${short(res.filename)}`); return; }
+      toast(`캡처 실패 · ${res.error} · 대체 저장도 실패: ${err}`, 4200);
+      return;
+    }
     toast(`캡처 실패 · ${(res && res.error) || '알 수 없는 오류'}`, 3200);
+  }
+
+  /* <a download> 로 내려받는다. 문서에 붙이지 않은 링크라 페이지의 클릭 리스너와
+     선택 모드의 클릭 차단을 거치지 않는다. 폴더는 지정할 수 없어 파일 이름만 쓴다. */
+  function saveInPage(dataUrl, filename) {
+    try {
+      const comma = dataUrl.indexOf(',');
+      const bin = atob(dataUrl.slice(comma + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = short(filename) || 'cleanshot.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return '';
+    } catch (err) {
+      return String((err && err.message) || err);
+    }
   }
 
   function lockBar(on) {
@@ -1046,7 +1645,7 @@
 
   /* ============================================================ 시작 */
 
-  /* 두 번째부터는 40KB 를 다시 컴파일하지 않고 메시지로 토글한다 */
+  /* 두 번째부터는 스크립트를 다시 컴파일하지 않고 메시지로 토글한다 */
   try {
     chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
       if (!msg || msg.type !== 'CLEANSHOT_TOGGLE') return;

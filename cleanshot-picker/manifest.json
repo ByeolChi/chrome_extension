@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CleanShot Picker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "웹페이지의 임시 요소를 클릭으로 지우고 현재 화면을 PNG로 캡처합니다.",
   "permissions": ["activeTab", "scripting", "downloads", "storage", "alarms"],
   "background": {

@@ -92,7 +92,19 @@ const HANDLERS = {
   CLEANSHOT_CAPTURE: async (msg, sender) => {
     const shot = await grab(sender);
     if (!shot.ok) return shot;
-    return save(shot.dataUrl, msg.pageUrl || sender.tab.url);
+
+    // 가리기 박스를 PNG 에 직접 칠한다. 화면의 박스가 다른 요소 아래에 깔렸어도
+    // 저장되는 이미지에는 반드시 남게 하려는 것이다. 칠하지 못하면 저장하지 않는다.
+    let dataUrl = shot.dataUrl;
+    const masks = cleanMasks(msg.masks);
+    if (masks.length) {
+      try {
+        dataUrl = await burnMasks(dataUrl, masks, msg.viewport);
+      } catch (err) {
+        return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 저장하지 않았습니다 (${describe(err)})` };
+      }
+    }
+    return save(dataUrl, msg.pageUrl || sender.tab.url);
   }
 };
 
@@ -133,8 +145,56 @@ async function save(dataUrl, pageUrl) {
     return { ok: true, filename };
   } catch (err) {
     console.warn('[CleanShot] downloads 실패, 폴백 사용:', err);
-    return { ok: false, fallback: true, filename, error: describe(err) };
+    return { ok: false, fallback: true, filename, dataUrl, error: describe(err) };
   }
+}
+
+/* 피커가 보낸 사각형(화면 CSS px) 중 숫자가 온전한 것만 받는다 */
+function cleanMasks(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 2000).filter((m) =>
+    m && [m.x, m.y, m.w, m.h].every(Number.isFinite) && m.w > 0 && m.h > 0
+  );
+}
+
+/* 찍은 PNG 위에 검정 사각형을 칠해 다시 PNG 로 만든다.
+   배율은 이미지 크기 ÷ 화면 크기로 잰다. 고해상도 화면과 페이지 확대가 모두 여기에 들어 있다.
+   경계는 바깥쪽으로 반올림해 반 픽셀도 덜 가리지 않는다. */
+async function burnMasks(dataUrl, masks, viewport) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  try {
+    const vw = viewport && viewport.w > 0 ? viewport.w : bmp.width;
+    const vh = viewport && viewport.h > 0 ? viewport.h : bmp.height;
+    const sx = bmp.width / vw;
+    const sy = bmp.height / vh;
+
+    const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bmp, 0, 0);
+    ctx.fillStyle = '#000';
+    for (const m of masks) {
+      const x0 = Math.max(0, Math.floor(m.x * sx));
+      const y0 = Math.max(0, Math.floor(m.y * sy));
+      const x1 = Math.min(bmp.width, Math.ceil((m.x + m.w) * sx));
+      const y1 = Math.min(bmp.height, Math.ceil((m.y + m.h) * sy));
+      if (x1 > x0 && y1 > y0) ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+    const out = await canvas.convertToBlob({ type: 'image/png' });
+    return blobToDataUrl(out);
+  } finally {
+    bmp.close();
+  }
+}
+
+/* service worker 에는 URL.createObjectURL 이 없어 downloads 에 data URL 로 넘긴다 */
+async function blobToDataUrl(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return `data:${blob.type || 'image/png'};base64,${btoa(bin)}`;
 }
 
 /* ---------------------------------------------------------------- 유틸 */

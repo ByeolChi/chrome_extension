@@ -4,7 +4,7 @@
 
 | 폴더 | 이름 | 버전 | 설명 |
 | --- | --- | --- | --- |
-| [`cleanshot-picker`](./cleanshot-picker) | CleanShot Picker | 1.0.0 | 웹페이지의 임시 요소를 클릭으로 지우고 현재 화면을 PNG로 캡처 |
+| [`cleanshot-picker`](./cleanshot-picker) | CleanShot Picker | 1.0.1 | 웹페이지의 임시 요소를 클릭으로 지우고 현재 화면을 PNG로 캡처 |
 | [`click-guide`](./click-guide) | ClickGuide | 0.1.8 | 클릭·입력 과정을 자동 캡처해 단계별 매뉴얼 생성 |
 | [`jira-weekly-report`](./jira-weekly-report) | Jira 주간보고 생성기 | 1.0.0 | 이번 주 Jira 스프린트 작업·진척률을 주간보고 양식으로 정리 |
 | [`ssoda`](./ssoda) | Ssoda (쏘다) - API Client | 1.3.5 | cURL을 붙여넣어 바로 호출하고 컬렉션으로 저장하는 API 클라이언트 |
