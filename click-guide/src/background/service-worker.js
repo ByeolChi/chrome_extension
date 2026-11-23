@@ -9,6 +9,8 @@ import * as db from '../common/db.js';
 
 const STATE_KEY = 'cg_state';
 const BAR_HIDDEN_KEY = 'cg_barHidden';
+const BAR_POS_KEY = 'cg_barPos';
+const RECORDER_ID = 'cg-recorder';
 const EMPTY_STATE = {
   recording: false, paused: false, sessionId: null,
   stepCount: 0, tabIds: [], windowId: null, lastUrl: '', startedAt: 0
@@ -20,15 +22,76 @@ const EMPTY_STATE = {
 
 let cachedState = null;
 let cachedSettings = null;
+let barCache = null;   // { pos, hidden } — 녹화 바 위치와 숨김 여부
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
-  if (changes.cg_settings) cachedSettings = null;
+  if (changes.cg_settings) {
+    cachedSettings = null;
+    // 녹화 중에 바꾼 설정(가릴 선택자 등)을 바로 대상 탭에 알린다
+    if (cachedState && cachedState.recording) scheduleBroadcast(cachedState);
+  }
+  if (changes[BAR_POS_KEY] || changes[BAR_HIDDEN_KEY]) {
+    barCache = null;
+    notifyBar();
+  }
 });
 
 async function settings() {
   if (!cachedSettings) cachedSettings = await getSettings();
   return cachedSettings;
+}
+
+async function barState() {
+  if (barCache) return barCache;
+  const g = await chrome.storage.local.get([BAR_POS_KEY, BAR_HIDDEN_KEY]);
+  const p = g[BAR_POS_KEY];
+  barCache = {
+    pos: (p && typeof p.nx === 'number' && typeof p.ny === 'number') ? { nx: p.nx, ny: p.ny } : null,
+    hidden: !!g[BAR_HIDDEN_KEY]
+  };
+  return barCache;
+}
+
+/* 콘텐츠 스크립트는 웹페이지와 같은 프로세스에서 돈다. 그래서 설정 전체가 아니라
+ * 콘텐츠 스크립트가 쓰는 값만 골라 보낸다. AI 설정과 API 키는 보내지 않는다. */
+function contentSettings(cfg) {
+  return {
+    recordClicks: !!cfg.recordClicks,
+    recordInputs: !!cfg.recordInputs,
+    maskPasswords: !!cfg.maskPasswords,
+    maskSensitiveValues: !!cfg.maskSensitiveValues,
+    maskValueChars: cfg.maskValueChars | 0,
+    redactSelectors: Array.isArray(cfg.redactSelectors) ? cfg.redactSelectors.slice(0, 50) : []
+  };
+}
+
+/* 콘텐츠 스크립트에 보내는 상태. 녹화 대상 탭인지(isTarget)는 탭마다 여기서 정한다.
+ * 대상이 아닌 탭은 녹화 바를 띄우지 않고, 클릭도 보내지 않는다. */
+async function contentView(tabId, st) {
+  const state = st || await getState();
+  const isTarget = !!(state.recording && tabId != null && (state.tabIds || []).includes(tabId));
+  return {
+    state: { recording: !!state.recording, paused: !!state.paused, stepCount: state.stepCount || 0 },
+    isTarget,
+    settings: isTarget ? contentSettings(await settings()) : null,
+    bar: isTarget ? await barState() : null
+  };
+}
+
+const EXT_ORIGIN = chrome.runtime.getURL('');
+function isExtensionPage(sender) {
+  return !!(sender && sender.id === chrome.runtime.id && typeof sender.url === 'string' && sender.url.startsWith(EXT_ORIGIN));
+}
+
+/* 녹화 바 위치·숨김이 바뀌면(바를 끈 탭, 팝업, 설정 화면 어디서든) 대상 탭에 알린다 */
+async function notifyBar() {
+  const st = await getState();
+  if (!st.recording) return;
+  const bar = await barState();
+  for (const tabId of st.tabIds || []) {
+    try { await chrome.tabs.sendMessage(tabId, { type: 'BAR_CHANGED', bar }); } catch (_) { /* 콘텐츠 스크립트 없음 */ }
+  }
 }
 
 async function getState() {
@@ -63,17 +126,18 @@ function cancelBroadcast() { if (bcTimer) { clearTimeout(bcTimer); bcTimer = nul
 /* 녹화를 끝내면 state.tabIds 가 비므로, 그대로 두면 '종료됐다'는 사실이
  * 정작 바가 떠 있는 탭에 전달되지 않는다. 그래서 대상 탭을 따로 받을 수 있게 한다. */
 async function broadcast(state, targetTabIds) {
-  const cfg = await settings();
   try {
     await chrome.action.setBadgeBackgroundColor({ color: state.paused ? '#ffb020' : '#ff3b30' });
     await chrome.action.setBadgeText({ text: state.recording ? String(state.stepCount || 0) : '' });
   } catch (_) { /* noop */ }
-  const msg = { type: 'STATE_CHANGED', state, settings: cfg };
   const targets = targetTabIds && targetTabIds.length ? targetTabIds : (state.tabIds || []);
   for (const tabId of targets) {
-    try { await chrome.tabs.sendMessage(tabId, msg); } catch (_) { /* 콘텐츠 스크립트 없음 */ }
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: 'STATE_CHANGED', ...(await contentView(tabId, state)) });
+    } catch (_) { /* 콘텐츠 스크립트 없음 */ }
   }
-  try { await chrome.runtime.sendMessage(msg); } catch (_) { /* 팝업 닫힘 */ }
+  // 확장 페이지(팝업)용. 콘텐츠 스크립트에는 전달되지 않는다.
+  try { await chrome.runtime.sendMessage({ type: 'STATE_CHANGED', state }); } catch (_) { /* 팝업 닫힘 */ }
 }
 
 /* ------------------------------------------------------------------ */
@@ -227,6 +291,16 @@ async function toggleWidget(tabId, visible) {
   } catch (_) { return false; }
 }
 
+/* 페이지 이동 단계를 찍기 직전: 최상위 프레임에 녹화 바를 숨기게 하고,
+ * 지금 화면에서 가릴 영역(비밀번호 칸, 항상 가릴 선택자 등)과 제목을 받아 온다.
+ * 응답이 없으면 null — 가릴 곳을 모르는 채로 찍지 않는다. */
+async function prepareNavShot(tabId) {
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { type: 'NAV_SHOT_PREP' }, { frameId: 0 });
+    return (r && r.ok) ? r : null;
+  } catch (_) { return null; }
+}
+
 async function processShot(dataUrl, { maxWidth, quality, redactions, viewport }) {
   const srcBlob = await (await fetch(dataUrl)).blob();
   const bmp = await createImageBitmap(srcBlob);
@@ -293,9 +367,26 @@ async function reserveSlot() {
   return { sessionId: slotBook.sessionId, index: slotBook.next++ };
 }
 
+/* 잡아 둔 순번을 쓰지 못하게 됐을 때, 그 뒤로 다른 순번이 나가지 않았으면 되돌린다 */
+function releaseSlot(slot) {
+  if (slot && slotBook && slotBook.sessionId === slot.sessionId && slotBook.next === slot.index + 1) slotBook.next--;
+}
+
+/* 녹화 대상 탭에서 온 촬영 요청인지 메모리에 있는 상태만으로 바로 판단한다.
+ * 순번은 첫 await 전에 잡아야 하는데, 대상이 아닌 탭의 요청에 순번을 주면
+ * 단계 번호가 비고 단계 수가 실제보다 커진다. 상태를 아직 읽지 않았으면 false(나중에 비동기로 확인). */
+function isRecordingTabSync(sender) {
+  const st = cachedState;
+  if (!st || !st.recording || st.paused) return false;
+  return !!(sender && sender.tab && (st.tabIds || []).includes(sender.tab.id));
+}
+
+/* '기록 버리고 중단'한 세션. 늦게 끝난 저장이 지운 세션에 단계를 다시 쓰지 않게 한다. */
+const discarded = new Set();
+
 async function addStep(payload, shot, slot) {
   payload.nrect = stepRects(payload, shot);
-  if (!slot || !slot.sessionId) return null;
+  if (!slot || !slot.sessionId || discarded.has(slot.sessionId)) return null;
   const cfg = await settings();
 
   let shotId = null;
@@ -340,6 +431,10 @@ async function addStep(payload, shot, slot) {
   step.description = d.description;
 
   await db.putStep(step);
+  if (discarded.has(slot.sessionId)) {   // 저장하는 사이에 기록을 버렸다
+    try { await db.deleteStep(step); } catch (_) { /* noop */ }
+    return null;
+  }
   await db.updateSession(slot.sessionId, { stepCount: slot.index + 1 });
   const st = await getState();
   if (st.sessionId === slot.sessionId) {
@@ -389,34 +484,95 @@ async function pingContent(tabId) {
   return false;
 }
 
+/* 녹화 스크립트는 녹화하는 동안에만 등록한다.
+ * 예전에는 manifest 에 넣어 평소에도 모든 페이지에서 돌았고, 페이지를 열 때마다 서비스 워커를 깨웠다. */
+async function registerRecorder() {
+  try {
+    const got = await chrome.scripting.getRegisteredContentScripts({ ids: [RECORDER_ID] });
+    if (got && got.length) return;
+    await chrome.scripting.registerContentScripts([{
+      id: RECORDER_ID,
+      matches: ['<all_urls>'],
+      js: ['src/content/recorder.js'],
+      allFrames: true,
+      runAt: 'document_start',
+      persistAcrossSessions: false
+    }]);
+  } catch (e) {
+    console.warn('[ClickGuide] 녹화 스크립트 등록 실패:', e);
+  }
+}
+
+async function unregisterRecorder() {
+  try { await chrome.scripting.unregisterContentScripts({ ids: [RECORDER_ID] }); } catch (_) { /* 등록되어 있지 않음 */ }
+}
+
+/* 녹화 중에는 대상 탭의 문서가 바뀔 때마다 녹화 스크립트가 들어 있는지 확인한다.
+ * 뒤로 가기로 복원된 페이지(bfcache)는 녹화를 시작하기 전에 읽은 문서라 스크립트가 없을 수 있다.
+ * 평소에는 이 리스너를 떼어 두어 탭이 바뀔 때마다 서비스 워커가 깨어나지 않게 한다. */
+let tabWatchOn = false;
+function onTabUpdated(tabId, changeInfo) {
+  if (changeInfo.status !== 'complete') return;
+  repairContentScript(tabId).catch(() => {});
+}
+function ensureTabWatch() {
+  if (tabWatchOn) return;
+  tabWatchOn = true;
+  chrome.tabs.onUpdated.addListener(onTabUpdated);
+}
+function stopTabWatch() {
+  if (!tabWatchOn) return;
+  tabWatchOn = false;
+  try { chrome.tabs.onUpdated.removeListener(onTabUpdated); } catch (_) { /* noop */ }
+}
+
+async function repairContentScript(tabId) {
+  const st = await getState();
+  if (!st.recording || !(st.tabIds || []).includes(tabId)) return;
+  let tab = null;
+  try { tab = await chrome.tabs.get(tabId); } catch (_) { return; }
+  if (!tab || unrecordableReason(tab)) return;
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { type: 'PING' }, { frameId: 0 });
+    if (r && r.ok) return;
+  } catch (_) { /* 녹화 스크립트가 없다 */ }
+  await ensureContentScript(tabId);
+}
+
 async function startRecording(tab) {
+  // 녹화할 수 없는 탭이면 가이드를 만들기 전에 돌려보낸다 (빈 가이드가 남지 않도록)
+  const early = tab ? unrecordableReason(tab) : '녹화할 탭을 찾지 못했습니다.';
+  if (early) return { session: null, attached: false, reason: early, tab };
+
   const cfg = await settings();
   slotBook = null;
   frameCache = null;
   const session = await db.createSession({
     name: '',
-    startUrl: tab ? tab.url : '',
+    startUrl: tab.url,
     lang: cfg.lang
   });
   await setState({
     ...EMPTY_STATE,
     recording: true, paused: false,
     sessionId: session.id, stepCount: 0,
-    tabIds: tab ? [tab.id] : [], windowId: tab ? tab.windowId : null,
-    lastUrl: tab ? tab.url : '', startedAt: Date.now()
+    tabIds: [tab.id], windowId: tab.windowId,
+    lastUrl: tab.url, startedAt: Date.now()
   });
   slotBook = { sessionId: session.id, next: 0 };
+  await registerRecorder();
+  ensureTabWatch();
 
-  let attached = false;
-  let reason = tab ? unrecordableReason(tab) : '녹화할 탭을 찾지 못했습니다.';
-  if (tab && !reason) {
-    const inj = await ensureContentScript(tab.id);
-    attached = await pingContent(tab.id);
-    if (!attached) {
-      reason = inj.ok
-        ? '이 탭에 녹화 바를 띄우지 못했습니다. 페이지를 새로고침한 뒤 다시 시작해 주세요.'
-        : `이 탭에 접근할 수 없습니다 — ${inj.error}`;
-    }
+  let reason = '';
+  const inj = await ensureContentScript(tab.id);
+  const attached = await pingContent(tab.id);
+  if (!attached) {
+    reason = inj.ok
+      ? '이 탭에 녹화 바를 띄우지 못했습니다. 페이지를 새로고침한 뒤 다시 시작해 주세요.'
+      : `이 탭에 접근할 수 없습니다 — ${inj.error}`;
+    // 바를 띄우지 못했으면 시작하지 않은 것으로 되돌린다 (빈 가이드와 녹화 상태를 남기지 않음)
+    await stopRecording({ openEditor: false, discard: true });
+    return { session: null, attached: false, reason, tab };
   }
 
   const st = await getState();
@@ -424,16 +580,20 @@ async function startRecording(tab) {
   return { session, attached, reason, tab };
 }
 
-async function stopRecording(openEditor = true) {
+/* discard: true 면 이번 녹화를 가이드로 남기지 않고 지운다 ('기록 버리고 중단') */
+async function stopRecording({ openEditor = true, discard = false } = {}) {
   const st = await getState();
   const sessionId = st.sessionId;
   const recordedTabs = [...(st.tabIds || [])];   // 바를 치우라고 알려야 할 탭들
+  if (discard && sessionId) discarded.add(sessionId);
   // 아직 저장 중인 단계가 있으면 기다린다 (마지막 클릭이 유실되지 않도록)
   await Promise.race([captureChain.catch(() => {}), sleep(6000)]);
   await Promise.race([storeChain.catch(() => {}), sleep(6000)]);
   slotBook = null;
   frameCache = null;
-  if (sessionId) {
+  if (sessionId && discard) {
+    try { await db.deleteSession(sessionId); } catch (e) { console.warn('[ClickGuide] 기록 삭제 실패', e); }
+  } else if (sessionId) {
     const steps = await db.getSteps(sessionId);
     const cfg = await settings();
     const ses = await db.getSession(sessionId);
@@ -443,26 +603,48 @@ async function stopRecording(openEditor = true) {
   }
   try { await chrome.storage.local.remove(BAR_HIDDEN_KEY); } catch (_) { /* noop */ }
   await setState({ ...EMPTY_STATE }, { alsoNotify: recordedTabs });
-  if (openEditor && sessionId) {
+  stopTabWatch();
+  await unregisterRecorder();
+  if (openEditor && !discard && sessionId) {
     await chrome.tabs.create({ url: chrome.runtime.getURL(`src/editor/editor.html?session=${sessionId}`) });
   }
-  return sessionId;
+  return discard ? null : sessionId;
 }
 
 /* ------------------------------------------------------------------ */
 /* 메시지 처리                                                          */
 /* ------------------------------------------------------------------ */
 
+/* 콘텐츠 스크립트(웹페이지 쪽)가 보낼 수 있는 메시지. 나머지는 확장 페이지에서만 받는다. */
+const CONTENT_MESSAGES = new Set([
+  'GET_STATE', 'CAPTURE_STEP', 'PAGE_LOADED', 'CORRECT_RECT', 'FRAME_UP', 'REMEASURE',
+  'PAUSE', 'RESUME', 'STOP', 'SET_BAR_HIDDEN', 'SET_BAR_POS'
+]);
+// 녹화 바의 버튼이 보내는 메시지 — 녹화 대상 탭에서 온 것만 받는다
+const BAR_MESSAGES = new Set(['PAUSE', 'RESUME', 'STOP', 'SET_BAR_HIDDEN', 'SET_BAR_POS']);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // 촬영 요청은 도착 순서를 지켜야 하므로 첫 await 전에 순번을 잡는다
-  const preSlot = (msg && msg.type === 'CAPTURE_STEP') ? reserveSlotSync() : null;
+  // 촬영 요청은 도착 순서를 지켜야 하므로 첫 await 전에 순번을 잡는다.
+  // 단, 녹화 대상 탭에서 온 요청일 때만 잡는다.
+  const preSlot = (msg && msg.type === 'CAPTURE_STEP' && isRecordingTabSync(sender)) ? reserveSlotSync() : null;
   (async () => {
     const cfg = await settings();
+    const fromPage = !isExtensionPage(sender);
+    if (fromPage) {
+      if (!msg || !CONTENT_MESSAGES.has(msg.type)) { sendResponse({ ok: false, error: 'not allowed' }); return; }
+      if (BAR_MESSAGES.has(msg.type)) {
+        const st = await getState();
+        if (!st.recording || !sender.tab || !(st.tabIds || []).includes(sender.tab.id)) { sendResponse({ ok: false }); return; }
+      }
+    }
     switch (msg && msg.type) {
 
-      case 'GET_STATE':
-        sendResponse({ state: await getState(), settings: cfg });
+      case 'GET_STATE': {
+        const st = await getState();
+        if (!fromPage) { sendResponse({ state: st }); return; }
+        sendResponse(await contentView(sender.tab ? sender.tab.id : null, st));
         return;
+      }
 
       case 'START': {
         let tab = null;
@@ -481,7 +663,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const r = await startRecording(tab);
         sendResponse({
-          ok: true, sessionId: r.session.id, attached: r.attached,
+          ok: true, sessionId: r.session ? r.session.id : null, attached: r.attached,
           reason: r.reason || '', tabTitle: tab.title || '', tabUrl: tab.url || ''
         });
         return;
@@ -491,16 +673,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'RESUME': await setState({ paused: false }); sendResponse({ ok: true }); return;
 
       case 'STOP': {
-        const id = await stopRecording(msg.openEditor !== false);
-        sendResponse({ ok: true, sessionId: id });
+        // 웹페이지 쪽(녹화 바)에서는 일반 완료만 할 수 있다. 버리기는 팝업에서만.
+        const discard = !fromPage && msg.discard === true;
+        const id = await stopRecording({ openEditor: !discard && msg.openEditor !== false, discard });
+        sendResponse({ ok: true, sessionId: id, discarded: discard });
         return;
       }
 
       case 'CAPTURE_STEP': {
         const st = await getState();
-        if (!st.recording || st.paused) { sendResponse({ ok: false }); return; }
         const tab = sender.tab;
-        if (!tab || !(st.tabIds || []).includes(tab.id)) { sendResponse({ ok: false }); return; }
+        if (!st.recording || st.paused || !tab || !(st.tabIds || []).includes(tab.id)) {
+          releaseSlot(preSlot);
+          sendResponse({ ok: false });
+          return;
+        }
 
         const payload = msg.step || {};
         payload.url = payload.url || (tab && tab.url) || '';
@@ -576,18 +763,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await enqueueCapture(async () => {
           await sleep(400);
           let shot = null;
-          let hidden = false;
+          let prep = null;
+          let shotError = '';
           try {
             const fresh = await chrome.tabs.get(tab.id);
             if (fresh && fresh.active) {
-              hidden = await toggleWidget(tab.id, false);
-              const r = await captureVisible(fresh.windowId, cfg.jpegQuality, fresh.id, { url: msg.url });
-              if (r.dataUrl) shot = await processShot(r.dataUrl, { maxWidth: cfg.maxImageWidth, quality: cfg.jpegQuality, redactions: [] });
+              // 클릭 단계와 같은 가리기를 적용한다. 예전에는 가릴 영역을 빈 목록으로 넘겨
+              // 비밀번호 칸과 '항상 가릴 영역'이 이동 단계 스크린샷에 그대로 남았다.
+              prep = await prepareNavShot(tab.id);
+              if (!prep) {
+                shotError = '페이지에서 가릴 영역을 확인하지 못해 화면을 저장하지 않았습니다.';
+              } else {
+                const r = await captureVisible(fresh.windowId, cfg.jpegQuality, fresh.id, { url: msg.url });
+                if (r.dataUrl) {
+                  shot = await processShot(r.dataUrl, {
+                    maxWidth: cfg.maxImageWidth, quality: cfg.jpegQuality,
+                    redactions: prep.redactions || [], viewport: prep.viewport
+                  });
+                } else shotError = r.error || '';
+              }
+            } else {
+              shotError = '탭이 활성 상태가 아니어서 촬영하지 못했습니다.';
             }
-          } catch (_) { /* noop */ } finally {
-            if (hidden) await toggleWidget(tab.id, true);
+          } catch (e) {
+            shotError = shotError || String((e && e.message) || e);
+          } finally {
+            if (prep && prep.hidden) await toggleWidget(tab.id, true);
           }
-          await addStep({ type: 'navigate', url: msg.url, title: msg.title, ts: Date.now() }, shot, navSlot);
+          await addStep({
+            type: 'navigate', url: msg.url, title: (prep && prep.title) || msg.title, ts: Date.now(), shotError
+          }, shot, navSlot);
         });
         sendResponse({ ok: true });
         return;
@@ -600,6 +805,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      /* 하위 프레임의 클릭·입력·좌표 보정을 부모 프레임으로 올린다.
+       * 예전에는 내용을 window.parent.postMessage(…, '*') 로 보내서 부모 페이지의 스크립트도
+       * iframe 안에서 입력한 값을 읽을 수 있었다. 이제 내용은 서비스 워커를 거쳐 그 탭의 콘텐츠 스크립트에만 전한다.
+       * 부모 프레임은 하위 프레임이 postMessage 로 따로 보낸 일회용 표식(nonce)으로 어느 iframe 인지 찾는다. */
+      case 'FRAME_UP': {
+        const tab = sender.tab;
+        const st = await getState();
+        if (!tab || sender.frameId === 0 || typeof msg.nonce !== 'string'
+            || !st.recording || !(st.tabIds || []).includes(tab.id)) { sendResponse({ ok: false }); return; }
+        sendResponse({ ok: true });
+        chrome.tabs.sendMessage(tab.id, { type: 'FRAME_UP', nonce: msg.nonce, payload: msg.payload || null })
+          .catch(() => {});
+        return;
+      }
+
+      // 클릭한 요소가 하위 프레임에 있을 때, 그 프레임에 촬영 시각의 좌표를 다시 재 달라고 한다
+      case 'REMEASURE': {
+        const tab = sender.tab;
+        const st = await getState();
+        if (!tab || !st.recording || !(st.tabIds || []).includes(tab.id)) { sendResponse({ ok: false }); return; }
+        sendResponse({ ok: true });
+        chrome.tabs.sendMessage(tab.id, { type: 'REMEASURE', clientId: msg.clientId, at: msg.at }).catch(() => {});
+        return;
+      }
+
       case 'SET_BAR_HIDDEN': {
         if (msg.hidden) await chrome.storage.local.set({ [BAR_HIDDEN_KEY]: true });
         else await chrome.storage.local.remove(BAR_HIDDEN_KEY);
@@ -607,24 +837,58 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      case 'SET_BAR_POS': {
+        const p = msg.pos;
+        if (p && typeof p.nx === 'number' && typeof p.ny === 'number') {
+          await chrome.storage.local.set({ [BAR_POS_KEY]: { nx: clamp01(p.nx), ny: clamp01(p.ny) } });
+        } else {
+          await chrome.storage.local.remove(BAR_POS_KEY);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
       case 'SPEED_TEST': {
-        const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        const target = tabs.find((t) => /^https?:/.test(t.url || '')) || tabs[0];
-        if (!target) { sendResponse({ ok: false, error: '측정할 탭을 찾지 못했습니다.' }); return; }
-        if (!/^https?:/.test(target.url || '')) {
-          sendResponse({ ok: false, error: '일반 웹페이지 탭을 열어 둔 상태에서 측정해 주세요. (chrome:// 페이지는 촬영할 수 없습니다)' });
+        // 옵션 페이지에서 누르면 활성 탭이 옵션 페이지 자신이라 예전에는 늘 실패했다.
+        // 같은 창에서 가장 최근에 본 웹페이지 탭으로 잠깐 바꿔 재고, 끝나면 원래 탭으로 돌아온다.
+        const isWeb = (t) => !!t && /^https?:/.test(t.url || '');
+        const origin = sender.tab || null;
+        let target = null;
+        let restoreTabId = null;
+        if (origin) {
+          const same = (await chrome.tabs.query({ windowId: origin.windowId })).filter(isWeb)
+            .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+          if (same.length) {
+            target = same[0];
+            if (!target.active) {
+              await chrome.tabs.update(target.id, { active: true });
+              restoreTabId = origin.id;
+            }
+          } else {
+            target = (await chrome.tabs.query({ active: true })).filter(isWeb)
+              .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0] || null;
+          }
+        } else {
+          target = (await chrome.tabs.query({ active: true, lastFocusedWindow: true })).find(isWeb) || null;
+        }
+        if (!target) {
+          sendResponse({ ok: false, error: '측정할 웹페이지 탭이 없습니다. 이 창에 일반 웹페이지 탭을 하나 열어 둔 뒤 다시 눌러 주세요. (chrome:// 페이지는 촬영할 수 없습니다)' });
           return;
         }
         const times = [];
         let lastUrl = null;
         let err = '';
-        for (let i = 0; i < 5; i++) {
-          await sleep(620);
-          const t0 = Date.now();
-          try {
-            lastUrl = await chrome.tabs.captureVisibleTab(target.windowId, { format: 'jpeg', quality: Math.round(cfg.jpegQuality * 100) });
-            times.push(Date.now() - t0);
-          } catch (e) { err = String(e && e.message || e); }
+        try {
+          for (let i = 0; i < 5; i++) {
+            await sleep(620);
+            const t0 = Date.now();
+            try {
+              lastUrl = await chrome.tabs.captureVisibleTab(target.windowId, { format: 'jpeg', quality: Math.round(cfg.jpegQuality * 100) });
+              times.push(Date.now() - t0);
+            } catch (e) { err = String(e && e.message || e); }
+          }
+        } finally {
+          if (restoreTabId != null) { try { await chrome.tabs.update(restoreTabId, { active: true }); } catch (_) { /* 탭이 닫힘 */ } }
         }
         if (!times.length) { sendResponse({ ok: false, error: err || '촬영에 실패했습니다.' }); return; }
 
@@ -693,17 +957,28 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   const st = await getState();
   if (!st.recording || !(st.tabIds || []).includes(tabId)) return;
   const left = st.tabIds.filter((t) => t !== tabId);
-  if (left.length === 0) await stopRecording(true);
+  if (left.length === 0) await stopRecording({ openEditor: true });
   else await setState({ tabIds: left });
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
   cachedState = null; cachedSettings = null;
   await chrome.storage.local.set({ [STATE_KEY]: { ...EMPTY_STATE } });
+  stopTabWatch();
+  await unregisterRecorder();
   try { await chrome.action.setBadgeText({ text: '' }); } catch (_) { /* noop */ }
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   cachedState = null; cachedSettings = null;
   await chrome.storage.local.set({ [STATE_KEY]: { ...EMPTY_STATE } });
+  stopTabWatch();
+  await unregisterRecorder();
 });
+
+// 녹화 중에 서비스 워커가 다시 떴다면 탭 감시를 이어서 붙인다.
+// (cachedState 는 건드리지 않는다 — onStartup 의 초기화와 엇갈려 옛 상태가 남지 않도록)
+chrome.storage.local.get(STATE_KEY).then((g) => {
+  const s = g && g[STATE_KEY];
+  if (s && s.recording) ensureTabWatch();
+}).catch(() => {});

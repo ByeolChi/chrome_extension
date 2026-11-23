@@ -32,15 +32,38 @@ export const DEFAULT_SETTINGS = {
   }
 };
 
+/* 숫자 설정이 비었거나 범위를 벗어나면 기본값·경계값으로 바로잡는다.
+ * 예전에는 설정에서 '저장 가로 최대' 칸을 비우면 0이 저장되어 스크린샷이 1×1로 줄었다.
+ * emptyIfZero: 0을 '비어 있음'으로 보고 기본값을 쓴다. */
+const NUMERIC = {
+  maxImageWidth: { min: 640, max: 3840, emptyIfZero: true },
+  jpegQuality: { min: 0.5, max: 0.95, emptyIfZero: true },
+  captureDelayMs: { min: 0, max: 2000 },
+  maskValueChars: { min: 0, max: 40 },
+  highlightWidth: { min: 1, max: 10, emptyIfZero: true }
+};
+
+export function normalizeSettings(s) {
+  const out = { ...s };
+  for (const [key, r] of Object.entries(NUMERIC)) {
+    const v = s[key];
+    const n = (v === '' || v === null || v === undefined) ? NaN : Number(v);
+    out[key] = (!Number.isFinite(n) || (r.emptyIfZero && n <= 0))
+      ? DEFAULT_SETTINGS[key]
+      : Math.min(r.max, Math.max(r.min, n));
+  }
+  return out;
+}
+
 export async function getSettings() {
   const got = await chrome.storage.local.get('cg_settings');
   const s = got && got.cg_settings ? got.cg_settings : {};
-  return { ...DEFAULT_SETTINGS, ...s, ai: { ...DEFAULT_SETTINGS.ai, ...(s.ai || {}) } };
+  return normalizeSettings({ ...DEFAULT_SETTINGS, ...s, ai: { ...DEFAULT_SETTINGS.ai, ...(s.ai || {}) } });
 }
 
 export async function setSettings(patch) {
   const cur = await getSettings();
-  const next = { ...cur, ...patch, ai: { ...cur.ai, ...(patch.ai || {}) } };
+  const next = normalizeSettings({ ...cur, ...patch, ai: { ...cur.ai, ...(patch.ai || {}) } });
   await chrome.storage.local.set({ cg_settings: next });
   return next;
 }

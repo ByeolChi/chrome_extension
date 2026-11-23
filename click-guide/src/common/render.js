@@ -182,20 +182,39 @@ function hostOf(url) {
 
 /* ---------------- Markdown ---------------- */
 
+/* 단계 제목·설명에는 웹페이지에서 읽은 글자(버튼 이름 등)가 들어간다.
+ * HTML 내보내기처럼 글자 그대로 보이도록, HTML 태그와 Markdown 문법(링크·강조·코드)을 무력화한다. */
+export function mdInline(s) {
+  return String(s == null ? '' : s)
+    .replace(/\r?\n/g, ' ')
+    .replace(/[\\`*_[\]]/g, '\\$&')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// 여러 줄 글: 줄마다 이스케이프하고, 줄 맨 앞의 제목·목록·구분선 문법도 글자로 남긴다
+export function mdBlock(s) {
+  return String(s == null ? '' : s).split(/\r?\n/).map((line) => {
+    let l = mdInline(line);
+    l = l.replace(/^(\s*)(#|[+-](?=\s|$)|-+\s*$|=+\s*$)/, '$1\\$2');   // # 제목, - / + 목록, ---·=== 구분선과 밑줄
+    l = l.replace(/^(\s*\d+)([.)])(?=\s|$)/, '$1\\$2');          // 1. 번호 목록
+    return l;
+  }).join('\n');
+}
+
 export function buildMarkdown(session, steps, imageNames, opts = {}) {
   const out = [];
-  out.push(`# ${session.name || '사용 가이드'}`);
+  out.push(`# ${mdInline(session.name || '사용 가이드')}`);
   out.push('');
-  out.push(`_${steps.length}단계 · ${formatDate(session.createdAt)}${session.startUrl ? ' · ' + hostOf(session.startUrl) : ''}_`);
-  if (session.description) { out.push(''); out.push(session.description); }
+  out.push(`_${steps.length}단계 · ${formatDate(session.createdAt)}${session.startUrl ? ' · ' + mdInline(hostOf(session.startUrl)) : ''}_`);
+  if (session.description) { out.push(''); out.push(mdBlock(session.description)); }
   out.push('');
   steps.forEach((s, i) => {
-    out.push(`## ${i + 1}. ${s.title || ''}`);
+    out.push(`## ${i + 1}. ${mdInline(s.title || '')}`);
     out.push('');
-    if (s.description) { out.push(s.description); out.push(''); }
-    if (opts.showUrls && s.url) { out.push(`\`${s.url}\``); out.push(''); }
+    if (s.description) { out.push(mdBlock(s.description)); out.push(''); }
+    if (opts.showUrls && s.url) { out.push(mdInline(s.url)); out.push(''); }
     const name = imageNames ? imageNames.get(s.id) : null;
-    if (name) { out.push(`![${(s.title || '단계').replace(/[\[\]]/g, '')}](${name})`); out.push(''); }
+    if (name) { out.push(`![${mdInline((s.title || '단계').replace(/[\[\]]/g, ''))}](${name})`); out.push(''); }
   });
   out.push('---');
   out.push('');
