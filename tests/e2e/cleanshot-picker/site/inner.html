@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; height: 1000px; background: rgb(248, 248, 255); font: 14px sans-serif; }
+  #innerLink { position: absolute; left: 50px; top: 20px; }
+  #innerSecret { position: absolute; left: 50px; top: 100px; width: 200px; height: 40px; background: rgb(255, 0, 0); }
+  #innerText { position: absolute; left: 50px; top: 170px; }
+</style>
+</head>
+<body>
+  <a id="innerLink" href="/nav-target.html">inner link</a>
+  <div id="innerSecret">inner secret</div>
+  <div id="innerText">inner text here</div>
+  <script>
+    window.__innerClicks = 0;
+    document.getElementById('innerLink').addEventListener('click', () => { window.__innerClicks++; });
+  </script>
+</body>
+</html>

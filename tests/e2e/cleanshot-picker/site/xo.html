@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: rgb(255, 255, 0); }
+  a { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+  <a id="xoLink" href="/nav-target.html" target="_self">cross-origin ad</a>
+  <script>
+    document.addEventListener('pointerdown', () => parent.postMessage('xo-click', '*'), true);
+    document.addEventListener('click', () => parent.postMessage('xo-click', '*'), true);
+  </script>
+</body>
+</html>
