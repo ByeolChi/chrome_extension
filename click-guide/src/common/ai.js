@@ -21,15 +21,14 @@ Rules:
 - For masked values (●●●● or "(hidden)"), do not guess the real value.
 - Output ONLY a JSON array, nothing else.`;
 
-function stepPayload(step, i) {
+/* 보내는 것은 설정 화면과 README 에 안내한 범위(단계 제목·설명, 동작 종류, 요소 이름과 종류)뿐이다.
+ * 입력값·페이지 제목·주소는 따로 보내지 않는다. 입력값은 사용자가 고칠 수 있는 설명 문장에 이미 들어 있다. */
+export function stepPayload(step, i) {
   const el = step.el || {};
   return {
     index: i + 1,
     action: step.type,
     element: { role: el.role || '', tag: el.tag || '', type: el.type || '', label: el.label || '' },
-    value: step.masked ? '(가려짐)' : (step.value || ''),
-    page: step.pageTitle || '',
-    url: step.url || '',
     current: { title: step.title || '', description: step.description || '' }
   };
 }

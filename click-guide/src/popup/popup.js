@@ -96,8 +96,8 @@ els.start.addEventListener('click', async () => {
     return;
   }
   if (!res.attached) {
-    // 녹화 바가 뜨지 않는 상황 — 그냥 닫지 않고 이유를 알린다
-    await send({ type: 'STOP', openEditor: false });
+    // 녹화 바가 뜨지 않는 상황 — 그냥 닫지 않고 이유를 알린다.
+    // 이때는 백그라운드가 가이드를 만들지 않거나 만든 것을 지우고 녹화 상태도 되돌린다.
     els.startError.hidden = false;
     els.startError.textContent = res.reason || '이 페이지에서는 녹화 바를 띄울 수 없습니다.';
     return;
@@ -126,7 +126,27 @@ els.toggleBar.addEventListener('click', async () => {
 });
 
 els.stop.addEventListener('click', async () => { await send({ type: 'STOP' }); window.close(); });
-els.cancel.addEventListener('click', async () => { await send({ type: 'STOP', openEditor: false }); window.close(); });
+
+// '기록 버리고 중단'은 이번 녹화를 지운다. 실수로 누르지 않게 한 번 더 눌러야 실행한다.
+const CANCEL_LABEL = els.cancel.textContent;
+let cancelArmed = null;
+els.cancel.addEventListener('click', async () => {
+  if (!cancelArmed) {
+    els.cancel.textContent = '한 번 더 누르면 기록을 지웁니다';
+    els.cancel.classList.add('danger');
+    cancelArmed = setTimeout(() => {
+      cancelArmed = null;
+      els.cancel.textContent = CANCEL_LABEL;
+      els.cancel.classList.remove('danger');
+    }, 4000);
+    return;
+  }
+  clearTimeout(cancelArmed);
+  cancelArmed = null;
+  els.cancel.disabled = true;
+  await send({ type: 'STOP', discard: true });
+  window.close();
+});
 els.openEditor.addEventListener('click', async () => { await send({ type: 'OPEN_EDITOR' }); window.close(); });
 els.openOptions.addEventListener('click', () => { chrome.runtime.openOptionsPage(); window.close(); });
 

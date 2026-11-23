@@ -4,7 +4,7 @@ import { describeStep, suggestGuideTitle } from '../common/describe.js';
 import { enhanceSteps } from '../common/ai.js';
 import { bakeStepImage, buildGuideHtml, buildMarkdown, dataUrlToUint8 } from '../common/render.js';
 import { createZip } from '../lib/zip.js';
-import { downloadBlob, slugify, formatDate, bytes, blobToDataURL } from '../common/util.js';
+import { downloadBlob, slugify, formatDate, bytes } from '../common/util.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -33,9 +33,21 @@ function toast(msg, isError = false, ms = 2600) {
   return el;
 }
 
+/* 입력이 멈추면 저장한다. 다른 가이드로 바꾸기 전에는 flushSaves() 로 미뤄 둔 저장을 바로 끝낸다. */
 function debounceSave(key, fn, ms = 500) {
-  clearTimeout(S.saveTimers.get(key));
-  S.saveTimers.set(key, setTimeout(fn, ms));
+  const prev = S.saveTimers.get(key);
+  if (prev) clearTimeout(prev.timer);
+  const entry = { fn, timer: setTimeout(() => { S.saveTimers.delete(key); fn(); }, ms) };
+  S.saveTimers.set(key, entry);
+}
+
+async function flushSaves() {
+  const pending = [...S.saveTimers.values()];
+  S.saveTimers.clear();
+  for (const p of pending) {
+    clearTimeout(p.timer);
+    try { await p.fn(); } catch (e) { console.warn('[ClickGuide] 저장 실패', e); }
+  }
 }
 
 function autoGrow(ta) {
@@ -79,6 +91,7 @@ function renderSessionSelect(active) {
 }
 
 async function openSession(id) {
+  await flushSaves();   // 바꾸기 직전에 고친 제목·설명이 다른 가이드에 저장되지 않도록 먼저 저장한다
   revokeUrls();
   S.session = await db.getSession(id);
   S.steps = await db.getSteps(id);
@@ -196,20 +209,29 @@ function stepOf(el) {
 
 document.addEventListener('input', (e) => {
   const t = e.target;
+  if (!S.session) return;
+  // 저장은 0.5초 뒤에 일어난다. 그 사이 다른 가이드로 바꿔도 입력한 가이드에 저장되도록 지금의 가이드를 붙잡아 둔다.
+  const sid = S.session.id;
   if (t.id === 'guide-title') {
     const v = t.value;
-    debounceSave('title', async () => {
-      await db.updateSession(S.session.id, { name: v });
-      S.session.name = v;
-      const opt = $(`#session-select option[value="${S.session.id}"]`);
-      if (opt) opt.textContent = `${v || '제목 없는 가이드'} (${S.steps.length}단계)`;
+    const count = S.steps.length;
+    debounceSave('title-' + sid, async () => {
+      await db.updateSession(sid, { name: v });
+      if (S.session && S.session.id === sid) S.session.name = v;
+      const hit = S.sessions.find((s) => s.id === sid);
+      if (hit) hit.name = v;
+      const opt = $(`#session-select option[value="${CSS.escape(sid)}"]`);
+      if (opt) opt.textContent = `${v || '제목 없는 가이드'} (${count}단계)`;
     });
     return;
   }
   if (t.id === 'guide-desc') {
     autoGrow(t);
     const v = t.value;
-    debounceSave('desc', async () => { await db.updateSession(S.session.id, { description: v }); S.session.description = v; });
+    debounceSave('desc-' + sid, async () => {
+      await db.updateSession(sid, { description: v });
+      if (S.session && S.session.id === sid) S.session.description = v;
+    });
     return;
   }
   if (t.classList.contains('s-title') || t.classList.contains('s-desc')) {
@@ -408,18 +430,50 @@ $('#btn-ai').addEventListener('click', async () => {
   const btn = $('#btn-ai');
   btn.disabled = true;
   const t = toast('AI에게 보내는 중… 0 / ' + S.steps.length, false, 0);
+  // 응답을 기다리는 동안에도 편집할 수 있다. 보낼 때의 문장을 기억해 두었다가,
+  // 그 사이 사용자가 고치거나 지운 단계에는 AI 결과를 덮어쓰지 않는다.
+  const sid = S.session.id;
+  const sent = S.steps.map((s) => ({ ...s }));
+  const before = new Map(sent.map((s) => [s.id, { title: s.title || '', description: s.description || '' }]));
   try {
-    const enhanced = await enhanceSteps(S.steps, S.settings, {
+    const enhanced = await enhanceSteps(sent, S.settings, {
       onProgress: (done, total) => { t.textContent = `AI에게 보내는 중… ${done} / ${total}`; },
       getShotDataUrl: async (step) => {
         const blob = await db.getShot(step.shotId);
-        return blob ? blobToDataURL(blob) : null;
+        if (!blob) return null;
+        // 편집기에서 칠한 가림을 구운 이미지를 보낸다 (원본을 그대로 보내지 않는다)
+        const baked = await bakeStepImage(blob, step, S.settings, { highlight: false });
+        return baked ? baked.dataUrl : null;
       }
     });
-    S.steps = enhanced;
-    await db.putSteps(S.steps);
-    await renderSteps();
-    toast('문장을 다듬었습니다. 마음에 들지 않으면 각 단계의 ‘문장 복원’으로 되돌릴 수 있습니다.', false, 4500);
+    if (!S.session || S.session.id !== sid) {
+      toast('그 사이 다른 가이드를 열어서 AI 결과를 적용하지 않았습니다.', true, 5000);
+      return;
+    }
+    const changed = [];
+    let skipped = 0;
+    for (const e of enhanced) {
+      if (!e.aiEnhanced) continue;
+      const cur = S.steps.find((s) => s.id === e.id);
+      const b = before.get(e.id);
+      if (!cur || !b) continue;   // 그 사이 지운 단계
+      if ((cur.title || '') !== b.title || (cur.description || '') !== b.description) { skipped++; continue; }
+      cur.title = e.title;
+      cur.description = e.description;
+      cur.aiEnhanced = true;
+      changed.push(cur);
+      const li = document.querySelector(`li.step[data-id="${CSS.escape(cur.id)}"]`);
+      if (li) {
+        $('.s-title', li).value = cur.title;
+        const d = $('.s-desc', li);
+        d.value = cur.description;
+        autoGrow(d);
+      }
+    }
+    if (changed.length) await db.putSteps(changed);
+    toast(skipped
+      ? `문장을 다듬었습니다. 그 사이 직접 고친 ${skipped}개 단계는 그대로 두었습니다.`
+      : '문장을 다듬었습니다. 마음에 들지 않으면 각 단계의 ‘문장 복원’으로 되돌릴 수 있습니다.', false, 4500);
   } catch (err) {
     toast('AI 요청 실패: ' + err.message, true, 6000);
   } finally {

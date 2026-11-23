@@ -159,7 +159,15 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'aiEndpoint') showResolved();
   if (e.target.closest('main')) scheduleSave();
 });
-document.addEventListener('change', (e) => { if (e.target.closest('main')) scheduleSave(); });
+document.addEventListener('change', (e) => {
+  if (!e.target.closest('main')) return;
+  // 숫자 칸을 비운 채로 벗어나면 실제로 쓰일 기본값을 채워 보여 준다
+  if (e.target.type === 'number' && e.target.value.trim() === '') {
+    const key = Object.keys(FIELDS).find((k) => FIELDS[k].el === '#' + e.target.id);
+    if (key && typeof DEFAULT_SETTINGS[key] === 'number') e.target.value = DEFAULT_SETTINGS[key];
+  }
+  scheduleSave();
+});
 
 $('#reset').addEventListener('click', async () => {
   if (!confirm('모든 설정을 기본값으로 되돌릴까요? (저장된 가이드는 지워지지 않습니다)')) return;

@@ -1,7 +1,8 @@
-/* ClickGuide 콘텐츠 스크립트 (모든 프레임에서 실행, document_start)
- * - 녹화 중이 아닐 때는 아무 것도 하지 않는다.
+/* ClickGuide 콘텐츠 스크립트 (녹화하는 동안만 등록되어 모든 프레임에서 실행, document_start)
+ * - 녹화 대상 탭이 아니면 아무 것도 하지 않는다. 대상인지는 서비스 워커가 알려 준다.
  * - 클릭/입력/페이지 이동을 감지해 백그라운드에 캡처를 요청한다.
- * - iframe 안에서 일어난 클릭은 부모 프레임으로 좌표를 올려 최상위 뷰포트 기준으로 보정한다.
+ * - iframe 안에서 일어난 클릭은 서비스 워커를 거쳐 부모 프레임으로 올리며 최상위 뷰포트 기준으로 보정한다.
+ * - chrome.storage 는 읽지 않는다. 설정(필요한 값만)·녹화 바 위치는 서비스 워커가 메시지로 보내 준다.
  */
 (() => {
   // 확장을 다시 불러오면 기존 탭에 남은 인스턴스는 죽은 채로 남는다.
@@ -13,6 +14,7 @@
   const IS_TOP = (() => { try { return window.top === window; } catch (_) { return false; } })();
 
   let state = { recording: false, paused: false, stepCount: 0 };
+  let isTarget = false;       // 이 탭이 녹화 대상인가 (다른 탭에는 바를 띄우지 않고 클릭도 보내지 않는다)
   let settings = null;
   let widget = null;          // { host, shadow, countEl }
   let lastClickKey = '';
@@ -21,7 +23,6 @@
   let pendingCaptures = 0;
   let clientSeq = 0;
   let onRuntimeMessage = null;
-  let onStorageChanged = null;
 
   /* 화면이 얼마나 바뀌었는지 가늠하는 값.
    * 백그라운드가 '방금 찍은 프레임을 재사용해도 되는지' 판단할 때 쓴다.
@@ -82,8 +83,10 @@
 
   async function syncState() {
     const res = await send({ type: 'GET_STATE' });
-    if (res) applyState(res.state, res.settings);
+    if (res) applyView(res);
   }
+
+  function recording() { return !!(state.recording && isTarget); }
 
   /* 녹화 중에는 백그라운드(서비스 워커)가 잠들지 않도록 붙잡아 둔다.
    * 잠들면 다음 클릭에서 콜드 스타트가 일어나 촬영이 눈에 띄게 늦어진다. */
@@ -97,7 +100,8 @@
       keepPort.onDisconnect.addListener(() => {
         void chrome.runtime.lastError;
         keepPort = null;
-        if (state.recording) setTimeout(startKeepAlive, 500);
+        // 서비스 워커가 다시 떴다면 그 사이 놓친 상태 변화(녹화 종료 등)를 다시 받아 온다
+        setTimeout(() => { if (recording()) { startKeepAlive(); syncState(); } }, 500);
       });
     } catch (_) { keepPort = null; return; }
     clearInterval(keepTimer);
@@ -113,33 +117,54 @@
     if (keepPort) { try { keepPort.disconnect(); } catch (_) { /* noop */ } keepPort = null; }
   }
 
-  function applyState(nextState, nextSettings) {
-    state = nextState || state;
-    if (nextSettings) settings = nextSettings;
-    if (IS_TOP) {
-      if (state.recording) { startKeepAlive(); startMutationWatch(); }
-      else { stopKeepAlive(); stopMutationWatch(); }
-    }
-    if (IS_TOP) {
-      if (state.recording && !barHidden) ensureWidget();
-      else removeWidget();
-      if (widget && !state.recording) widget.countEl.textContent = '0';
-      if (widget) {
-        const shown = parseInt(widget.countEl.textContent, 10) || 0;
-        widget.countEl.textContent = String(Math.max(shown, state.stepCount || 0));
-        widget.host.dataset.paused = state.paused ? '1' : '0';
-        widget.pauseBtn.textContent = state.paused ? '재개' : '일시정지';
-      }
+  /* 서비스 워커가 보낸 상태를 반영한다: { state, isTarget, settings, bar } */
+  function applyView(view) {
+    if (!view) return;
+    if (view.state) state = view.state;
+    isTarget = !!view.isTarget;
+    settings = isTarget ? (view.settings || settings) : null;
+    if (view.bar) applyBarState(view.bar);
+    refresh();
+  }
+
+  function refresh() {
+    if (!IS_TOP) return;
+    const rec = recording();
+    if (rec) { startKeepAlive(); startMutationWatch(); }
+    else { stopKeepAlive(); stopMutationWatch(); }
+    if (rec && !barHidden) ensureWidget();
+    else removeWidget();
+    if (widget) {
+      const shown = parseInt(widget.countEl.textContent, 10) || 0;
+      widget.countEl.textContent = String(Math.max(shown, state.stepCount || 0));
+      widget.host.dataset.paused = state.paused ? '1' : '0';
+      widget.pauseBtn.textContent = state.paused ? '재개' : '일시정지';
     }
   }
 
   try {
     onRuntimeMessage = (msg, _sender, sendResponse) => {
       if (!msg) return;
-      if (msg.type === 'STATE_CHANGED') { applyState(msg.state, msg.settings); }
+      if (msg.type === 'STATE_CHANGED') { applyView(msg); return; }
+      if (msg.type === 'BAR_CHANGED') { applyBarState(msg.bar); return; }
+      if (msg.type === 'FRAME_UP') { onFrameUp(msg.nonce, msg.payload); return; }
+      if (msg.type === 'REMEASURE') { onRemeasure(msg.clientId, msg.at); return; }
+      if (!IS_TOP) return;   // 아래는 최상위 프레임만 답한다
       if (msg.type === 'PING') { sendResponse({ ok: true }); return true; }
       if (msg.type === 'HIDE_WIDGET') { hideWidget(); nextFrame().then(() => sendResponse({ ok: true })); return true; }
-      if (msg.type === 'SHOW_WIDGET') { showWidget(); sendResponse({ ok: true }); return true; }
+      if (msg.type === 'SHOW_WIDGET') { if (pendingCaptures === 0) showWidget(); sendResponse({ ok: true }); return true; }
+      if (msg.type === 'NAV_SHOT_PREP') {
+        // 페이지 이동 단계 촬영 직전: 바를 숨기고, 지금 화면에서 가릴 영역을 재서 돌려준다
+        const hidden = !!widget && widget.host.style.visibility !== 'hidden';
+        hideWidget();
+        nextFrame().then(() => sendResponse({
+          ok: true, hidden,
+          redactions: redactionRects(),
+          viewport: { w: window.innerWidth, h: window.innerHeight },
+          title: document.title
+        }));
+        return true;
+      }
     };
     chrome.runtime.onMessage.addListener(onRuntimeMessage);
   } catch (_) { /* noop */ }
@@ -349,13 +374,6 @@
     return { rect: best.r, drop: !best.r };
   }
 
-  function broadcastDown(msg) {
-    try {
-      const frames = document.querySelectorAll('iframe, frame');
-      for (const f of frames) { try { f.contentWindow.postMessage(msg, '*'); } catch (_) { /* noop */ } }
-    } catch (_) { /* noop */ }
-  }
-
   function bubbleUp(payload, el) {
     if (el && payload.clientId) trackTarget(payload.clientId, el);
     if (IS_TOP) {
@@ -368,33 +386,77 @@
       captureFromTop(payload);
       return;
     }
-    try { window.parent.postMessage({ __clickguide: 'up', payload }, '*'); } catch (_) { /* noop */ }
+    // 하위 프레임: 내용(입력값·요소 정보·좌표)은 서비스 워커를 거쳐 부모 프레임으로 올린다.
+    // 예전처럼 window.parent.postMessage 로 내용을 보내면 부모 페이지의 스크립트도 그 값을 읽을 수 있다.
+    // 부모 프레임이 '어느 iframe 에서 왔는지' 알 수 있도록 postMessage 로는 일회용 표식만 보낸다.
+    const nonce = newNonce();
+    send({ type: 'FRAME_UP', nonce, payload });
+    try { window.parent.postMessage({ __clickguideFrame: nonce }, '*'); } catch (_) { /* noop */ }
+  }
+
+  function newNonce() {
+    const a = new Uint32Array(3);
+    crypto.getRandomValues(a);
+    return Array.from(a, (n) => n.toString(36)).join('');
+  }
+
+  /* 하위 프레임에서 올라온 값을 이 프레임 기준 좌표로 옮겨 다시 위로 올린다.
+   * 서비스 워커는 탭의 모든 프레임에 내용을 보내고(FRAME_UP), 보낸 iframe 은 같은 표식을 postMessage 로
+   * 부모에게 알린다. 둘 다 받은 프레임만 처리한다. 도착 순서는 어느 쪽이 먼저든 상관없다. */
+  const upByNonce = new Map();      // nonce -> payload (서비스 워커 쪽이 먼저 온 경우)
+  const frameByNonce = new Map();   // nonce -> iframe 요소 (표식이 먼저 온 경우)
+  const NONCE_TTL_MS = 3000;
+
+  function onFrameUp(nonce, payload) {
+    if (!payload || typeof nonce !== 'string' || !recording()) return;
+    const f = frameByNonce.get(nonce);
+    if (f) { frameByNonce.delete(nonce); deliverFromFrame(f, payload); return; }
+    upByNonce.set(nonce, payload);
+    setTimeout(() => upByNonce.delete(nonce), NONCE_TTL_MS);
   }
 
   const onWindowMessage = (e) => {
     const d = e.data;
-    if (d && d.__clickguide === 'remeasure') {
-      const picked = pickSample(d.clientId, d.at);
-      if (picked) bubbleUp({ _kind: 'corr', clientId: d.clientId, rect: picked.rect, drop: picked.drop });
-      else broadcastDown(d);
-      return;
-    }
-    if (!d || d.__clickguide !== 'up' || !d.payload) return;
-    let off = null;
+    if (!d || typeof d.__clickguideFrame !== 'string' || !recording()) return;
+    let frame = null;
     try {
-      const frames = document.querySelectorAll('iframe, frame');
-      for (const f of frames) {
-        if (f.contentWindow === e.source) { const r = f.getBoundingClientRect(); off = { x: r.left, y: r.top }; break; }
+      for (const f of document.querySelectorAll('iframe, frame')) {
+        if (f.contentWindow === e.source) { frame = f; break; }
       }
     } catch (_) { /* noop */ }
-    if (!off) return;
-    const p = d.payload;
-    const shift = (r) => r && { x: r.x + off.x, y: r.y + off.y, width: r.width, height: r.height };
-    p.rect = shift(p.rect);
-    p.redactions = (p.redactions || []).map(shift).filter(Boolean);
-    bubbleUp(p);
+    if (!frame) return;   // 이 프레임의 자식이 보낸 것이 아니다
+    const nonce = d.__clickguideFrame;
+    const payload = upByNonce.get(nonce);
+    if (payload) { upByNonce.delete(nonce); deliverFromFrame(frame, payload); return; }
+    if (frameByNonce.has(nonce)) return;   // 같은 표식은 처음 것만 쓴다
+    frameByNonce.set(nonce, frame);
+    setTimeout(() => frameByNonce.delete(nonce), NONCE_TTL_MS);
   };
   window.addEventListener('message', onWindowMessage, false);
+
+  function deliverFromFrame(f, payload) {
+    let off = null;
+    try {
+      // iframe 안 문서는 테두리와 안쪽 여백 안쪽에서 시작한다
+      const r = f.getBoundingClientRect();
+      const cs = getComputedStyle(f);
+      off = {
+        x: r.left + f.clientLeft + (parseFloat(cs.paddingLeft) || 0),
+        y: r.top + f.clientTop + (parseFloat(cs.paddingTop) || 0)
+      };
+    } catch (_) { return; }
+    const shift = (r) => r && { x: r.x + off.x, y: r.y + off.y, width: r.width, height: r.height };
+    payload.rect = shift(payload.rect);
+    payload.redactions = (payload.redactions || []).map(shift).filter(Boolean);
+    bubbleUp(payload);
+  }
+
+  /* 촬영 시각의 좌표를 다시 재 달라는 요청. 대상 요소를 추적하던 프레임만 답한다. */
+  function onRemeasure(clientId, at) {
+    if (!clientId || !recording()) return;
+    const picked = pickSample(clientId, at);
+    if (picked) bubbleUp({ _kind: 'corr', clientId, rect: picked.rect, drop: picked.drop });
+  }
 
   function nextFrame() {
     return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -436,8 +498,8 @@
         finalRect = picked.rect || localRect;
         send({ type: 'CORRECT_RECT', clientId: payload.clientId, rect: picked.rect, drop: picked.drop });
       } else {
-        // 대상 요소가 하위 프레임에 있다 — 그 프레임에 재측정을 요청한다
-        broadcastDown({ __clickguide: 'remeasure', clientId: payload.clientId, at: res.capturedAt || Date.now() });
+        // 대상 요소가 하위 프레임에 있다 — 그 프레임에 재측정을 요청한다 (서비스 워커를 거친다)
+        send({ type: 'REMEASURE', clientId: payload.clientId, at: res.capturedAt || Date.now() });
         setTimeout(() => send({ type: 'CORRECT_RECT', clientId: payload.clientId, rect: null, drop: false }), 160);
       }
     }
@@ -455,7 +517,7 @@
   /* 이벤트 핸들러                                                        */
   /* ------------------------------------------------------------------ */
 
-  function active() { return state.recording && !state.paused && settings; }
+  function active() { return recording() && !state.paused && settings; }
 
   // 입력칸은 blur 시점에 change 가 뜨므로, 다음 클릭보다 늦게 기록된다.
   // 클릭 직전에 먼저 '입력' 단계를 내보내 순서를 바로잡는다.
@@ -567,26 +629,53 @@
 
   let lastNotifiedUrl = '';
   function notifyNavigation() {
-    if (!IS_TOP || !state.recording || state.paused) return;
+    if (!IS_TOP || !recording() || state.paused) return;
     if (location.href === lastNotifiedUrl) return;
     lastNotifiedUrl = location.href;
     send({ type: 'PAGE_LOADED', url: location.href, title: document.title });
   }
 
+  /* SPA 화면 전환인지 판단한다.
+   * - 경로가 바뀌거나 해시 라우팅(#/…, #!/…)의 경로가 바뀌면 전환이다.
+   * - 쿼리만 바꾸는 replaceState(검색어·필터를 주소에 맞춰 두는 것)는 전환이 아니다.
+   * - 해시만 바뀌는 일반 앵커 이동(#section)도 전환이 아니다. */
+  function isRouteChange(fromUrl, toUrl, navType) {
+    let a, b;
+    try { a = new URL(fromUrl); b = new URL(toUrl); } catch (_) { return false; }
+    if (a.href === b.href) return false;
+    const hashRoute = (u) => (/^#!?\//.test(u.hash) ? u.hash.replace(/^#!?/, '') : '');
+    const routeChanged = a.origin !== b.origin || a.pathname !== b.pathname || hashRoute(a) !== hashRoute(b);
+    if (navType === 'replace') return routeChanged;
+    return routeChanged || a.search !== b.search;
+  }
+
+  /* 페이지 자신의 history.pushState 호출은 격리된 JS 환경에서 바꿔 끼운 history 로는 잡히지 않는다.
+   * Navigation API 의 navigate 이벤트는 DOM 이벤트라 콘텐츠 스크립트에서도 받는다. */
+  const onNavigate = (e) => {
+    try {
+      if (!e.destination || !e.destination.sameDocument) return;   // 다른 문서로 가면 새 문서의 load 에서 알린다
+      if (!isRouteChange(location.href, e.destination.url, e.navigationType)) return;
+      setTimeout(notifyNavigation, 500);   // 주소와 제목이 바뀐 뒤에 알린다
+    } catch (_) { /* noop */ }
+  };
+  const onLoad = () => setTimeout(notifyNavigation, 300);
+  const onPopState = () => setTimeout(notifyNavigation, 400);
+  // 뒤로 가기 캐시(bfcache)에서 돌아온 문서: 그 사이 놓친 상태를 다시 받고, 이동을 알린다
+  const onPageShow = (e) => {
+    if (!e.persisted) return;
+    lastNotifiedUrl = '';
+    syncState().then(() => setTimeout(notifyNavigation, 300));
+  };
+  const hasNavigationApi = (() => {
+    try { return !!(window.navigation && typeof window.navigation.addEventListener === 'function'); } catch (_) { return false; }
+  })();
+
   if (IS_TOP) {
     if (document.readyState === 'complete') setTimeout(notifyNavigation, 300);
-    window.addEventListener('load', () => setTimeout(notifyNavigation, 300));
-    window.addEventListener('popstate', () => setTimeout(notifyNavigation, 400));
-    try {
-      ['pushState', 'replaceState'].forEach((m) => {
-        const orig = history[m];
-        history[m] = function () {
-          const r = orig.apply(this, arguments);
-          setTimeout(notifyNavigation, 500);
-          return r;
-        };
-      });
-    } catch (_) { /* noop */ }
+    window.addEventListener('load', onLoad);
+    window.addEventListener('pageshow', onPageShow);
+    if (hasNavigationApi) window.navigation.addEventListener('navigate', onNavigate);
+    else window.addEventListener('popstate', onPopState);   // Navigation API 가 없는 브라우저용 예비
   }
 
   /* ------------------------------------------------------------------ */
@@ -653,11 +742,11 @@
     if (widget) return widget;
     if (barHidden) return null;
     if (!document.documentElement) return null;
-    if (!barPosLoaded) loadBarPos();   // 저장된 위치를 비동기로 불러와 적용
     const host = document.createElement('div');
     host.__clickguideWidget = true;
     host.style.cssText = 'all:initial;position:fixed;inset:auto 0 0 auto;z-index:2147483647;';
-    const shadow = host.attachShadow({ mode: 'open' });
+    // closed: 페이지의 스크립트가 host.shadowRoot 로 들어와 '완료'·'일시정지'를 누르거나 읽지 못하게 한다
+    const shadow = host.attachShadow({ mode: 'closed' });
     const style = document.createElement('style');
     style.textContent = WIDGET_CSS;
     const bar = document.createElement('div');
@@ -677,12 +766,13 @@
     hideBtn.setAttribute('aria-label', '녹화 바 숨기기');
     hideBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!e.isTrusted) return;
       send({ type: 'SET_BAR_HIDDEN', hidden: true });
       barHidden = true;
       removeWidget();
     });
-    pauseBtn.addEventListener('click', (e) => { e.stopPropagation(); send({ type: state.paused ? 'RESUME' : 'PAUSE' }); });
-    stopBtn.addEventListener('click', (e) => { e.stopPropagation(); send({ type: 'STOP' }); });
+    pauseBtn.addEventListener('click', (e) => { e.stopPropagation(); if (!e.isTrusted) return; send({ type: state.paused ? 'RESUME' : 'PAUSE' }); });
+    stopBtn.addEventListener('click', (e) => { e.stopPropagation(); if (!e.isTrusted) return; send({ type: 'STOP' }); });
     bar.append(pauseBtn, stopBtn, hideBtn);
     shadow.append(style, bar);
     document.documentElement.appendChild(host);
@@ -693,30 +783,25 @@
   }
 
   /* ---- 녹화 바 위치 (끌어서 이동, 브라우저에 기억) ----
-   * 위치는 화면 크기에 대한 비율(0~1)로 저장해, 창 크기가 달라져도 비슷한 자리에 놓인다. */
-  const BAR_POS_KEY = 'cg_barPos';
-  const BAR_HIDDEN_KEY = 'cg_barHidden';
+   * 위치는 화면 크기에 대한 비율(0~1)로 저장해, 창 크기가 달라져도 비슷한 자리에 놓인다.
+   * 저장은 서비스 워커가 한다. 위치·숨김은 상태 메시지(bar)와 BAR_CHANGED 로 받는다. */
   let barHidden = false;
   const BAR_MARGIN = 12;
   let barPos = null;            // { nx, ny } 또는 null(기본 위치)
-  let barPosLoaded = false;
 
-  function loadBarPos() {
-    try {
-      chrome.storage.local.get([BAR_POS_KEY, BAR_HIDDEN_KEY], (got) => {
-        void chrome.runtime.lastError;
-        const p = got && got[BAR_POS_KEY];
-        barPos = (p && typeof p.nx === 'number' && typeof p.ny === 'number') ? p : null;
-        barHidden = !!(got && got[BAR_HIDDEN_KEY]);
-        barPosLoaded = true;
-        if (barHidden) removeWidget();
-        applyBarPos();
-      });
-    } catch (_) { /* noop */ }
+  function applyBarState(bar) {
+    if (!bar) return;
+    const p = bar.pos;
+    barPos = (p && typeof p.nx === 'number' && typeof p.ny === 'number') ? p : null;
+    barHidden = !!bar.hidden;
+    if (!IS_TOP) return;
+    if (barHidden) removeWidget();
+    else if (recording()) ensureWidget();
+    applyBarPos();
   }
 
   function saveBarPos() {
-    try { chrome.storage.local.set({ [BAR_POS_KEY]: barPos }); } catch (_) { /* noop */ }
+    send({ type: 'SET_BAR_POS', pos: barPos });
   }
 
   function applyBarPos() {
@@ -797,28 +882,6 @@
   const onResize = () => { if (widget && barPos) applyBarPos(); };
   window.addEventListener('resize', onResize);
 
-  onStorageChanged = (changes, area) => {
-      if (area !== 'local') return;
-      if (changes[BAR_POS_KEY]) {
-        const p = changes[BAR_POS_KEY].newValue;
-        barPos = (p && typeof p.nx === 'number') ? p : null;
-        applyBarPos();
-      }
-      if (changes[BAR_HIDDEN_KEY]) {
-        barHidden = !!changes[BAR_HIDDEN_KEY].newValue;
-        if (!IS_TOP) return;
-        if (barHidden) removeWidget();
-        else if (state.recording) applyState(state, null);
-      }
-      // 녹화 상태 자체도 직접 지켜본다.
-      // 메시지가 닿지 않는 경우에도 바가 화면에 남지 않도록 하는 안전장치.
-      if (changes.cg_state && IS_TOP) {
-        const ns = changes.cg_state.newValue;
-        if (ns && typeof ns.recording === 'boolean') applyState(ns, null);
-      }
-  };
-  try { chrome.storage.onChanged.addListener(onStorageChanged); } catch (_) { /* noop */ }
-
   function removeWidget() {
     if (widget && widget.host && widget.host.parentNode) widget.host.parentNode.removeChild(widget.host);
     widget = null;
@@ -833,10 +896,13 @@
     try { document.removeEventListener('pointerdown', onPointerDown, true); } catch (_) { /* noop */ }
     try { document.removeEventListener('change', onChange, true); } catch (_) { /* noop */ }
     try { document.removeEventListener('focusin', onFocusIn, true); } catch (_) { /* noop */ }
-    try { window.removeEventListener('message', onWindowMessage, false); } catch (_) { /* noop */ }
     try { window.removeEventListener('beforeunload', onBeforeUnload, true); } catch (_) { /* noop */ }
+    try { window.removeEventListener('message', onWindowMessage, false); } catch (_) { /* noop */ }
+    try { window.removeEventListener('load', onLoad); } catch (_) { /* noop */ }
+    try { window.removeEventListener('pageshow', onPageShow); } catch (_) { /* noop */ }
+    try { window.removeEventListener('popstate', onPopState); } catch (_) { /* noop */ }
+    try { if (hasNavigationApi) window.navigation.removeEventListener('navigate', onNavigate); } catch (_) { /* noop */ }
     try { if (onRuntimeMessage) chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch (_) { /* noop */ }
-    try { if (onStorageChanged) chrome.storage.onChanged.removeListener(onStorageChanged); } catch (_) { /* noop */ }
     try { window.removeEventListener('resize', onResize); } catch (_) { /* noop */ }
     try { stopKeepAlive(); } catch (_) { /* noop */ }
     try { stopMutationWatch(); } catch (_) { /* noop */ }

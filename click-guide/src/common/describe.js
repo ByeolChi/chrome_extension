@@ -4,26 +4,46 @@
 /* ---------- 한국어 조사 처리 ---------- */
 
 const DIGIT_BATCHIM = { '0': true, '1': true, '3': true, '6': true, '7': true, '8': true, '2': false, '4': false, '5': false, '9': false };
+// 받침이 ㄹ인 숫자 읽기 (일, 칠, 팔)
+const DIGIT_RIEUL = { '1': true, '7': true, '8': true };
 // 영문 알파벳 낱자 읽기에 받침이 있는지 (엘, 엠, 엔, 알 …)
 const ALPHA_BATCHIM = { l: true, m: true, n: true, r: true, g: false, b: false, c: false, d: false, e: false, f: false, h: false, i: false, j: false, k: false, o: false, p: false, q: false, s: false, t: false, u: false, v: false, w: false, x: false, y: false, z: false, a: false };
+// 받침이 ㄹ인 낱자 읽기 (엘, 알)
+const ALPHA_RIEUL = { l: true, r: true };
+const JONG_RIEUL = 8;   // 종성 ㄹ의 순번
 
-export function hasBatchim(word) {
-  if (!word) return false;
+// 끝 글자의 받침: 'none'(없음) | 'rieul'(ㄹ) | 'other'(그 밖의 받침)
+function finalConsonant(word) {
+  if (!word) return 'none';
   // 끝의 괄호·따옴표·마침표 등은 발음에 영향이 없으므로 떼어낸다
   const base = String(word).trim().replace(/[^\uac00-\ud7a30-9A-Za-z]+$/, '');
-  if (!base) return false;
+  if (!base) return 'none';
   const ch = base.slice(-1);
   const code = ch.charCodeAt(0);
-  if (code >= 0xac00 && code <= 0xd7a3) return (code - 0xac00) % 28 !== 0;
-  if (/[0-9]/.test(ch)) return DIGIT_BATCHIM[ch];
-  if (/[a-zA-Z]/.test(ch)) return !!ALPHA_BATCHIM[ch.toLowerCase()];
-  return false; // 기호 등은 받침 없음으로 처리
+  if (code >= 0xac00 && code <= 0xd7a3) {
+    const jong = (code - 0xac00) % 28;
+    if (jong === 0) return 'none';
+    return jong === JONG_RIEUL ? 'rieul' : 'other';
+  }
+  if (/[0-9]/.test(ch)) return DIGIT_BATCHIM[ch] ? (DIGIT_RIEUL[ch] ? 'rieul' : 'other') : 'none';
+  if (/[a-zA-Z]/.test(ch)) {
+    const c = ch.toLowerCase();
+    return ALPHA_BATCHIM[c] ? (ALPHA_RIEUL[c] ? 'rieul' : 'other') : 'none';
+  }
+  return 'none'; // 기호 등은 받침 없음으로 처리
+}
+
+export function hasBatchim(word) {
+  return finalConsonant(word) !== 'none';
 }
 
 // josa('버튼', '을/를') -> '을'
+// '으로/로'는 받침이 ㄹ이면 받침이 없을 때처럼 '로'를 쓴다 (서울로, 7로, Excel로).
 export function josa(word, pair) {
   const [withB, withoutB] = pair.split('/');
-  return hasBatchim(word) ? withB : withoutB;
+  const fc = finalConsonant(word);
+  if (withB.startsWith('으로')) return fc === 'other' ? withB : withoutB;
+  return fc !== 'none' ? withB : withoutB;
 }
 
 /* ---------- 요소 역할 이름 ---------- */
@@ -84,6 +104,11 @@ export function cleanLabel(raw, max = 48) {
 
 function quote(s) { return '‘' + s + '’'; }
 
+// 주소에서 사이트 이름(호스트)만 꺼낸다. 경로·쿼리에는 토큰이나 개인정보가 들어 있을 수 있다.
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch (_) { return ''; }
+}
+
 /* ---------- 본체 ---------- */
 
 export function describeStep(step, lang = 'ko') {
@@ -95,11 +120,13 @@ export function describeStep(step, lang = 'ko') {
 
   switch (step.type) {
     case 'navigate': {
-      const t = cleanLabel(step.title || step.url || '', 60);
-      if (en) return { title: `Open ${t || 'the page'}`, description: `The page ${step.url ? `(${step.url}) ` : ''}opens.` };
+      // 문장에는 전체 주소를 넣지 않는다. 내보내기는 주소를 숨기는데, 문장에 들어가면 그대로 나간다.
+      // 제목이 없는 페이지는 호스트 이름으로 부른다.
+      const t = cleanLabel(step.title || hostOf(step.url || ''), 60);
+      if (en) return { title: `Open ${t || 'the page'}`, description: `The ${t ? `"${t}" ` : ''}page opens.` };
       return {
         title: `${t || '페이지'}${josa(t || '페이지', '으로/로')} 이동`,
-        description: `${t ? quote(t) + ' ' : ''}페이지가 열립니다.${step.url ? ' 주소: ' + step.url : ''}`
+        description: `${t ? quote(t) + ' ' : ''}페이지가 열립니다.`
       };
     }
 
