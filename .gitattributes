@@ -1,0 +1,5 @@
+# 셸 스크립트와 그 템플릿은 macOS·Linux 의 bash 로 실행된다.
+# Windows(core.autocrlf=true)에서 받아도 작업 사본을 LF 로 둔다.
+# (ssoda 가 만드는 도우미 설치 파일은 ssoda/js/helper-installer.js 가 따로 LF 로 맞춘다)
+*.sh      text eol=lf
+*.sh.tpl  text eol=lf

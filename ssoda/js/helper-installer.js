@@ -15,6 +15,9 @@ export function detectOS() {
 }
 
 const toCRLF = (s) => s.replace(/\r?\n/g, '\r\n');
+// macOS·Linux 설치 파일은 bash 로 실행하므로 LF 로 맞춘다. Windows(core.autocrlf=true)에서 받은 저장소로 만든
+// 배포본은 템플릿·도우미 파일이 CRLF 라서, 그대로 두면 bash 가 CR 이 섞인 줄을 실행하지 못한다.
+const toLF = (s) => s.replace(/\r\n?/g, '\n');
 
 export async function buildInstaller(os, kind = 'install') {
   const id = chrome.runtime.id;
@@ -34,7 +37,7 @@ export async function buildInstaller(os, kind = 'install') {
     // 첫 줄(shebang)은 설치 스크립트가 python3 절대경로로 다시 씀
     out = out.replace('__CS_HOST_SCRIPT__', () => host.replace(/^#![^\n]*\n/, '').trimEnd());
   }
-  return { name: kind === 'install' ? 'ssoda-helper-install.sh' : 'ssoda-helper-uninstall.sh', content: out, type: 'text/x-shellscript' };
+  return { name: kind === 'install' ? 'ssoda-helper-install.sh' : 'ssoda-helper-uninstall.sh', content: toLF(out), type: 'text/x-shellscript' };
 }
 
 export async function downloadInstaller(os, kind = 'install') {
