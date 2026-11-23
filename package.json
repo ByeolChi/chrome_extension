@@ -1,0 +1,12 @@
+{
+  "name": "chrome-extensions",
+  "private": true,
+  "description": "확장 프로그램 모음의 개발용 설정. 확장 자체는 빌드나 외부 라이브러리 없이 폴더째 로드한다.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\""
+  }
+}

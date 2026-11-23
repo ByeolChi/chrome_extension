@@ -17,3 +17,8 @@
 4. **압축해제된 확장 프로그램을 로드합니다**를 누르고, 설치할 확장 프로그램 폴더(`manifest.json`이 들어 있는 폴더)를 선택합니다.
 
 확장 프로그램별 권한, 설정, 사용법은 각 폴더의 README를 참고하세요.
+
+## 개발
+
+- **테스트**: 저장소 최상위에서 `npm test` (Node 22 이상, 설치할 패키지 없음). `tests/` 의 단위 테스트가 각 확장의 실제 모듈을 그대로 불러와 확인합니다.
+- **배포 zip**: `pwsh scripts/build-zip.ps1 -Extension <폴더 이름>` (Windows PowerShell 5.1 도 가능). `-Bump patch` 를 붙이면 manifest 와 위 표의 버전을 함께 올립니다. manifest 에 `key`(확장 ID 고정)가 없는 확장은 `-AllowNoKey` 가 있어야 만듭니다.
