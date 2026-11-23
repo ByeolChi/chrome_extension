@@ -42,5 +42,5 @@ node tests/e2e/click-guide/e2e.mjs --only=tabs,discard   # 구역 일부만
 
 - 쓰는 포트: 브라우저 디버깅 9301(click-guide)·9302(cleanshot-picker)·9303(ssoda), 시험용 웹 서버 18931·18932(click-guide)·8930(cleanshot-picker). ssoda 는 빈 포트를 골라 씁니다.
 - cleanshot-picker 는 아이콘을 눌러야 생기는 activeTab 권한을 CDP 로 줄 수 없습니다. 그래서 manifest 에 `host_permissions` 만 더한 시험용 사본을 임시 폴더에 만들어 올립니다. 코드는 같습니다.
-- ssoda 시험은 브라우저 전송 경로만 확인합니다. PC 의 curl·cURL 실행 도우미·SSH 터널 경로는 이 시험에 들어 있지 않습니다.
+- ssoda 시험은 브라우저 전송 경로만 확인합니다. PC 의 curl·cURL 실행 도우미·SSH 터널 경로는 [tests/ssoda-helper](../ssoda-helper/README.md) 의 시험(`npm run test:helper`)이 확인합니다.
 - Windows 11 과 Playwright Chromium 131(headless)에서 확인했습니다. 다른 OS 와 실제 Chrome·Edge 에서 아이콘을 눌러 보는 확인은 하지 않았습니다.
