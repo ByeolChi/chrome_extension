@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>cleanshot e2e</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; height: 3200px; background: #fff; }
+  .secret { background: rgb(255, 0, 0); color: #fff; }
+  #fixedbar { position: fixed; top: 0; left: 0; right: 0; height: 60px; background: rgb(200, 200, 200); z-index: 10; }
+  #fixedSecret { position: absolute; left: 900px; top: 10px; width: 200px; height: 40px; }
+  #spacer { height: 70px; }
+  #banner { height: 120px; background: rgb(0, 128, 255); }
+  #flowSecret { margin: 10px 0 0 40px; width: 300px; height: 40px; }
+  #row { display: flex; gap: 20px; padding-left: 40px; margin-top: 10px; align-items: flex-start; }
+  #scroller { width: 300px; height: 200px; overflow: auto; border: 0; background: rgb(240, 240, 240); flex: none; }
+  #scroller .item { height: 40px; box-sizing: border-box; border-bottom: 1px solid #ccc; padding: 4px; }
+  #sameFrame { width: 400px; height: 220px; border: 0; flex: none; }
+  #xoFrame { width: 300px; height: 150px; border: 0; flex: none; }
+  #row2 { display: flex; gap: 20px; padding-left: 40px; margin-top: 20px; align-items: flex-start; height: 60px; }
+  #shadowHost, #closedHost { display: block; width: 200px; height: 40px; }
+  #textTarget { margin: 0; font-size: 20px; }
+  #stickywrap { height: 1000px; position: relative; margin-top: 20px; background: rgb(250, 250, 240); }
+  #sticky { position: sticky; top: 60px; height: 50px; background: rgb(230, 230, 230); }
+  #stickySecret { position: absolute; left: 500px; top: 5px; width: 150px; height: 40px; }
+  #dlg { padding: 20px; border: 2px solid #333; }
+  #dlgSecret { width: 200px; height: 40px; }
+  #pop { position: fixed; inset: auto; left: 700px; top: 620px; margin: 0; padding: 10px; border: 2px solid #333; background: #fff; }
+  #popSecret { width: 160px; height: 40px; }
+  #link1 { margin-left: 40px; }
+</style>
+</head>
+<body>
+  <div id="fixedbar"><div id="fixedSecret" class="secret">fixed secret</div></div>
+  <div id="spacer"></div>
+  <div id="banner">banner</div>
+  <div id="flowSecret" class="secret">flow secret</div>
+  <div id="row">
+    <div id="scroller">
+      <div class="item">item 0</div><div class="item">item 1</div><div class="item">item 2</div>
+      <div class="item secret" id="scrollSecret">item 3 secret</div>
+      <div class="item">item 4</div><div class="item">item 5</div><div class="item">item 6</div>
+      <div class="item">item 7</div><div class="item">item 8</div><div class="item">item 9</div>
+      <div class="item">item 10</div><div class="item">item 11</div><div class="item">item 12</div>
+      <div class="item">item 13</div><div class="item">item 14</div><div class="item">item 15</div>
+    </div>
+    <iframe id="sameFrame" src="/inner.html"></iframe>
+    <iframe id="xoFrame" src="http://localhost:8930/xo.html"></iframe>
+  </div>
+  <div id="row2">
+    <x-open id="shadowHost"></x-open>
+    <x-closed id="closedHost"></x-closed>
+    <p id="textTarget">Hello <b id="bold">world</b>!</p>
+  </div>
+  <a id="link1" href="/nav-target.html">a link that must not navigate</a>
+  <div id="stickywrap">
+    <div id="sticky"><div id="stickySecret" class="secret">sticky secret</div></div>
+  </div>
+
+  <dialog id="dlg"><div id="dlgSecret" class="secret">dialog secret</div></dialog>
+  <div id="pop" popover="manual"><div id="popSecret" class="secret">popover secret</div></div>
+
+<script>
+  window.__xoClicks = 0;
+  window.__navClicks = 0;
+  addEventListener('message', (e) => { if (e.data === 'xo-click') window.__xoClicks++; });
+
+  customElements.define('x-open', class extends HTMLElement {
+    constructor() {
+      super();
+      const r = this.attachShadow({ mode: 'open' });
+      r.innerHTML = '<style>:host{display:block}</style><div id="wrap" style="padding:0"><span id="shadowInner" style="display:inline-block;width:150px;height:40px;background:rgb(255,0,0);color:#fff">open shadow</span></div>';
+    }
+  });
+  customElements.define('x-closed', class extends HTMLElement {
+    constructor() {
+      super();
+      const r = this.attachShadow({ mode: 'closed' });
+      window.__closedRoot = r;
+      r.innerHTML = '<style>:host{display:block}</style><div id="cwrap"><span id="closedInner" style="display:inline-block;width:150px;height:40px;background:rgb(255,0,0);color:#fff">closed shadow</span></div>';
+    }
+  });
+
+  const bold = document.getElementById('bold');
+  window.__boldClicks = 0;
+  bold.addEventListener('click', () => { window.__boldClicks++; });
+  window.__refs = {
+    bold,
+    hello: document.getElementById('textTarget').firstChild,
+    worldText: bold.firstChild
+  };
+  document.getElementById('link1').addEventListener('click', () => { window.__navClicks++; });
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><title>시험 페이지 A</title>
+<style>
+body{margin:0;font:16px sans-serif}
+.box{position:absolute;width:120px;height:120px;background:repeating-conic-gradient(#000 0 25%, #fff 0 50%) 0 0/20px 20px}
+#redact{left:20px;top:300px}
+#control{left:200px;top:300px}
+#pw{position:absolute;left:400px;top:300px;width:200px;height:40px;font-size:28px}
+#btn1{position:absolute;left:20px;top:20px;width:140px;height:40px}
+#btn2{position:absolute;left:200px;top:20px;width:140px;height:40px}
+#name{position:absolute;left:400px;top:20px;width:200px;height:30px}
+#tonav{position:absolute;left:640px;top:20px}
+iframe{position:absolute;border:0}
+#fx{left:20px;top:480px;width:400px;height:200px}
+#fs{left:480px;top:480px;width:400px;height:200px}
+</style></head><body>
+<button id="btn1">저장</button>
+<button id="btn2">취소</button>
+<input id="name" aria-label="이름">
+<a id="tonav" href="/nav.html?token=SECRET123">이동</a>
+<a id="newtab" href="/b.html?new=1" target="_blank" style="position:absolute;left:720px;top:20px">새 탭</a>
+<div id="redact" class="box" data-clickguide-redact></div>
+<div id="control" class="box"></div>
+<input id="pw" type="password" value="secret-password">
+<iframe id="fx" src="http://127.0.0.1:18932/frame.html"></iframe>
+<iframe id="fs" src="/frame.html"></iframe>
+<iframe id="fb" src="/frame.html" style="left:900px;top:300px;width:300px;height:180px;border:7px solid #888;padding:5px"></iframe>
+<script>
+window.__leaks = [];
+window.addEventListener('message', (e) => { try { window.__leaks.push(JSON.stringify(e.data).slice(0, 300)); } catch (_) { window.__leaks.push('?'); } });
+</script>
+</body></html>

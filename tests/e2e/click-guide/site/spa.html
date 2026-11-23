@@ -1,0 +1,8 @@
+<!doctype html><html><head><meta charset="utf-8"><title>SPA 홈</title>
+<style>body{margin:0} button{position:absolute;width:160px;height:40px} #push{left:20px;top:20px} #replace{left:200px;top:20px} #hash{left:380px;top:20px} #hashroute{left:560px;top:20px} #replacepath{left:20px;top:100px}</style></head><body>
+<button id="push" onclick="history.pushState({}, '', '/spa/users'); document.title='SPA 사용자';">push</button>
+<button id="replace" onclick="history.replaceState({}, '', location.pathname + '?q=' + Date.now());">replace query</button>
+<button id="hash" onclick="history.pushState({}, '', '#section');">hash</button>
+<button id="hashroute" onclick="history.pushState({}, '', '#/settings'); document.title='SPA 설정';">hashroute</button>
+<button id="replacepath" onclick="history.replaceState({}, '', '/spa/redirected'); document.title='SPA 리다이렉트';">replace path</button>
+</body></html>
