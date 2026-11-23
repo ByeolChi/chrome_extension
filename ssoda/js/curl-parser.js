@@ -16,15 +16,42 @@ function isCmdStyle(t) {
   return /(^|[ \t])\^"/.test(t) || /[ \t]\^[ \t]*\n/.test(t);
 }
 
+// 문서·메신저(Word, Confluence, 카카오톡 등)에서 복사하면 바뀌는 문자
+const SMART_DQ = '“”„‟″'; // “ ” „ ‟ ″
+const SMART_SQ = '‘’‚‛′'; // ‘ ’ ‚ ‛ ′
+const HAS_SMART = new RegExp(`[${SMART_DQ}${SMART_SQ}]`);
+const LONG_DASH = /[–—−]/; // – — −
+
+// –data 처럼 긴 대시 뒤의 낱말이 아는 긴 옵션이면 --, 아니면(–X, –sSL) - 로 본다
+function isKnownLongOption(word) {
+  const w = word.startsWith('no-') ? word.slice(3) : word;
+  return LONG_WITH_VALUE.has(w) || PASSTHROUGH.has(w) || LONG_FLAGS.has(w) || Object.values(SHORT_ALIASES).includes(w);
+}
+
+/**
+ * 반환 배열의 normalized 가 true 이면 둥근 따옴표·긴 대시를 일반 문자로 바꿔 해석한 것이다.
+ */
 export function tokenize(input) {
   let t = String(input || '').replace(/\r\n?/g, '\n');
   // 프롬프트 제거
+  const ps = /^\s*PS[^>\n]*>/.test(t) || /^\s*(PS[^>\n]*>\s*)?(&\s*)?(\S*[\\/])?curl\.exe(\s|$)/i.test(t) || /`\n/.test(t);
   t = t.replace(/^\s*(\$|PS[^>\n]*>|>)\s+/, '');
-  if (isCmdStyle(t)) return tokenizeCmd(t);
-  return tokenizeBash(t);
+  // 일반 따옴표가 하나도 없고 둥근 따옴표만 있으면, 문서에서 복사하며 바뀐 것으로 보고 일반 따옴표로 해석한다.
+  // (일반 따옴표가 있으면 둥근 따옴표는 값의 일부이므로 그대로 둔다)
+  let normalized = false;
+  if (!/['"]/.test(t) && HAS_SMART.test(t)) {
+    t = t.replace(new RegExp(`[${SMART_DQ}]`, 'g'), '"').replace(new RegExp(`[${SMART_SQ}]`, 'g'), "'");
+    normalized = true;
+  }
+  const tokens = isCmdStyle(t) ? tokenizeCmd(t) : tokenizeBash(t, { ps });
+  if (normalized || tokens.dashFixed) tokens.normalized = true;
+  return tokens;
 }
 
-function tokenizeBash(t) {
+/**
+ * ps: PowerShell 형식 (curl.exe, PS> 프롬프트, ` 줄 연결). 작은따옴표 안의 '' 는 ' 하나, 큰따옴표 안의 "" 와 `" 는 " 하나다.
+ */
+function tokenizeBash(t, { ps = false } = {}) {
   const tokens = [];
   let cur = '';
   let has = false; // 빈 문자열 '' 도 토큰으로 인정
@@ -37,6 +64,63 @@ function tokenizeBash(t) {
   };
   while (i < n) {
     const c = t[i];
+    // 토큰 맨 앞의 긴 대시(–X, —data): 문서에서 - / -- 가 바뀐 것
+    if (!has && LONG_DASH.test(c) && /[A-Za-z]/.test(t[i + 1] || '')) {
+      const word = /^[A-Za-z][\w.-]*/.exec(t.slice(i + 1))[0];
+      cur += word.length > 1 && isKnownLongOption(word) ? '--' : '-';
+      has = true;
+      tokens.dashFixed = true;
+      i++;
+      continue;
+    }
+    if (ps && c === "'") {
+      // PowerShell 작은따옴표 문자열: '' 는 작은따옴표 하나
+      let j = i + 1;
+      while (j < n) {
+        if (t[j] === "'") {
+          if (t[j + 1] === "'") {
+            cur += "'";
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        cur += t[j];
+        j++;
+      }
+      has = true;
+      i = j + 1;
+      continue;
+    }
+    if (ps && c === '"') {
+      // PowerShell 큰따옴표 문자열: "" 와 `" 는 큰따옴표 하나 (curl.exe 용으로 흔히 쓰는 \" 도 그대로 인정)
+      let j = i + 1;
+      while (j < n) {
+        const d = t[j];
+        if ((d === '`' || d === '\\') && t[j + 1] === '"') {
+          cur += '"';
+          j += 2;
+          continue;
+        }
+        if (d === '"') {
+          if (t[j + 1] === '"') {
+            cur += '"';
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        if (d === '`' && t[j + 1] === '\n') {
+          j += 2;
+          continue;
+        }
+        cur += d;
+        j++;
+      }
+      has = true;
+      i = j + 1;
+      continue;
+    }
     if (c === '\\') {
       const nx = t[i + 1];
       if (nx === '\n') {
@@ -281,13 +365,21 @@ const LONG_WITH_VALUE = new Set([
   'create-file-mode', 'ip-tos', 'mptcp', 'haproxy-clientip', 'json', 'max-time', 'curves', 'ech',
 ]);
 
+// 값을 받지 않는 긴 옵션 중 SHORT_ALIASES·PASSTHROUGH 에 없는 것 (긴 대시 보정용)
+const LONG_FLAGS = new Set([
+  'compressed', 'location-trusted', 'digest', 'ntlm', 'negotiate', 'anyauth', 'basic', 'no-progress-meter', 'http1.1', 'http2',
+  'http2-prior-knowledge', 'http3', 'data-raw', 'get', 'head', 'show-error', 'fail-with-body',
+]);
+
 /* ------------------------------------------------------------------ */
 /* 파서                                                                 */
 /* ------------------------------------------------------------------ */
 
 export function parseCurl(text) {
   const warnings = [];
-  const tokens = tokenize(text).filter((tok) => !/^\s+$/.test(tok));
+  const raw = tokenize(text);
+  if (raw.normalized) warnings.push('문서에서 복사하며 바뀐 문자(둥근 따옴표 “ ” ‘ ’, 긴 대시 –)를 일반 문자로 바꿔 해석했습니다. 값이 맞는지 확인하세요.');
+  const tokens = raw.filter((tok) => !/^\s+$/.test(tok));
   if (!tokens.length) throw new Error('빈 명령입니다.');
   let idx = 0;
   if (/(^|[\\/])curl(\.exe)?$/i.test(tokens[0])) idx = 1;
@@ -517,8 +609,15 @@ export function parseCurl(text) {
       default:
         // 프록시/인증서/DNS 등 curl 전용 옵션은 cURL 실행용 추가 인자로 보존
         if (PASSTHROUGH.has(o.name) && !o.negated) {
+          // --proxy-header @파일 처럼 값을 PC 파일에서 읽는 형식은 받지 않는다 (curl-runner 의 추가 인자 검사와 같은 규칙)
+          if (typeof v === 'string' && v.startsWith('@')) {
+            warnings.push(`--${o.name} ${v}: PC 파일에서 값을 읽는 형식(@파일)이라 제외했습니다.`);
+            break;
+          }
           extra.push('--' + o.name + (typeof v === 'string' ? ' ' + shellQuote(v) : ''));
           passthroughNames.add(o.name);
+        } else if (LOCAL_SOCKET_OPTS.has(o.name)) {
+          warnings.push(`--${o.name}: PC의 로컬 소켓(Docker 등)에 접속하는 옵션이라 제외했습니다.`);
         }
         break;
     }
@@ -642,12 +741,15 @@ function encodeDataUrlencode(v, warnings) {
 }
 
 // cURL 실행 시 그대로 전달할 옵션
+// --unix-socket · --abstract-unix-socket 은 넣지 않는다. 공유받은 백업 속 요청이 PC의 로컬 소켓(Docker 데몬 등)에
+// 임의 요청을 보내 PC를 조작할 수 있기 때문이다.
+const LOCAL_SOCKET_OPTS = new Set(['unix-socket', 'abstract-unix-socket']);
 const PASSTHROUGH = new Set([
   'proxy', 'socks4', 'socks4a', 'socks5', 'socks5-hostname', 'proxy-user', 'proxy-header', 'noproxy', 'proxy-insecure', 'proxytunnel',
   'cacert', 'capath', 'cert', 'key', 'cert-type', 'key-type', 'pass', 'ciphers', 'tlsv1', 'tlsv1.0', 'tlsv1.1', 'tlsv1.2', 'tlsv1.3', 'tls-max',
   'resolve', 'connect-to', 'interface', 'ipv4', 'ipv6', 'http2-prior-knowledge', 'http3', 'connect-timeout', 'retry', 'retry-delay',
   'retry-max-time', 'retry-all-errors', 'limit-rate', 'max-redirs', 'path-as-is', 'anyauth', 'fail', 'fail-with-body', 'globoff',
-  'keepalive-time', 'no-keepalive', 'local-port', 'tcp-nodelay', 'raw', 'ssl-no-revoke', 'request-target', 'unix-socket', 'abstract-unix-socket',
+  'keepalive-time', 'no-keepalive', 'local-port', 'tcp-nodelay', 'raw', 'ssl-no-revoke', 'request-target',
   'location-trusted', 'post301', 'post302', 'post303', 'aws-sigv4', 'doh-url', 'dns-servers',
   // 인증 방식 (-u 사용자 정보는 헤더가 아니라 --user 로 넘긴다: prepare.js 참고)
   'digest', 'ntlm', 'negotiate',

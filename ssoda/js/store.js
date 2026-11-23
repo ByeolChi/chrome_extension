@@ -84,6 +84,8 @@ class Store {
   }
 
   async flush() {
+    // 다른 탭에서 Ssoda 를 새로 열어 이 탭이 저장을 멈춘 상태 (main.js 의 watchOtherInstances 참고)
+    if (this.suspended) return;
     const keys = [...this.pending];
     this.pending.clear();
     if (!keys.length) return;

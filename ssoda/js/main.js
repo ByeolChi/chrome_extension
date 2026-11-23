@@ -24,6 +24,8 @@ let helperCache = null;
 const dom = {};
 
 async function boot() {
+  // 먼저 열려 있던 Ssoda 탭이 지금까지의 변경을 저장한 뒤에 데이터를 읽는다 (announceInstance 참고)
+  const instance = await announceInstance();
   await app.init();
   window.csApp = app; // 디버깅용
   setScopeProvider(() => app.getScope());
@@ -47,7 +49,69 @@ async function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushAll();
   });
+  instance.ready();
   document.body.classList.remove('booting');
+}
+
+// 앱 탭이 두 개 열려 있으면 각 탭이 자기 메모리의 데이터로 저장해 서로의 변경을 덮어쓴다. 그래서 마지막에 연 탭만 저장한다.
+// - 새 탭은 데이터를 읽기 전에 알리고, 먼저 열려 있던 탭이 지금까지의 변경을 저장할 때까지 잠시(최대 1초) 기다린다.
+// - 먼저 열려 있던 탭은 저장을 마친 뒤 더 이상 저장하지 않고 안내를 띄운다.
+async function announceInstance() {
+  if (typeof BroadcastChannel !== 'function') return { ready() {} };
+  const me = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const chan = new BroadcastChannel('ssoda-app-instance');
+  const acks = new Set();
+  const flushed = new Set();
+  let ready = false;
+  let newerTab = false; // 이 탭이 준비되기 전에 더 새 탭이 열림
+  const suspend = async () => {
+    if (app.store.suspended) return;
+    app.store.pending.add('workspace');
+    await app.store.flush();
+    app.store.suspended = true;
+    for (const c of app.controllers.values()) c.abort();
+    showSuspended();
+  };
+  chan.onmessage = async (e) => {
+    const m = e.data || {};
+    if (m.to === me && m.type === 'ack') acks.add(m.id);
+    else if (m.to === me && m.type === 'flushed') flushed.add(m.id);
+    else if (m.type === 'open' && m.id !== me) {
+      chan.postMessage({ type: 'ack', id: me, to: m.id });
+      if (ready) await suspend();
+      else newerTab = true;
+      chan.postMessage({ type: 'flushed', id: me, to: m.id });
+    }
+  };
+  chan.postMessage({ type: 'open', id: me });
+  await new Promise((r) => setTimeout(r, 60));
+  const t0 = Date.now();
+  while ([...acks].some((id) => !flushed.has(id)) && Date.now() - t0 < 1000) await new Promise((r) => setTimeout(r, 20));
+  return {
+    ready() {
+      ready = true;
+      if (newerTab) suspend();
+    },
+  };
+}
+
+function showSuspended() {
+  const closeTab = async () => {
+    try {
+      const t = await chrome.tabs.getCurrent();
+      if (t) await chrome.tabs.remove(t.id);
+    } catch (e) {
+      window.close();
+    }
+  };
+  document.body.appendChild(
+    h('div.instance-block', { role: 'alertdialog', 'aria-modal': 'true' },
+      h('div.instance-card',
+        h('div.instance-title', '다른 탭에서 Ssoda 를 열었습니다'),
+        h('p', '두 탭에서 함께 편집하면 나중에 저장한 탭이 다른 탭의 변경을 덮어씁니다. 그래서 이 탭은 지금까지의 변경을 저장하고 더 이상 저장하지 않습니다.'),
+        h('div.instance-actions',
+          h('button.btn.btn-primary', { onclick: () => location.reload() }, '이 탭에서 계속 사용 (새로고침)'),
+          h('button.btn', { onclick: closeTab }, '이 탭 닫기')))));
 }
 
 /* ---------------- 레이아웃 ---------------- */
@@ -681,7 +745,7 @@ function wireUi() {
         }
       });
     },
-    copyRequestAsCurl: (req) => copyRequestAsCurl(req),
+    copyRequestAsCurl: (req, itemId = null) => copyRequestAsCurl(req, itemId && findInCollections(app.state.collections, itemId) ? itemId : null),
     askSshPassword,
     askTrustHostKey,
     applyTheme,

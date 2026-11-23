@@ -5,7 +5,35 @@ import { openModal, toast, confirmDialog, popover } from './overlay.js';
 import { groupByDomain, parseCookieInput, cookieToString, storeCookie, isExpired } from '../cookiejar.js';
 import { DEFAULT_SETTINGS } from '../store.js';
 import { detectOS, downloadInstaller } from '../helper-installer.js';
+import { versionAtLeast, LATEST_HOST_VERSION } from '../curl-runner.js';
+import { sanitizeBackupData, curlSettingsSummary } from '../backup-check.js';
 import { app } from '../app.js';
+
+/**
+ * 백업 복원 확인. 형식을 검사·정리하고, cURL 실행 설정(추가 인자, -k)이 있는 요청과 SSH 환경을 보여 준 뒤 묻는다.
+ * 복원하면 정리된 data, 취소하면 null. 형식이 맞지 않으면 Error
+ */
+async function confirmRestore(raw) {
+  const data = sanitizeBackupData(raw);
+  const { requests, ssh } = curlSettingsSummary(data);
+  const MAX = 8;
+  const msg = h('div',
+    h('p', '현재 모든 데이터(컬렉션, 환경, 히스토리, 쿠키, 설정)를 백업 파일의 데이터로 교체합니다.'),
+    requests.length
+      ? h('div.restore-warn',
+          h('p', h('b', `cURL 로 실행할 때 적용되는 설정이 있는 요청 ${requests.length}개`), ' — 직접 만든 백업이 아니라면 아래 옵션이 맞는지 확인하세요. 프록시·주소 고정(--proxy, --resolve, --connect-to)은 요청을 다른 서버로 보낼 수 있습니다.'),
+          h('ul', requests.slice(0, MAX).map((r) => h('li', h('span', r.where), h('code', r.notes.join(' · '))))),
+          requests.length > MAX ? h('p.muted', `외 ${requests.length - MAX}개`) : null)
+      : null,
+    ssh.length
+      ? h('div.restore-warn',
+          h('p', h('b', `SSH 터널을 쓰는 환경 ${ssh.length}개`)),
+          h('ul', ssh.slice(0, MAX).map((s) => h('li', h('span', s.name), h('code', s.server)))))
+      : null,
+    h('p', '계속할까요?'));
+  const ok = await confirmDialog({ title: '백업 복원', message: msg, okText: '복원', danger: true });
+  return ok ? data : null;
+}
 
 const MOD = isMac() ? '⌘' : 'Ctrl';
 
@@ -68,14 +96,9 @@ export function openImport(initialText = '') {
   const doImport = async (text, label) => {
     const res = app.importText(text);
     if (res.kind === 'backup') {
-      const ok = await confirmDialog({
-        title: '백업 복원',
-        message: '현재 모든 데이터(컬렉션, 환경, 히스토리, 쿠키, 설정)를 백업 파일의 데이터로 교체합니다. 계속할까요?',
-        okText: '복원',
-        danger: true,
-      });
-      if (!ok) return { cancelled: true };
-      await app.store.replaceAll(res.data);
+      const data = await confirmRestore(res.data);
+      if (!data) return { cancelled: true };
+      await app.store.replaceAll(data);
       location.reload();
       return { message: '복원 완료' };
     }
@@ -229,9 +252,10 @@ export function openSettings() {
     try {
       const text = await readFileAsText(f);
       const obj = JSON.parse(text);
-      if (obj.app !== 'ssoda' && obj.app !== 'curl-studio') throw new Error('Ssoda 백업 파일이 아닙니다.');
-      if (await confirmDialog({ title: '백업 복원', message: '현재 모든 데이터를 백업 파일의 데이터로 교체할까요?', okText: '복원', danger: true })) {
-        await app.store.replaceAll(obj.data);
+      if (!obj || (obj.app !== 'ssoda' && obj.app !== 'curl-studio')) throw new Error('Ssoda 백업 파일이 아닙니다.');
+      const data = await confirmRestore(obj.data);
+      if (data) {
+        await app.store.replaceAll(data);
         location.reload();
       }
     } catch (e) {
@@ -520,9 +544,11 @@ export function openCurlHelper() {
     const st = await app.ui.helperStatus({ force });
     clear(statusBox);
     if (st.ok) {
-      statusBox.className = 'helper-status ok';
-      statusBox.append(icon('check', 18), h('div',
-        h('div.hs-title', '도우미가 연결되었습니다. 이제 cURL 로 실행할 수 있습니다.'),
+      const outdated = !versionAtLeast(st.hostVersion, LATEST_HOST_VERSION);
+      statusBox.className = 'helper-status ' + (outdated ? 'bad' : 'ok');
+      statusBox.append(icon(outdated ? 'alert' : 'check', 18), h('div',
+        h('div.hs-title', outdated ? `도우미는 연결되었지만 새 버전(v${LATEST_HOST_VERSION})이 있습니다.` : '도우미가 연결되었습니다. 이제 cURL 로 실행할 수 있습니다.'),
+        outdated ? h('div.hs-sub', '아래에서 설치 파일을 다시 받아 실행하면 업데이트됩니다. 새 버전은 curl 인자를 한 번 더 검사하고, 설치 경로에 공백이 있을 때(macOS 등) SSH 서버 키를 찾지 못하는 문제를 고쳤습니다.') : null,
         h('div.hs-sub', st.curl || 'curl 을 찾지 못했습니다'),
         h('div.hs-sub', `${st.path || ''}  ·  도우미 v${st.hostVersion || '?'}`)));
     } else {

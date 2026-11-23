@@ -1,6 +1,7 @@
 // 코드 스니펫 생성기
 // 입력: prepareRequest()가 만든 prepared 객체
 //  { method, url, headers:[{key,value}], body:{mode, text, fields, file}, settings:{followRedirects, timeout} }
+import { hasLossyNumbers } from './json-format.js';
 
 export const CODEGEN_LANGS = [
   { id: 'curl', label: 'cURL', lang: 'shell' },
@@ -154,7 +155,7 @@ function genFetch(p) {
   let bodyVar = null;
   if (b.mode === 'raw') {
     let text = b.text;
-    if (isJsonText(text)) out.push(`const raw = JSON.stringify(${JSON.stringify(JSON.parse(text), null, 2)});`);
+    if (isSafeJsonText(text)) out.push(`const raw = JSON.stringify(${JSON.stringify(JSON.parse(text), null, 2)});`);
     else out.push(`const raw = ${jsStr(text)};`);
     out.push('');
     bodyVar = 'raw';
@@ -196,7 +197,7 @@ function genAxios(p) {
   const b = p.body || { mode: 'none' };
   let dataExpr = null;
   if (b.mode === 'raw') {
-    if (isJsonText(b.text)) out.push(`let data = JSON.stringify(${JSON.stringify(JSON.parse(b.text), null, 2)});`);
+    if (isSafeJsonText(b.text)) out.push(`let data = JSON.stringify(${JSON.stringify(JSON.parse(b.text), null, 2)});`);
     else out.push(`let data = ${jsStr(b.text)};`);
     dataExpr = 'data';
   } else if (b.mode === 'urlencoded') {
@@ -249,7 +250,7 @@ function genAxios(p) {
 function genPython(p) {
   const out = ['import requests'];
   const b = p.body || { mode: 'none' };
-  const isJ = b.mode === 'raw' && isJsonText(b.text);
+  const isJ = b.mode === 'raw' && isSafeJsonText(b.text);
   if (isJ) out.push('import json');
   out.push('');
   out.push(`url = ${pyStr(p.url)}`);
@@ -473,6 +474,12 @@ function isJsonText(t) {
   } catch (e) {
     return false;
   }
+}
+
+// 객체 리터럴로 바꿔 써도 값이 같은 JSON 인지. 19자리 ID 처럼 JavaScript 숫자로 바꾸면 값이 달라지는 숫자가 있으면
+// 생성한 코드가 다른 값을 보내므로 원문 문자열을 그대로 쓴다.
+function isSafeJsonText(t) {
+  return isJsonText(t) && !hasLossyNumbers(t);
 }
 
 export { hasHeader };

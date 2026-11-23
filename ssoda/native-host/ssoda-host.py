@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 
-HOST_VERSION = '1.3.1'
+HOST_VERSION = '1.3.2'
 NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,40}$')
 STDIN = sys.stdin.buffer
 STDOUT = sys.stdout.buffer
@@ -141,8 +141,12 @@ def start_tunnel(cfg, work):
     conf = os.path.join(work, 'ssh_config')
     open(conf, 'w').close()
     port = free_port()
+    # The path is quoted for OpenSSH: unquoted, the space in "~/Library/Application Support/Ssoda" splits it into two
+    # file names, so the trusted key is never found and every request asks to trust the server again.
+    if '"' in KNOWN_HOSTS:
+        raise RuntimeError('The helper folder path must not contain a double quote: ' + KNOWN_HOSTS)
     argv = [ssh, '-F', conf, '-N', '-T', '-D', '127.0.0.1:%d' % port, '-p', str(t['port']), '-l', t['user'],
-            '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + KNOWN_HOSTS,
+            '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile="%s"' % KNOWN_HOSTS,
             '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15',
             '-o', 'ServerAliveCountMax=2', '-o', 'NumberOfPasswordPrompts=1', '-o', 'PubkeyAuthentication=no',
             '-o', 'GSSAPIAuthentication=no', '-o', 'PreferredAuthentications=keyboard-interactive,password']
@@ -205,6 +209,39 @@ def assert_no_routing_args(argv):
             raise ValueError('option not allowed with an SSH tunnel: ' + s.split('=')[0])
         if re.match(r'^-[A-Za-z0-9#]+$', s) and re.search(r'[xpKq]', s):
             raise ValueError('option not allowed with an SSH tunnel: ' + s)
+
+
+DENY_ARGS = {'--next', '-:', '--config', '-K', '--unix-socket', '--abstract-unix-socket', '--variable', '--output', '--dump-header',
+             '--trace', '--trace-ascii', '--trace-config', '--stderr', '--libcurl', '--upload-file', '-T', '--cookie-jar', '-c', '--netrc',
+             '-n', '--netrc-file', '--netrc-optional', '--etag-save', '--etag-compare', '--hsts', '--alt-svc', '--output-dir', '--create-dirs',
+             '--remote-name', '-O', '--remote-name-all', '--remote-header-name', '-J', '--ssl-sessions', '--proto-default', '-q', '--disable'}
+USER_OPTS = {'--user', '-u', '--proxy-user', '-U'}
+PLACEHOLDER_FILE = re.compile(r'^@__CS_[A-Za-z0-9_]{1,40}__$')
+FORM_FILE = re.compile(r'^[@<]__CS_[A-Za-z0-9_]{1,40}__(;|$)')
+
+
+def assert_safe_args(argv):
+    """Defense in depth: the extension already passes only allowed curl options. A request must still never make curl
+    read or write local files, talk to a local socket, or start a second transfer (--next) that skips --proto."""
+    prev = ''
+    for a in argv:
+        s = str(a)
+        if s in DENY_ARGS or s.startswith('--expand-'):
+            raise ValueError('curl option not allowed: ' + s)
+        # Short option bundles such as -sSo would hide one of the options above
+        if re.match(r'^-[A-Za-z0-9#:]{2,}$', s) and re.search(r'[KTcnOJqo:D]', s):
+            raise ValueError('curl option not allowed: ' + s)
+        if prev in ('-F', '--form'):
+            # name=@file / name=<file: only the temporary files sent by the extension
+            eq = s.find('=')
+            if eq < 1 or not FORM_FILE.match(s[eq + 1:]):
+                raise ValueError('form fields must use the files sent by the extension')
+        elif s.startswith('@') and not PLACEHOLDER_FILE.match(s) and prev not in USER_OPTS:
+            # -H @file, --proxy-header @file, --data @file ...
+            raise ValueError('curl argument must not read a local file: ' + s)
+        if prev in ('-o', '-D') and s not in ('__CS_BODY__', '__CS_HDR__'):
+            raise ValueError('curl output path not allowed: ' + s)
+        prev = s
 
 
 def ssh_tool(name):
@@ -307,7 +344,9 @@ def run_request(msg, work):
         if not NAME_RE.match(str(name)):
             raise ValueError('invalid file name')
         mapping['__CS_%s__' % name] = os.path.join(work, name)
-    argv = []
+    assert_safe_args(msg.get('args') or [])
+    # Only http/https, also after redirects: no file://, and no gopher:// or dict:// to services on this PC
+    argv = ['--proto', '=http,https', '--proto-redir', '=http,https']
     for a in msg.get('args') or []:
         s = str(a)
         for k, v in mapping.items():
