@@ -153,6 +153,13 @@
     <h2>데이터</h2>
     <p class="faint">녹화한 가이드와 스크린샷은 이 브라우저 안에만 저장됩니다. 외부로 전송되지 않습니다.</p>
     <p id="usage" class="faint"></p>
+    <p class="faint">다른 PC·다른 폴더로 옮기거나 확장 ID 가 바뀌는 업데이트를 하기 전에는 <strong>전체 백업</strong>을 받아 두세요. 백업(ZIP)에는 가이드·단계·스크린샷 원본과 설정이 들어가고, AI API 키는 들어가지 않습니다. 가져올 때 이미 있는 가이드는 건너뜁니다.</p>
+    <div class="row">
+      <button id="backup-export" class="sm">전체 백업 내보내기</button>
+      <button id="backup-import" class="sm">백업에서 가져오기</button>
+      <input type="file" id="backup-file" accept=".zip,application/zip" hidden>
+    </div>
+    <p id="backup-state" class="faint" aria-live="polite"></p>
     <button id="wipe" class="danger sm">모든 가이드 삭제</button>
   </section>
 </main>

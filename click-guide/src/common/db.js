@@ -112,6 +112,17 @@ export async function deleteSession(id) {
   await done;
 }
 
+/* 백업에서 가져온 가이드 하나를 단계·스크린샷과 함께 한 트랜잭션으로 저장한다 (중간에 실패하면 아무것도 남지 않음).
+ * shots: [{ id, blob }] — Blob 은 트랜잭션을 열기 전에 모두 준비해 둔다 */
+export async function importSession(session, steps, shots) {
+  const db = await openDb();
+  const { t, done } = tx(db, ['sessions', 'steps', 'shots'], 'readwrite');
+  t.objectStore('sessions').put(session);
+  for (const s of steps) t.objectStore('steps').put(s);
+  for (const sh of shots) t.objectStore('shots').put({ id: sh.id, blob: sh.blob });
+  await done;
+}
+
 /* ---------------- steps ---------------- */
 
 export async function putStep(step) {

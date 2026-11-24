@@ -1,7 +1,8 @@
 import { getSettings, setSettings, resetSettings, DEFAULT_SETTINGS } from '../common/settings.js';
 import { listSessions, deleteSession, estimateUsage } from '../common/db.js';
 import { testConnection, listModels, resolveEndpoint } from '../common/ai.js';
-import { bytes } from '../common/util.js';
+import { bytes, downloadBlob, formatDate } from '../common/util.js';
+import { buildBackup, readBackup, applyBackup } from '../common/backup.js';
 
 const $ = (s) => document.querySelector(s);
 let saveTimer = null;
@@ -191,10 +192,63 @@ $('#ai-test').addEventListener('click', async () => {
   }
 });
 
+/* ---------------- 전체 백업 / 가져오기 ---------------- */
+$('#backup-export').addEventListener('click', async () => {
+  const btn = $('#backup-export');
+  const state = $('#backup-state');
+  btn.disabled = true;
+  try {
+    const { blob, counts } = await buildBackup({ onProgress: (d, n) => { state.textContent = `백업 만드는 중… ${d} / ${n}`; } });
+    downloadBlob(blob, `clickguide-backup-${formatDate(Date.now())}.zip`);
+    state.textContent = `가이드 ${counts.sessions}개 · 단계 ${counts.steps}개 · 스크린샷 ${counts.shots}개와 설정을 백업했습니다 (${bytes(blob.size)}).`;
+  } catch (e) {
+    state.textContent = '백업 실패: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#backup-import').addEventListener('click', () => $('#backup-file').click());
+
+$('#backup-file').addEventListener('change', async () => {
+  const input = $('#backup-file');
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  const state = $('#backup-state');
+  try {
+    state.textContent = '백업 파일을 읽는 중…';
+    const plan = await readBackup(file);
+    const m = plan.meta;
+    const when = (m.exportedAt || '').slice(0, 10) || '날짜 모름';
+    const head = `${when} 에 ClickGuide ${m.version || '?'} 에서 만든 백업입니다. 가이드 ${m.sessions.length}개가 들어 있습니다.`;
+    let doGuides = false;
+    if (plan.newSessions.length) {
+      doGuides = confirm(`${head}\n\n새로 가져올 가이드: ${plan.newSessions.length}개` +
+        (plan.skipped ? `\n이미 있는 가이드 ${plan.skipped}개는 건너뜁니다.` : '') + '\n\n가져올까요?');
+      if (!doGuides) { state.textContent = ''; return; }
+    } else {
+      alert(`${head}\n\n이 가이드들은 모두 이미 있어서 가져올 가이드가 없습니다.`);
+    }
+    const doSettings = !!m.settings && confirm('설정도 백업 파일의 값으로 바꿀까요?\n(AI API 키는 백업에 들어 있지 않아 지금 값을 그대로 둡니다)');
+    if (!doGuides && !doSettings) { state.textContent = ''; return; }
+    const r = await applyBackup(doGuides ? plan : { ...plan, newSessions: [] }, {
+      settings: doSettings,
+      onProgress: (d, n) => { state.textContent = `가져오는 중… ${d} / ${n}`; }
+    });
+    if (doSettings) load(await getSettings());
+    state.textContent = (doGuides ? `가이드 ${r.sessions}개 · 단계 ${r.steps}개 · 스크린샷 ${r.shots}개를 가져왔습니다.` : '') +
+      (doSettings ? (doGuides ? ' ' : '') + '설정을 백업 파일의 값으로 바꿨습니다.' : '');
+    await showUsage();
+  } catch (e) {
+    state.textContent = '가져오기 실패: ' + e.message;
+  }
+});
+
 $('#wipe').addEventListener('click', async () => {
   const sessions = await listSessions();
   if (!sessions.length) { alert('삭제할 가이드가 없습니다.'); return; }
-  if (!confirm(`가이드 ${sessions.length}개와 스크린샷을 모두 삭제합니다. 되돌릴 수 없습니다. 계속할까요?`)) return;
+  if (!confirm(`가이드 ${sessions.length}개와 스크린샷을 모두 삭제합니다. 되돌릴 수 없습니다. 필요하면 먼저 전체 백업을 받아 두세요. 계속할까요?`)) return;
   for (const s of sessions) await deleteSession(s.id);
   await showUsage();
   alert('삭제했습니다.');
