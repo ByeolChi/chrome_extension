@@ -2,7 +2,11 @@
  * 역할: 피커 주입, 화면 캡처, 파일 저장. DOM 은 건드리지 않는다.
  */
 
-const INJECT_FILE = 'picker.js';
+/* 공용 가리기 코어(사본은 node scripts/sync-shared.mjs 로 만든다). 피커도 같은 파일을 먼저 싣는다. */
+importScripts('shared/redact-core.js');
+const RC = globalThis.RedactCore;
+
+const INJECT_FILES = ['shared/redact-core.js', 'picker.js'];
 const INJECTABLE = /^(https?|file):/i;
 
 /* captureVisibleTab 은 초당 2회 제한이 있다. 안전하게 550ms 간격을 둔다. */
@@ -64,7 +68,7 @@ async function togglePicker(tab) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: false },
-      files: [INJECT_FILE]
+      files: INJECT_FILES
     });
   } catch (err) {
     console.warn('[CleanShot] 주입 실패:', err);
@@ -166,20 +170,12 @@ async function burnMasks(dataUrl, masks, viewport) {
   try {
     const vw = viewport && viewport.w > 0 ? viewport.w : bmp.width;
     const vh = viewport && viewport.h > 0 ? viewport.h : bmp.height;
-    const sx = bmp.width / vw;
-    const sy = bmp.height / vh;
 
     const canvas = new OffscreenCanvas(bmp.width, bmp.height);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(bmp, 0, 0);
-    ctx.fillStyle = '#000';
-    for (const m of masks) {
-      const x0 = Math.max(0, Math.floor(m.x * sx));
-      const y0 = Math.max(0, Math.floor(m.y * sy));
-      const x1 = Math.min(bmp.width, Math.ceil((m.x + m.w) * sx));
-      const y1 = Math.min(bmp.height, Math.ceil((m.y + m.h) * sy));
-      if (x1 > x0 && y1 > y0) ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-    }
+    const px = RC.toPixelRects(masks, bmp.width / vw, bmp.height / vh, bmp.width, bmp.height);
+    RC.paintRedactions(ctx, px, { style: 'box' });
     const out = await canvas.convertToBlob({ type: 'image/png' });
     return blobToDataUrl(out);
   } finally {

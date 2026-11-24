@@ -50,10 +50,17 @@
 
   <section class="card">
     <h2>개인정보 가리기</h2>
-    <div class="checks">
-      <label class="check"><input type="checkbox" id="maskPasswords"> 비밀번호 입력칸을 스크린샷에서 흐리게</label>
-      <label class="check"><input type="checkbox" id="maskSensitiveValues"> 민감해 보이는 입력값(카드·주민번호 등)은 ●●●● 로 기록</label>
+    <div class="field">
+      <label for="redactStyle">가리는 방식</label>
+      <select id="redactStyle"><option value="box">검정으로 칠하기 (권장)</option><option value="blur">흐리게</option></select>
+      <p class="faint">흐리게 한 숫자(계좌·주민번호 등)는 원래 값을 되살리는 공격에 약합니다. 녹화 중 스크린샷과 편집기에서 가린 영역에 모두 적용됩니다.</p>
     </div>
+    <div class="checks">
+      <label class="check"><input type="checkbox" id="maskPasswords"> 비밀번호 입력칸을 스크린샷에서 가리기</label>
+      <label class="check"><input type="checkbox" id="maskScreenPII"> 화면에 보이는 개인정보를 스크린샷에서 자동으로 가리기 (주민·외국인등록번호, 카드·계좌·휴대폰 번호, 이메일, 사업자등록번호)</label>
+      <label class="check"><input type="checkbox" id="maskSensitiveValues"> 민감해 보이는 입력값(카드·주민·계좌·휴대폰 번호, 이메일 등)은 ●●●● 로 기록</label>
+    </div>
+    <p class="faint">계좌번호는 주변에 '계좌'·'은행' 같은 말이 있을 때만 찾습니다. 글자가 여러 조각으로 나뉘어 표시된 번호는 못 찾을 수 있으니, 꼭 가려야 하는 곳은 아래 '항상 가릴 영역'에 넣으세요.</p>
     <div class="field">
       <label for="maskValueChars">입력값은 앞 몇 글자만 남기기</label>
       <input type="number" id="maskValueChars" min="0" max="40" step="1">

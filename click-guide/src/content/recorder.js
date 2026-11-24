@@ -66,6 +66,10 @@
 
   const SENSITIVE_RE = /pass|pwd|passwd|secret|token|card|cvc|cvv|ssn|security|otp|비밀번호|암호|주민|계좌|카드|보안/i;
 
+  /* 공용 가리기 코어(src/shared/redact-core.js, CleanShot Picker 와 같은 코드). 서비스 워커가 이 파일보다 먼저 싣는다.
+   * 없으면(이 파일만 따로 주입된 경우) 개인정보 자동 찾기 없이 예전처럼 요소 상자만 잰다. */
+  const RC = globalThis.RedactCore || null;
+
   /* ------------------------------------------------------------------ */
   /* 백그라운드 통신                                                      */
   /* ------------------------------------------------------------------ */
@@ -312,25 +316,109 @@
   /* 가릴 영역(민감 정보) 수집                                            */
   /* ------------------------------------------------------------------ */
 
-  function redactionRects() {
+  /* 가릴 대상: 비밀번호 칸, data-clickguide-redact, '항상 가릴 영역' 선택자, 그리고 (설정을 켜면)
+   * 화면 글자·입력값 속 개인정보(주민·외국인등록번호, 카드·계좌·휴대폰 번호, 이메일, 사업자등록번호).
+   * 좌표는 공용 가리기 코어로 잰 이 프레임의 화면 CSS px 이다. 스크롤 영역이나 화면 밖으로 나간 부분은 뺀다.
+   * 하위 프레임 안의 것은 그 프레임의 이 스크립트가 따로 재서 올려 보낸다. */
+  const REDACT_PAD = 3;
+  const MAX_REDACT = 400;
+
+  function redactionTargets() {
     if (!settings) return [];
     const sel = [];
     if (settings.maskPasswords) sel.push('input[type="password"]');
     sel.push('[data-clickguide-redact]');
     for (const s of (settings.redactSelectors || [])) { if (s && s.trim()) sel.push(s.trim()); }
-    if (!sel.length) return [];
     const out = [];
-    try {
-      const nodes = document.querySelectorAll(sel.join(','));
-      for (const n of nodes) {
-        const r = rectOf(n);
-        if (!r) continue;
-        if (r.x + r.width < 0 || r.y + r.height < 0 || r.x > innerWidth || r.y > innerHeight) continue;
-        out.push({ x: r.x - 3, y: r.y - 3, width: r.width + 6, height: r.height + 6 });
+    const seen = new Set();
+    // 한 뿌리(문서 또는 shadow root) 안에서 선택자로 찾는다
+    const queryRoot = (root) => {
+      const run = (selector) => {
+        for (const n of root.querySelectorAll(selector)) {
+          if (!seen.has(n) && !isOurs(n)) { seen.add(n); out.push({ el: n }); }
+        }
+      };
+      try { run(sel.join(',')); } catch (_) {
+        // 잘못된 선택자가 하나라도 있으면 묶음 전체가 실패한다. 예전에는 이때 비밀번호 칸까지 가리지 못했다.
+        for (const s of sel) { try { run(s); } catch (_) { /* 잘못된 선택자는 건너뛴다 */ } }
       }
-    } catch (_) { /* 잘못된 선택자 무시 */ }
-    return out.slice(0, 40);
+    };
+    if (!RC) { queryRoot(document); return out; }
+    // 공용 코어로 shadow root 안까지 찾는다. 화면 개인정보도 찾을 때는 한 번 훑으며 함께 한다(큰 페이지에서 두 번 훑지 않게).
+    try {
+      if (settings.maskScreenPII) {
+        out.push(...RC.piiTargets(document, { skip: isOurs, limit: MAX_REDACT, onRoot: queryRoot }));
+      } else {
+        queryRoot(document);
+        for (const sr of RC.shadowRoots(document, { skip: isOurs })) queryRoot(sr);
+      }
+    } catch (_) {
+      if (!seen.size) queryRoot(document);
+    }
+    return out;
   }
+
+  /* 대상 하나가 지금 보이는 사각형들 ({x,y,w,h}) */
+  function targetRects(t) {
+    if (RC) return RC.targetRects(t, t.range ? 0 : REDACT_PAD);
+    const r = t.el ? rectOf(t.el) : null;   // 공용 코어가 없을 때: 예전처럼 요소 상자 그대로
+    if (!r || r.x + r.width < 0 || r.y + r.height < 0 || r.x > innerWidth || r.y > innerHeight) return [];
+    return [{ x: r.x - REDACT_PAD, y: r.y - REDACT_PAD, w: r.width + REDACT_PAD * 2, h: r.height + REDACT_PAD * 2 }];
+  }
+
+  const asPayloadRect = (r) => ({ x: r.x, y: r.y, width: r.w, height: r.h });
+
+  /* 지금 화면에서 가릴 사각형들. measured 를 주면 대상별로 잰 값도 담아 준다(촬영 뒤 다시 잴 때 쓴다) */
+  function redactionRects(measured) {
+    const out = [];
+    for (const t of redactionTargets()) {
+      const rects = targetRects(t);
+      if (measured) measured.push({ t, rects });
+      for (const r of rects) { if (out.length < MAX_REDACT) out.push(asPayloadRect(r)); }
+    }
+    return out;
+  }
+
+  /* 클릭과 촬영 사이(보통 0.1~1초)에 모달이 뜨거나 화면이 밀리면 클릭 때 잰 좌표만으로는 엉뚱한 곳을 가린다.
+   * 그래서 서비스 워커가 촬영 직후 모든 프레임에 다시 묻는다(__CLICKGUIDE_REDACT_NOW__). 각 프레임은 지금 보이는 대상을 새로 재고,
+   * 클릭이 일어난 프레임은 클릭 때 잰 대상이 그사이 움직였으면 두 자리를 함께 덮는 사각형을 보낸다
+   * — 촬영 순간의 자리는 그 사이에 있기 때문이다. */
+  const redactWatch = new Map();   // clientId -> [{ t, rects }]
+
+  function watchRedactions(clientId, measured) {
+    if (!clientId || !measured.length) return;
+    redactWatch.set(clientId, measured);
+    setTimeout(() => redactWatch.delete(clientId), 4000);
+  }
+
+  function redactNow(clientId) {
+    const out = [];
+    const push = (r) => { if (r && out.length < MAX_REDACT) out.push(asPayloadRect(r)); };
+    const before = redactWatch.get(clientId);
+    redactWatch.delete(clientId);
+    for (const { t, rects } of (before || [])) {
+      const now = targetRects(t);
+      if (RC && rects.length === 1 && now.length === 1) push(RC.hull(rects[0], now[0]));
+      else { rects.forEach(push); now.forEach(push); }
+    }
+    for (const t of redactionTargets()) targetRects(t).forEach(push);
+    return out;
+  }
+
+  /* 서비스 워커가 촬영 직후 chrome.scripting.executeScript 로 모든 프레임에서 부른다.
+   * 이 함수는 확장의 격리된 환경(isolated world)에만 있어 페이지 스크립트는 부를 수 없다.
+   * 가릴 곳을 최상위 프레임 좌표로 올려 보내고(bubbleUp), 보낸 개수와 일회용 표식을 돌려준다.
+   * 서비스 워커는 표식이 모두 도착할 때까지 기다린다. */
+  function redactNowForWorker(clientId) {
+    if (!clientId || typeof clientId !== 'string' || !recording() || !settings) return { n: 0 };
+    let rects = [];
+    try { rects = redactNow(clientId); } catch (_) { rects = []; }
+    if (!rects.length) return { n: 0 };
+    const token = newNonce();
+    bubbleUp({ _kind: 'redact', clientId, token, redactions: rects });
+    return { n: rects.length, token };
+  }
+  window.__CLICKGUIDE_REDACT_NOW__ = redactNowForWorker;
 
   /* ------------------------------------------------------------------ */
   /* 캡처 요청 (iframe -> 최상위 프레임 좌표 보정)                         */
@@ -379,6 +467,10 @@
     if (IS_TOP) {
       if (payload._kind === 'corr') {
         send({ type: 'CORRECT_RECT', clientId: payload.clientId, rect: payload.rect || null, drop: !!payload.drop });
+        return;
+      }
+      if (payload._kind === 'redact') {
+        send({ type: 'REDACT_RECTS', clientId: payload.clientId, token: payload.token, redactions: payload.redactions || [] });
         return;
       }
       // 앞 요청의 응답을 기다리지 않고 바로 보낸다.
@@ -561,15 +653,21 @@
     if (key === lastClickKey && now - lastClickAt < 400) return;  // 더블클릭/중복 방지
     lastClickKey = key; lastClickAt = now;
 
-    bubbleUp({ type: 'click', ts: now, clientId: newClientId(), el: meta, rect, redactions: redactionRects() }, target);
+    const measured = [];
+    const redactions = redactionRects(measured);
+    const clientId = newClientId();
+    watchRedactions(clientId, measured);
+    bubbleUp({ type: 'click', ts: now, clientId, el: meta, rect, redactions }, target);
   }
 
   function maskValue(el, raw) {
     const meta = elMeta(el);
     const hay = [meta.type, meta.name, meta.id, meta.placeholder, meta.label].join(' ');
     const digits = String(raw).replace(/\D/g, '');
+    // 칸 이름이 평범해도 값이 주민·카드·계좌·휴대폰 번호, 이메일, 사업자등록번호 모양이면 가린다
+    const pii = !!(RC && settings.maskSensitiveValues && RC.findPII(String(raw), { context: hay }).length);
     const sensitive = meta.type === 'password'
-      || (settings.maskSensitiveValues && (SENSITIVE_RE.test(hay) || digits.length >= 12));
+      || (settings.maskSensitiveValues && (SENSITIVE_RE.test(hay) || digits.length >= 12 || pii));
     if (sensitive) return { value: '●'.repeat(Math.min(8, Math.max(4, String(raw).length))), masked: true };
     const keep = settings.maskValueChars | 0;
     if (keep > 0 && String(raw).length > keep) {
@@ -614,9 +712,13 @@
     if (!raw) return;
 
     const { value, masked } = maskValue(el, raw);
+    const measured = [];
+    const redactions = redactionRects(measured);
+    const clientId = newClientId();
+    watchRedactions(clientId, measured);
     bubbleUp({
-      type: stepType, ts: Date.now(), clientId: newClientId(), el: elMeta(el), value, masked,
-      rect: rectOf(el) || null, redactions: redactionRects()
+      type: stepType, ts: Date.now(), clientId, el: elMeta(el), value, masked,
+      rect: rectOf(el) || null, redactions
     }, el);
   }
 
@@ -903,6 +1005,7 @@
     try { window.removeEventListener('popstate', onPopState); } catch (_) { /* noop */ }
     try { if (hasNavigationApi) window.navigation.removeEventListener('navigate', onNavigate); } catch (_) { /* noop */ }
     try { if (onRuntimeMessage) chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch (_) { /* noop */ }
+    try { if (window.__CLICKGUIDE_REDACT_NOW__ === redactNowForWorker) delete window.__CLICKGUIDE_REDACT_NOW__; } catch (_) { /* noop */ }
     try { window.removeEventListener('resize', onResize); } catch (_) { /* noop */ }
     try { stopKeepAlive(); } catch (_) { /* noop */ }
     try { stopMutationWatch(); } catch (_) { /* noop */ }

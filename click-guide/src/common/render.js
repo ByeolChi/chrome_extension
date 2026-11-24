@@ -1,5 +1,8 @@
 /* 내보내기 렌더링: 스크린샷에 하이라이트/가림을 굽고, HTML·Markdown 문서를 만든다. */
 import { escapeHtml, formatDate } from './util.js';
+import '../shared/redact-core.js';   // 공용 가리기 코어 → globalThis.RedactCore
+
+const RC = globalThis.RedactCore;
 
 /* ---------------- 이미지 굽기 ---------------- */
 
@@ -45,18 +48,11 @@ export async function bakeStepImage(blob, step, settings, opts = {}) {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0);
 
-    // 1) 편집기에서 추가한 가림 영역 (녹화 중 가린 곳은 이미 저장 시점에 처리됨)
-    const reds = (step.redactions || [])
-      .map((r) => ({ x: r.x * w, y: r.y * h, w: r.w * w, h: r.h * h }))
-      .filter((r) => r.w > 1 && r.h > 1);
-    if (reds.length) {
-      const bc = document.createElement('canvas');
-      bc.width = w; bc.height = h;
-      const bctx = bc.getContext('2d');
-      bctx.filter = 'blur(16px)';
-      bctx.drawImage(img, 0, 0);
-      for (const r of reds) ctx.drawImage(bc, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
-    }
+    // 1) 편집기에서 추가한 가림 영역 (녹화 중 가린 곳은 이미 저장 시점에 처리됨). 0~1 좌표라 이미지 크기를 곱한다.
+    const reds = RC.toPixelRects(step.redactions || [], w, h, w, h);
+    RC.paintRedactions(ctx, reds, {
+      style: settings && settings.redactStyle === 'blur' ? 'blur' : 'box', source: img, width: w, height: h, blurPx: 16
+    });
 
     // 2) 하이라이트
     const showHl = (opts.highlight !== undefined ? opts.highlight : settings.highlight) && step.highlight !== false && step.nrect;

@@ -1,0 +1,49 @@
+<!doctype html><html><head><meta charset="utf-8"><title>가리기 시험</title>
+<!-- tests/e2e/click-guide/redact.mjs 가 쓰는 페이지. 빨간 상자는 가려져야 하는 것(스크린샷에 빨간 점이 남으면 실패) -->
+<style>
+body{margin:0;font:28px/1.25 sans-serif;color:#000;background:#fff}
+.abs{position:absolute;white-space:nowrap}
+button{position:absolute;width:160px;height:40px;font-size:16px}
+#open{left:20px;top:20px}
+#move{left:200px;top:20px}
+#plain{left:380px;top:20px}
+#modal{position:absolute;left:20px;top:90px;width:340px;height:70px;background:#f00}
+#mover{position:absolute;left:20px;top:200px;width:80px;height:60px;background:#f00;transition:left 1.2s linear}
+#checker{position:absolute;left:600px;top:20px;width:120px;height:120px;background:repeating-conic-gradient(#000 0 25%,#fff 0 50%) 0 0/20px 20px}
+#phone{left:20px;top:300px}
+#rrn{left:20px;top:350px}
+#mail{left:20px;top:400px}
+#ctlWrap{position:absolute;left:20px;top:450px}
+#acctTable{position:absolute;left:420px;top:300px;font-size:28px;border-collapse:collapse}
+#acctTable th,#acctTable td{padding:0 8px 0 0;font-weight:normal}
+#nohintWrap{position:absolute;left:420px;top:400px}
+#tel{position:absolute;left:420px;top:450px;width:300px;height:40px;font-size:24px}
+#pw{position:absolute;left:760px;top:300px;width:200px;height:40px;font-size:28px}
+#fx{position:absolute;left:760px;top:380px;width:320px;height:160px;border:0}
+</style></head><body>
+<button id="open" onclick="const d=document.createElement('div');d.id='modal';d.setAttribute('data-clickguide-redact','');document.body.append(d)">모달 열기</button>
+<button id="move" onclick="document.getElementById('mover').style.left='560px'">옮기기</button>
+<button id="plain">그냥 버튼</button>
+<div id="mover" data-clickguide-redact></div>
+<div id="checker" data-clickguide-redact></div>
+<span id="phone" class="abs">010-1234-5678</span>
+<span id="rrn" class="abs">900101-1234567</span>
+<span id="mail" class="abs">hong@example.com</span>
+<div id="ctlWrap"><div><div><span id="ctl">주문번호 2024-000123</span></div></div></div>
+<table id="acctTable"><tr><th>입금 계좌</th><td id="acct">110-123-456789</td></tr></table>
+<div id="nohintWrap"><div><div><span id="nohint">110-987-654321</span></div></div></div>
+<input id="tel" aria-label="메모">
+<input id="pw" type="password" value="secret-password">
+<iframe id="fx" src="http://127.0.0.1:18932/redact-frame.html"></iframe>
+<secret-box id="closedHost" style="display:block;position:absolute;left:20px;top:520px;width:380px;height:60px"></secret-box>
+<div id="openHost" style="position:absolute;left:420px;top:520px;width:300px;height:60px"></div>
+<script>
+// 닫힌 shadow root(웹 컴포넌트): 비밀번호 칸 + 휴대폰 번호, 열린 shadow root(div): 지정 영역(빨강)
+customElements.define('secret-box', class extends HTMLElement {});
+const closed = document.getElementById('closedHost').attachShadow({ mode: 'closed' });
+closed.innerHTML = '<input type="password" value="closed-secret" style="position:absolute;left:0;top:0;width:200px;height:40px;font-size:24px">'
+  + '<span style="position:absolute;left:220px;top:5px;font:24px/1.2 sans-serif;white-space:nowrap">010-2222-3333</span>';
+const open = document.getElementById('openHost').attachShadow({ mode: 'open' });
+open.innerHTML = '<div data-clickguide-redact style="position:absolute;left:0;top:0;width:120px;height:60px;background:#f00"></div>';
+</script>
+</body></html>
