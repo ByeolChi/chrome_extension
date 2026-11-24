@@ -1,11 +1,14 @@
 /* ClickGuide 백그라운드 서비스 워커
  * - 녹화 상태 관리 / 탭 추적
- * - 화면 캡처(직렬 큐 + 쿼터 재시도) / 리사이즈 / 민감영역 블러
+ * - 화면 캡처(직렬 큐 + 쿼터 재시도) / 리사이즈 / 민감 영역 가리기(검정 칠하기 또는 흐리게)
  * - 단계 저장(IndexedDB)
  */
 import { getSettings } from '../common/settings.js';
 import { describeStep, suggestGuideTitle } from '../common/describe.js';
 import * as db from '../common/db.js';
+import '../shared/redact-core.js';   // 공용 가리기 코어 → globalThis.RedactCore (CleanShot Picker 와 같은 코드)
+
+const RC = globalThis.RedactCore;
 
 const STATE_KEY = 'cg_state';
 const BAR_HIDDEN_KEY = 'cg_barHidden';
@@ -61,6 +64,7 @@ function contentSettings(cfg) {
     recordInputs: !!cfg.recordInputs,
     maskPasswords: !!cfg.maskPasswords,
     maskSensitiveValues: !!cfg.maskSensitiveValues,
+    maskScreenPII: !!cfg.maskScreenPII,
     maskValueChars: cfg.maskValueChars | 0,
     redactSelectors: Array.isArray(cfg.redactSelectors) ? cfg.redactSelectors.slice(0, 50) : []
   };
@@ -167,6 +171,61 @@ function enqueueStore(fn) {
  * 클릭 시점의 좌표가 어긋난다. 촬영 직후 콘텐츠 스크립트가 같은 요소를 다시 재서
  * 보내 주는 값을 여기서 기다렸다가 반영한다. */
 const rectCorrections = new Map();   // clientId -> resolve
+
+/* 촬영 직후 탭의 모든 프레임에서 '지금 가릴 곳'을 다시 잰다.
+ * 클릭 때 잰 가릴 곳만 쓰면 그사이 뜬 모달, 클릭하지 않은 다른 프레임의 비밀번호 칸 등을 놓친다.
+ *  1) executeScript 로 녹화 스크립트가 있는 모든 프레임에서 recorder.js 의 __CLICKGUIDE_REDACT_NOW__ 를 부른다.
+ *     (격리된 환경의 함수라 페이지 스크립트는 부를 수 없다) 각 프레임은 가릴 곳을 재서 최상위 프레임 좌표로
+ *     올려 보내고(iframe 위치 보정은 클릭과 같은 경로), 보낸 개수와 일회용 표식을 돌려준다.
+ *  2) 표식이 붙은 REDACT_RECTS 가 모두 올 때까지 기다린다. 보통 수십 ms 안에 끝난다.
+ *  3) 정해진 시간 안에 오지 않은 프레임이 있으면 complete: false — 그 화면은 가리지 못한 채라 저장하지 않는다.
+ *     프레임을 아예 확인하지 못한 경우(탭이 이미 다른 페이지로 넘어가는 중 등)는 클릭 때 잰 것으로 가린다. */
+const redactCollections = new Map();   // clientId -> { got: Map(token -> rects), wake }
+const REDACT_MAX_MS = 1500;
+
+function redactNowInFrame(id) {
+  const f = globalThis.__CLICKGUIDE_REDACT_NOW__;
+  return typeof f === 'function' ? f(id) : null;
+}
+
+async function collectRedactions(tabId, clientId, maxMs = REDACT_MAX_MS) {
+  if (!clientId) return { rects: [], complete: true };
+  const col = { got: new Map(), wake: null };
+  redactCollections.set(clientId, col);
+  const all = () => [...col.got.values()].flat();
+  try {
+    let results;
+    try {
+      results = await Promise.race([
+        chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: redactNowInFrame, args: [clientId] }),
+        sleep(maxMs).then(() => { throw new Error('프레임 확인 시간 초과'); })
+      ]);
+    } catch (e) {
+      return { rects: all(), complete: true, probeError: String((e && e.message) || e) };
+    }
+    const pending = (results || []).map((r) => r && r.result).filter((x) => x && x.n > 0 && typeof x.token === 'string').map((x) => x.token);
+    const deadline = Date.now() + maxMs;
+    while (pending.some((t) => !col.got.has(t)) && Date.now() < deadline) {
+      await new Promise((resolve) => {
+        col.wake = resolve;
+        setTimeout(resolve, Math.max(0, deadline - Date.now()));
+      });
+    }
+    const missing = pending.filter((t) => !col.got.has(t)).length;
+    return { rects: all(), complete: missing === 0, missing };
+  } finally {
+    redactCollections.delete(clientId);
+  }
+}
+
+/* 촬영은 끝났지만 아직 저장 큐에 넣지 않은 단계(가릴 곳을 모으는 중). 녹화를 끝낼 때 이것도 기다린다. */
+const postCapture = new Set();
+function trackPostCapture() {
+  let release = null;
+  const p = new Promise((r) => { release = r; });
+  postCapture.add(p);
+  return () => { postCapture.delete(p); release(); };
+}
 
 function awaitCorrection(clientId, ms = 260) {
   if (!clientId) return Promise.resolve(null);
@@ -301,15 +360,21 @@ async function prepareNavShot(tabId) {
   } catch (_) { return null; }
 }
 
-async function processShot(dataUrl, { maxWidth, quality, redactions, viewport }) {
+async function processShot(dataUrl, { maxWidth, quality, redactions, viewport, style }) {
   const srcBlob = await (await fetch(dataUrl)).blob();
   const bmp = await createImageBitmap(srcBlob);
+  const reds = Array.isArray(redactions) ? redactions : [];
 
   // 가릴 영역이 없고 이미 충분히 작으면 다시 인코딩하지 않는다 (CPU 절약)
-  if (!(redactions || []).length && bmp.width <= maxWidth) {
+  if (!reds.length && bmp.width <= maxWidth) {
     const w0 = bmp.width, h0 = bmp.height;
     bmp.close();
     return { blob: srcBlob, width: w0, height: h0 };
+  }
+  // 가릴 곳이 있는데 기준 화면 크기를 모르면 어디를 가릴지 알 수 없다. 가리지 않은 이미지를 남기지 않는다.
+  if (reds.length && !(viewport && viewport.w > 0)) {
+    bmp.close();
+    throw new Error('가릴 영역의 기준 화면 크기를 몰라 스크린샷을 저장하지 않았습니다.');
   }
 
   const scale = Math.min(1, maxWidth / bmp.width);
@@ -320,20 +385,13 @@ async function processShot(dataUrl, { maxWidth, quality, redactions, viewport })
   const ctx = canvas.getContext('2d');
   ctx.drawImage(bmp, 0, 0, w, h);
 
-  const rects = (redactions || [])
-    .map((r) => normRect(r, viewport, w, h))
-    .filter(Boolean)
-    .map((r) => ({ x: r.x * w, y: r.y * h, w: r.w * w, h: r.h * h }))
-    .filter((r) => r.w > 1 && r.h > 1);
-
-  if (rects.length) {
-    const blurCanvas = new OffscreenCanvas(w, h);
-    const bctx = blurCanvas.getContext('2d');
-    bctx.filter = 'blur(14px)';
-    bctx.drawImage(bmp, 0, 0, w, h);
-    for (const r of rects) {
-      ctx.drawImage(blurCanvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
-    }
+  // 좌표는 최상위 화면의 CSS px. 가로 배율 하나로 맞춘다
+  // (기기 에뮬레이션 등으로 innerHeight 와 캡처 높이가 다를 수 있기 때문 — normRect 와 같은 기준).
+  if (reds.length) {
+    const k = w / viewport.w;
+    RC.paintRedactions(ctx, RC.toPixelRects(reds, k, k, w, h), {
+      style: style === 'blur' ? 'blur' : 'box', source: bmp, width: w, height: h, blurPx: 14
+    });
   }
 
   bmp.close();
@@ -464,7 +522,7 @@ async function ensureContentScript(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ['src/content/recorder.js']
+      files: ['src/shared/redact-core.js', 'src/content/recorder.js']
     });
     return { ok: true };
   } catch (e) {
@@ -493,7 +551,7 @@ async function registerRecorder() {
     await chrome.scripting.registerContentScripts([{
       id: RECORDER_ID,
       matches: ['<all_urls>'],
-      js: ['src/content/recorder.js'],
+      js: ['src/shared/redact-core.js', 'src/content/recorder.js'],
       allFrames: true,
       runAt: 'document_start',
       persistAcrossSessions: false
@@ -588,6 +646,7 @@ async function stopRecording({ openEditor = true, discard = false } = {}) {
   if (discard && sessionId) discarded.add(sessionId);
   // 아직 저장 중인 단계가 있으면 기다린다 (마지막 클릭이 유실되지 않도록)
   await Promise.race([captureChain.catch(() => {}), sleep(6000)]);
+  await Promise.race([Promise.allSettled([...postCapture]), sleep(6000)]);
   await Promise.race([storeChain.catch(() => {}), sleep(6000)]);
   slotBook = null;
   frameCache = null;
@@ -617,7 +676,7 @@ async function stopRecording({ openEditor = true, discard = false } = {}) {
 
 /* 콘텐츠 스크립트(웹페이지 쪽)가 보낼 수 있는 메시지. 나머지는 확장 페이지에서만 받는다. */
 const CONTENT_MESSAGES = new Set([
-  'GET_STATE', 'CAPTURE_STEP', 'PAGE_LOADED', 'CORRECT_RECT', 'FRAME_UP', 'REMEASURE',
+  'GET_STATE', 'CAPTURE_STEP', 'PAGE_LOADED', 'CORRECT_RECT', 'FRAME_UP', 'REMEASURE', 'REDACT_RECTS',
   'PAUSE', 'RESUME', 'STOP', 'SET_BAR_HIDDEN', 'SET_BAR_POS'
 ]);
 // 녹화 바의 버튼이 보내는 메시지 — 녹화 대상 탭에서 온 것만 받는다
@@ -721,32 +780,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
         sendResponse({ ok: true, capturedAt: shotAt, wantRect: !!dataUrl });
 
-        // 촬영 직후 좌표 재측정 결과를 기다렸다가 저장 큐로 넘긴다 (순서 유지)
-        const correction = await awaitCorrection(payload.clientId);
-        if (correction) {
-          if (correction.drop) { payload.dropHighlight = true; frameCache = null; }
-          else if (correction.rect) {
-            const o = payload.rect;
-            if (o && (Math.abs(o.x - correction.rect.x) > 3 || Math.abs(o.y - correction.rect.y) > 3)) frameCache = null;
-            payload.rect = correction.rect;
+        // 촬영 직후 좌표 재측정 결과와, 모든 프레임이 지금 잰 가릴 곳을 함께 기다렸다가 저장 큐로 넘긴다 (순서 유지)
+        const donePost = trackPostCapture();
+        try {
+          const [correction, late] = await Promise.all([
+            awaitCorrection(payload.clientId),
+            dataUrl ? collectRedactions(tab.id, payload.clientId) : Promise.resolve({ rects: [], complete: true })
+          ]);
+          if (!late.complete) {
+            dataUrl = null;   // 가리지 못한 화면은 남기지 않는다
+            payload.shotError = '가릴 곳을 모든 프레임에서 확인하지 못해 화면을 저장하지 않았습니다.';
           }
+          if (correction) {
+            if (correction.drop) { payload.dropHighlight = true; frameCache = null; }
+            else if (correction.rect) {
+              const o = payload.rect;
+              if (o && (Math.abs(o.x - correction.rect.x) > 3 || Math.abs(o.y - correction.rect.y) > 3)) frameCache = null;
+              payload.rect = correction.rect;
+            }
+          }
+          payload.lateMs = Math.max(0, shotAt - (payload.ts || Date.now()));
+          enqueueStore(async () => {
+            let shot = null;
+            if (dataUrl) {
+              try {
+                shot = await processShot(dataUrl, {
+                  maxWidth: cfg.maxImageWidth,
+                  quality: cfg.jpegQuality,
+                  // 클릭 때 잰 것 + 촬영 직후 모든 프레임이 잰 것. 겹쳐도 한 번 더 칠할 뿐이다.
+                  redactions: (payload.redactions || []).concat(late.rects),
+                  viewport: payload.viewport,
+                  style: cfg.redactStyle
+                });
+              } catch (e) {
+                console.warn('[ClickGuide] 이미지 처리 실패', e);
+                payload.shotError = payload.shotError || String((e && e.message) || e);
+              }
+            }
+            dataUrl = null;
+            await addStep(payload, shot, slot);
+          });
+        } finally {
+          donePost();   // 저장 큐에 넣었으면 녹화 종료는 저장 큐를 기다린다
         }
-        payload.lateMs = Math.max(0, shotAt - (payload.ts || Date.now()));
-        enqueueStore(async () => {
-          let shot = null;
-          if (dataUrl) {
-            try {
-              shot = await processShot(dataUrl, {
-                maxWidth: cfg.maxImageWidth,
-                quality: cfg.jpegQuality,
-                redactions: payload.redactions || [],
-                viewport: payload.viewport
-              });
-            } catch (e) { console.warn('[ClickGuide] 이미지 처리 실패', e); }
-          }
-          dataUrl = null;
-          await addStep(payload, shot, slot);
-        });
         return;
       }
 
@@ -776,10 +852,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               } else {
                 const r = await captureVisible(fresh.windowId, cfg.jpegQuality, fresh.id, { url: msg.url });
                 if (r.dataUrl) {
-                  shot = await processShot(r.dataUrl, {
-                    maxWidth: cfg.maxImageWidth, quality: cfg.jpegQuality,
-                    redactions: prep.redactions || [], viewport: prep.viewport
-                  });
+                  // prep 은 최상위 문서만 잰다. 촬영 직후 모든 프레임(iframe 포함)이 잰 가릴 곳을 더한다.
+                  const late = await collectRedactions(fresh.id, `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+                  if (!late.complete) {
+                    shotError = '가릴 곳을 모든 프레임에서 확인하지 못해 화면을 저장하지 않았습니다.';
+                  } else {
+                    shot = await processShot(r.dataUrl, {
+                      maxWidth: cfg.maxImageWidth, quality: cfg.jpegQuality,
+                      redactions: (prep.redactions || []).concat(late.rects), viewport: prep.viewport, style: cfg.redactStyle
+                    });
+                  }
                 } else shotError = r.error || '';
               }
             } else {
@@ -801,6 +883,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'CORRECT_RECT': {
         const fn = rectCorrections.get(msg.clientId);
         if (fn) fn({ rect: msg.rect || null, drop: !!msg.drop });
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // 촬영 직후 프레임들이 잰 가릴 곳. 최상위 프레임이 하위 프레임 것까지 자기 좌표로 옮겨 보낸다.
+      case 'REDACT_RECTS': {
+        const col = redactCollections.get(msg.clientId);
+        if (col && sender.tab && sender.frameId === 0 && typeof msg.token === 'string' && Array.isArray(msg.redactions)) {
+          const st = await getState();
+          if (st.recording && (st.tabIds || []).includes(sender.tab.id)) {
+            const rects = [];
+            for (const r of msg.redactions.slice(0, 400)) {
+              if (r && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0) {
+                rects.push({ x: r.x, y: r.y, width: r.width, height: r.height });
+              }
+            }
+            col.got.set(msg.token, rects);
+            if (col.wake) col.wake();
+          }
+        }
         sendResponse({ ok: true });
         return;
       }

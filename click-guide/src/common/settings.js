@@ -11,8 +11,10 @@ export const DEFAULT_SETTINGS = {
   recordNavigation: true,      // 페이지 이동 기록
   followNewTabs: true,         // 녹화 중 새로 열린 탭도 따라가기
 
-  maskPasswords: true,         // password 입력칸 자동 블러
-  maskSensitiveValues: true,   // 민감해 보이는 입력값은 ●●●● 로 치환
+  maskPasswords: true,         // password 입력칸 자동 가리기
+  maskSensitiveValues: true,   // 민감해 보이는 입력값(칸 이름, 개인정보 모양의 값)은 ●●●● 로 치환
+  maskScreenPII: true,         // 화면 글자·입력값 속 개인정보(주민·카드·계좌·휴대폰 번호, 이메일 등)를 스크린샷에서 가리기
+  redactStyle: 'box',          // 'box' 검정 칠하기 | 'blur' 흐리게. 흐리게는 숫자를 복원하는 공격에 약해 기본은 검정
   redactSelectors: [],         // 추가로 가릴 CSS 선택자 목록
   maskValueChars: 0,           // 0 = 값 전체 기록, n>0 이면 앞 n자만 남기고 마스킹
 
@@ -43,8 +45,11 @@ const NUMERIC = {
   highlightWidth: { min: 1, max: 10, emptyIfZero: true }
 };
 
+const REDACT_STYLES = ['box', 'blur'];
+
 export function normalizeSettings(s) {
   const out = { ...s };
+  if (!REDACT_STYLES.includes(out.redactStyle)) out.redactStyle = DEFAULT_SETTINGS.redactStyle;
   for (const [key, r] of Object.entries(NUMERIC)) {
     const v = s[key];
     const n = (v === '' || v === null || v === undefined) ? NaN : Number(v);

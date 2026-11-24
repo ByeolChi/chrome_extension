@@ -55,6 +55,7 @@ li.step:hover .tools, li.step:focus-within .tools { opacity: 1; }
   position: absolute; backdrop-filter: blur(9px); background: rgba(120,120,130,.18);
   border: 1px dashed rgba(255,255,255,.55); border-radius: 4px; pointer-events: auto;
 }
+.rd-box.solid { backdrop-filter: none; background: #000; border-color: rgba(255,255,255,.35); border-radius: 0; }
 .rd-box button {
   position: absolute; top: -9px; right: -9px; width: 20px; height: 20px; padding: 0; border-radius: 50%;
   font-size: 12px; line-height: 1; background: var(--danger); color: #fff; border: none; cursor: pointer;

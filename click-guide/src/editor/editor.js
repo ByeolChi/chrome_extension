@@ -179,7 +179,8 @@ function drawOverlay(node, step) {
 
   (step.redactions || []).forEach((r, i) => {
     const b = document.createElement('div');
-    b.className = 'rd-box';
+    // 내보내기와 같은 모습으로 보여 준다: 검정 칠하기(기본) 또는 흐리게
+    b.className = S.settings.redactStyle === 'blur' ? 'rd-box' : 'rd-box solid';
     Object.assign(b.style, { left: pct(r.x), top: pct(r.y), width: pct(r.w), height: pct(r.h) });
     const x = document.createElement('button');
     x.type = 'button';
