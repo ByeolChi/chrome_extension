@@ -2,7 +2,7 @@
 # 사용법 (저장소 최상위 폴더에서):
 #   pwsh scripts/build-zip.ps1 -Extension ssoda               # 현재 버전으로 zip 생성
 #   pwsh scripts/build-zip.ps1 -Extension ssoda -Bump patch   # 1.3.4 -> 1.3.5 로 올린 뒤 zip 생성 (minor / major 도 가능)
-#   pwsh scripts/build-zip.ps1 -Extension cleanshot-picker -AllowNoKey   # manifest 에 key 가 없는 확장
+#   pwsh scripts/build-zip.ps1 -Extension jira-weekly-report -AllowNoKey   # manifest 에 key 가 없는 확장
 # 결과: <확장 폴더>/dist/<확장 폴더>-v<버전>.zip  (zip 안 최상위에 manifest.json 이 바로 있음)
 # 검사:
 #   - 허용 목록에 있는 파일만 넣는다 (개인키·패키지 파일이 섞이면 중단)
