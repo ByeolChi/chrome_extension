@@ -1,12 +1,12 @@
 // ssoda cURL 실행 도우미 시험 실행기
-// 사용: 저장소 최상위에서 npm run test:helper   (또는 node tests/ssoda-helper/run.mjs [helper] [curl-path] [ssh])
-// 차례로 실행하고, 하나라도 실패하면 종료 코드 1. 준비가 안 된 시험(예: paramiko 없음)은 "준비 안 됨"으로 표시하고 실패로 치지 않는다.
+// 사용: 저장소 최상위에서 npm run test:helper   (또는 node tests/ssoda-helper/run.mjs [helper] [curl-path] [ssh] [machine])
+// 차례로 실행하고, 하나라도 실패하면 종료 코드 1. 준비가 안 된 시험(예: paramiko 없음, Windows 가 아닌 PC 의 machine)은 "준비 안 됨"으로 표시하고 실패로 치지 않는다.
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SUITES = { helper: 'helper.mjs', 'curl-path': 'curl-path.mjs', ssh: 'ssh.mjs' };
+const SUITES = { helper: 'helper.mjs', 'curl-path': 'curl-path.mjs', ssh: 'ssh.mjs', machine: 'machine.mjs' };
 
 const picked = process.argv.slice(2);
 const unknown = picked.filter((n) => !SUITES[n]);

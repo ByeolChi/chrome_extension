@@ -18,9 +18,11 @@
 
 확장 프로그램별 권한, 설정, 사용법은 각 폴더의 README를 참고하세요.
 
+망분리 PC나 회사가 정책으로 관리하는 PC에 배포하려면 [docs/airgap-deploy.md](docs/airgap-deploy.md) 를 보세요. 개발자 모드를 쓸 수 없는 PC에 정책으로 설치하는 방법, 확장 ID 표, Ssoda 도우미를 PC 전체에 등록하는 방법이 있습니다.
+
 ## 개발
 
 - **테스트**: 저장소 최상위에서 `npm test` (Node 22 이상, 설치할 패키지 없음). `tests/` 의 단위 테스트가 각 확장의 실제 모듈을 그대로 불러와 확인합니다.
 - **브라우저 시험**: `npm run test:e2e` (약 3분). 확장을 Playwright 의 Chromium 에 실제로 올려 확인합니다. 준비와 시험 내용은 [tests/e2e/README.md](tests/e2e/README.md) 를 보세요.
-- **ssoda 도우미 시험**: `npm run test:helper`. cURL 실행 도우미를 실제 curl·ssh 와 함께 직접 실행해 보안 검사와 SSH 터널을 확인합니다. 준비는 [tests/ssoda-helper/README.md](tests/ssoda-helper/README.md) 를 보세요.
+- **ssoda 도우미 시험**: `npm run test:helper`. cURL 실행 도우미를 실제 curl·ssh 와 함께 직접 실행해 보안 검사, SSH 터널, PC 전체 등록 스크립트를 확인합니다. 준비는 [tests/ssoda-helper/README.md](tests/ssoda-helper/README.md) 를 보세요.
 - **배포 zip**: `pwsh scripts/build-zip.ps1 -Extension <폴더 이름>` (Windows PowerShell 5.1 도 가능). `-Bump patch` 를 붙이면 manifest 와 위 표의 버전을 함께 올립니다. manifest 에 `key`(확장 ID 고정)가 없는 확장은 `-AllowNoKey` 가 있어야 만듭니다.
