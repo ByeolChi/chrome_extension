@@ -18,6 +18,15 @@
     return;
   }
 
+  /* 화면 위치 계산(요소의 화면 좌표, iframe 위치, 스크롤 영역에 잘린 부분)은 공용 가리기 코어를 쓴다.
+     ClickGuide 도 같은 코드로 가릴 곳을 잰다. 코어는 이 파일보다 먼저 주입된다(background.js 의 INJECT_FILES). */
+  const RC = globalThis.RedactCore;
+  if (!RC) {
+    console.error('[CleanShot] 공용 가리기 코어(shared/redact-core.js)가 실리지 않았습니다.');
+    return;
+  }
+  const { styleOf, parentOf, frameOf, contentBox, docOffset, viewSize, rectOf, intersect, clipVisible } = RC;
+
   /* ============================================================ 상수와 상태 */
 
   const HOST_ID = '__cleanshot_host__';
@@ -518,65 +527,8 @@
   /* ============================================================ 좌표
    * 모든 좌표는 "최상위 화면 좌표"(최상위 문서의 viewport 기준 CSS px)로 다룬다.
    * iframe 안 요소는 그 iframe 의 내용 영역 위치를 더해 바꾼다.
+   * 계산 함수(rectOf·docOffset·clipVisible 등)는 맨 위에서 공용 가리기 코어(RC)에서 꺼내 쓴다.
    */
-
-  function styleOf(el) {
-    const v = el.ownerDocument && el.ownerDocument.defaultView;
-    return (v || window).getComputedStyle(el);
-  }
-
-  function frameOf(doc) {
-    try {
-      return (doc && doc !== document && doc.defaultView && doc.defaultView.frameElement) || null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /* iframe 의 내용 영역 — 안쪽 문서의 화면 — 을 iframe 이 속한 문서의 화면 좌표로 */
-  function contentBox(f) {
-    const r = f.getBoundingClientRect();
-    const cs = styleOf(f);
-    const pl = parseFloat(cs.paddingLeft) || 0;
-    const pt = parseFloat(cs.paddingTop) || 0;
-    const pr = parseFloat(cs.paddingRight) || 0;
-    const pb = parseFloat(cs.paddingBottom) || 0;
-    return {
-      x: r.left + f.clientLeft + pl,
-      y: r.top + f.clientTop + pt,
-      w: Math.max(0, f.clientWidth - pl - pr),
-      h: Math.max(0, f.clientHeight - pt - pb)
-    };
-  }
-
-  /* 문서 doc 의 화면 원점이 최상위 화면 좌표로 어디인지 */
-  function docOffset(doc) {
-    let x = 0;
-    let y = 0;
-    for (let d = doc, i = 0; d && d !== document && i < 16; i++) {
-      const f = frameOf(d);
-      if (!f) break;
-      const b = contentBox(f);
-      x += b.x;
-      y += b.y;
-      d = f.ownerDocument;
-    }
-    return { x, y };
-  }
-
-  function viewSize(doc) {
-    const e = doc.compatMode === 'BackCompat' ? doc.body : doc.documentElement;
-    const w = e ? e.clientWidth : 0;
-    const h = e ? e.clientHeight : 0;
-    const v = doc.defaultView;
-    return { w: w || (v ? v.innerWidth : 0), h: h || (v ? v.innerHeight : 0) };
-  }
-
-  function rectOf(el) {
-    const r = el.getBoundingClientRect();
-    const o = docOffset(el.ownerDocument);
-    return { x: r.left + o.x, y: r.top + o.y, w: r.width, h: r.height };
-  }
 
   /* 이벤트 좌표를 최상위 화면 좌표로 */
   function pt(e) {
@@ -584,64 +536,6 @@
     if (doc === document) return { x: e.clientX, y: e.clientY };
     const o = docOffset(doc);
     return { x: e.clientX + o.x, y: e.clientY + o.y };
-  }
-
-  function intersect(a, b, cx, cy) {
-    let x0 = a.x, y0 = a.y, x1 = a.x + a.w, y1 = a.y + a.h;
-    if (cx) { x0 = Math.max(x0, b.x); x1 = Math.min(x1, b.x + b.w); }
-    if (cy) { y0 = Math.max(y0, b.y); y1 = Math.min(y1, b.y + b.h); }
-    if (x1 - x0 <= 0 || y1 - y0 <= 0) return null;
-    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-  }
-
-  /* box 를 실제로 보이는 부분만 남게 자른다.
-     el 의 조상 중 overflow 가 visible 이 아닌 것과, 문서마다 그 화면(iframe 내용 영역)으로 자른다.
-     position 이 fixed·absolute 인 것을 만나면 그 위 조상은 따지지 않는다.
-     어느 조상이 정말 자르는지 확실하지 않을 때는 자르지 않는다 — 덜 가리는 쪽으로 틀리면 안 된다. */
-  function clipVisible(el, doc, box) {
-    let r = box;
-    let cur = el;
-    let d = doc;
-    for (let hop = 0; d && hop < 16; hop++) {
-      const off = docOffset(d);
-      if (cur) {
-        const htmlClips = styleOf(d.documentElement).overflowX !== 'visible' ||
-          styleOf(d.documentElement).overflowY !== 'visible';
-        let pos = styleOf(cur).position;
-        let p = parentOf(cur);
-        while (p && p !== d.documentElement) {
-          if (pos === 'fixed' || pos === 'absolute') break;
-          const cs = styleOf(p);
-          const hasBox = cs.display !== 'inline' && cs.display !== 'contents';
-          // body 의 overflow 는 html 이 visible 이면 화면으로 넘어가고 body 자신은 자르지 않는다
-          const passes = p === d.body && !htmlClips;
-          if (hasBox && !passes) {
-            const cx = cs.overflowX !== 'visible';
-            const cy = cs.overflowY !== 'visible';
-            if (cx || cy) {
-              const pr = p.getBoundingClientRect();
-              r = intersect(r, {
-                x: pr.left + p.clientLeft + off.x,
-                y: pr.top + p.clientTop + off.y,
-                w: p.clientWidth,
-                h: p.clientHeight
-              }, cx, cy);
-              if (!r) return null;
-            }
-          }
-          if (cs.display !== 'contents') pos = cs.position;
-          p = parentOf(p);
-        }
-      }
-      const vs = viewSize(d);
-      r = intersect(r, { x: off.x, y: off.y, w: vs.w, h: vs.h }, true, true);
-      if (!r) return null;
-      const f = frameOf(d);
-      if (!f) break;
-      cur = f;
-      d = f.ownerDocument;
-    }
-    return r;
   }
 
   /* ============================================================ 도구 전환 */
@@ -824,13 +718,6 @@
       else break;
     }
     return cur;
-  }
-
-  /* shadow root 의 맨 위 요소는 parentElement 가 없다. 그 위는 호스트다. */
-  function parentOf(el) {
-    if (el.parentElement) return el.parentElement;
-    const r = el.parentNode;
-    return r && r.nodeType === 11 && r.host ? r.host : null;
   }
 
   /* ↑ 키로 올라갈 때: iframe 안 맨 위 요소의 위는 그 iframe 이다 */

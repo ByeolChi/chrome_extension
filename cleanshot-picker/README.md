@@ -112,6 +112,8 @@ cleanshot-picker/
 ├── manifest.json     권한과 진입점 선언 (MV3)
 ├── background.js     service worker — 주입, 캡처, 가리기 박스 칠하기, 저장
 ├── picker.js         content script — 오버레이, 다섯 도구, 작업 스택
+├── shared/
+│   └── redact-core.js  공용 가리기 코어 — 화면 좌표·잘린 부분 계산, 검정 칠하기 (ClickGuide 와 같은 파일)
 ├── icons/            16 / 32 / 48 / 128 px
 └── README.md
 ```
@@ -120,6 +122,10 @@ cleanshot-picker/
 closed 라서 페이지 스크립트가 툴바 버튼에 손댈 수 없고, popover 로 띄워 top layer 에 올라갑니다.
 캡처 직전 `.capturing` 클래스로 UI 레이어만 숨기므로 가리기 박스는 사진에 남고 툴바는 빠집니다.
 그와 별도로 `background.js` 가 같은 사각형을 PNG 에 직접 칠합니다.
+
+`shared/redact-core.js` 는 ClickGuide 와 함께 쓰는 공용 모듈입니다. 원본은 저장소 최상위 `shared/` 에 있고,
+고친 뒤 `node scripts/sync-shared.mjs` 로 이 폴더에 복사합니다(사본을 직접 고치지 않습니다).
+피커를 주입할 때 이 파일을 먼저 싣고, `background.js` 도 `importScripts` 로 불러옵니다.
 
 되돌리기는 종류별 목록이 아니라 **하나의 작업 스택**입니다. 각 작업이 자기 복원 함수를 들고 있어
 `Ctrl+Z` 는 무엇이 마지막이었는지 몰라도 되고, 전체 복원은 스택을 비우는 것과 같습니다.

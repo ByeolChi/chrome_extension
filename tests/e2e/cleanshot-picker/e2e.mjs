@@ -37,7 +37,8 @@ const fmt = (r) => r ? `${r.x.toFixed(1)},${r.y.toFixed(1)} ${r.w.toFixed(1)}x${
 function syncExt() {
   fs.rmSync(EXT, { recursive: true, force: true });
   fs.mkdirSync(path.join(EXT, 'icons'), { recursive: true });
-  for (const f of ['picker.js', 'background.js']) fs.copyFileSync(path.join(SRC, f), path.join(EXT, f));
+  fs.mkdirSync(path.join(EXT, 'shared'), { recursive: true });
+  for (const f of ['picker.js', 'background.js', 'shared/redact-core.js']) fs.copyFileSync(path.join(SRC, f), path.join(EXT, f));
   for (const f of fs.readdirSync(path.join(SRC, 'icons'))) fs.copyFileSync(path.join(SRC, 'icons', f), path.join(EXT, 'icons', f));
   const man = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'));
   man.host_permissions = ['<all_urls>'];

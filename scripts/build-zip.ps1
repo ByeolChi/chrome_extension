@@ -32,7 +32,7 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 $includes = @{
   'ssoda'              = @('manifest.json', 'app.html', 'background.js', 'css', 'icons', 'js', 'native-host', 'README.md', 'EDGE.md')
   'click-guide'        = @('manifest.json', '_locales', 'icons', 'src', 'README.md', 'LICENSE')
-  'cleanshot-picker'   = @('manifest.json', 'background.js', 'picker.js', 'icons', 'README.md')
+  'cleanshot-picker'   = @('manifest.json', 'background.js', 'picker.js', 'shared', 'icons', 'README.md')
   'jira-weekly-report' = @('manifest.json', 'popup.html', 'popup.js', 'options.html', 'options.js', 'ui.css', 'src', 'icons', 'README.md')
 }
 $include = $includes[$Extension]
