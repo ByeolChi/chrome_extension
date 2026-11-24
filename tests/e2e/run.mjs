@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SUITES = {
   ssoda: [{ file: 'ssoda/e2e.mjs' }],
-  'click-guide': [{ file: 'click-guide/e2e.mjs' }],
+  'click-guide': [
+    { file: 'click-guide/e2e.mjs' },
+    { file: 'click-guide/backup.mjs', label: '전체 백업·ID 고정' },
+  ],
   'cleanshot-picker': [
     { file: 'cleanshot-picker/e2e.mjs', env: { DPR: '1' }, label: '화면 배율 1' },
     { file: 'cleanshot-picker/e2e.mjs', env: { DPR: '2' }, label: '화면 배율 2' },

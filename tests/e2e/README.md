@@ -6,6 +6,7 @@
 |---|---|---|
 | `ssoda/e2e.mjs` | 11 | JSON Beautify·응답 Pretty 에서 큰 정수 보존, 끝나지 않는 SSE 응답이 다음 요청을 막지 않음, 같은 서버 대기 표시와 타임아웃, 히스토리(보낸 시점 기록, 컬렉션 인증·변수 유지), 백업 복원 확인창, 도우미 업데이트 안내, 리다이렉트 헤더 섞임 경고, 앱 탭 두 개 |
 | `click-guide/e2e.mjs` | 52 | 녹화 대상 탭 한정, 기록 버리기, 이동 단계 스크린샷 가리기, SPA 화면 전환, iframe 좌표·값 전달, AI 로 보내는 내용, 녹화 바(closed shadow root) 조작, 설정값 보정, 속도 진단, 뒤로 가기 캐시 |
+| `click-guide/backup.mjs` | 12 | 확장 ID 고정(manifest `key` → 고정 ID), `key` 를 뺀 이전 버전에서 전체 백업 내려받기 → 새 프로필의 고정 ID 확장으로 가져오기. 가이드·단계·스크린샷 바이트 일치, API 키 제외·유지, 손상된 백업 거부, 다시 가져와도 겹치지 않음 |
 | `cleanshot-picker/e2e.mjs` | 69 | 가리기 박스가 요소를 따라감(고정·sticky·내부 스크롤·iframe·영역), 캡처 PNG 에 검정이 칠해졌는지 픽셀로 판정, dialog·popover 위 표시, 텍스트 되돌리기, shadow DOM·iframe 안 요소 선택, 대체 저장. 화면 배율 1·2 에서 각각 실행 |
 
 ## 준비
@@ -40,7 +41,7 @@ node tests/e2e/click-guide/e2e.mjs --only=tabs,discard   # 구역 일부만
 
 ## 알아 둘 점
 
-- 쓰는 포트: 브라우저 디버깅 9301(click-guide)·9302(cleanshot-picker)·9303(ssoda), 시험용 웹 서버 18931·18932(click-guide)·8930(cleanshot-picker). ssoda 는 빈 포트를 골라 씁니다.
+- 쓰는 포트: 브라우저 디버깅 9301(click-guide, 두 시험이 차례로 씀)·9302(cleanshot-picker)·9303(ssoda), 시험용 웹 서버 18931·18932(click-guide)·8930(cleanshot-picker). ssoda 는 빈 포트를 골라 씁니다.
 - cleanshot-picker 는 아이콘을 눌러야 생기는 activeTab 권한을 CDP 로 줄 수 없습니다. 그래서 manifest 에 `host_permissions` 만 더한 시험용 사본을 임시 폴더에 만들어 올립니다. 코드는 같습니다.
 - ssoda 시험은 브라우저 전송 경로만 확인합니다. PC 의 curl·cURL 실행 도우미·SSH 터널 경로는 [tests/ssoda-helper](../ssoda-helper/README.md) 의 시험(`npm run test:helper`)이 확인합니다.
 - Windows 11 과 Playwright Chromium 131(headless)에서 확인했습니다. 다른 OS 와 실제 Chrome·Edge 에서 아이콘을 눌러 보는 확인은 하지 않았습니다.
