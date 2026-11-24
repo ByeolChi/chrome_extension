@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClickGuide — 클릭 자동 캡처 매뉴얼 생성기",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "웹에서 클릭·입력하는 과정을 자동으로 캡처하고 단계별 설명을 붙여 매뉴얼 가이드를 만듭니다.",
   "default_locale": "ko",
   "minimum_chrome_version": "116",
