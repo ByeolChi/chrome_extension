@@ -40,7 +40,8 @@
     { id: 'move',   key: '2', label: '이동',   cursor: 'move' },
     { id: 'resize', key: '3', label: '크기',   cursor: 'crosshair' },
     { id: 'text',   key: '4', label: '텍스트', cursor: 'text' },
-    { id: 'mask',   key: '5', label: '가리기', cursor: 'crosshair' }
+    { id: 'mask',   key: '5', label: '가리기', cursor: 'crosshair' },
+    { id: 'crop',   key: '6', label: '영역',   cursor: 'crosshair' }
   ];
 
   const HANDLE_DIRS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -61,6 +62,7 @@
     pointer: { x: 0, y: 0 }, // 최상위 화면 좌표
     history: [],             // { kind, el, undo, t }
     masks: [],               // { box, anchor, size, view, last } — "5 가리기" 참고
+    crop: null,              // { anchor, size, view, last } — "6 영역" 참고. 있으면 그 부분만 저장·복사
     drag: null,
     editing: null,
     editSnapshot: null,
@@ -127,6 +129,14 @@
         position: absolute;
         border: 1px dashed #f2f2f3;
         background: rgba(0,0,0,0.55);
+        pointer-events: none;
+        display: none;
+      }
+      /* 6 영역: 저장·복사할 부분. 바깥을 어둡게 보여 준다 (UI 층이라 캡처 직전에 사라진다) */
+      .crop {
+        position: absolute;
+        outline: 2px dashed #2f6fed;
+        box-shadow: 0 0 0 200vmax rgba(0,0,0,0.38);
         pointer-events: none;
         display: none;
       }
@@ -209,6 +219,7 @@
     <div class="masks"></div>
 
     <div class="ui">
+      <div class="crop"></div>
       <div class="hl"></div>
       <div class="tag"></div>
       <div class="marquee"></div>
@@ -238,6 +249,7 @@
     hl: root.querySelector('.hl'),
     tag: root.querySelector('.tag'),
     marquee: root.querySelector('.marquee'),
+    crop: root.querySelector('.crop'),
     handles: [...root.querySelectorAll('.handle')],
     toast: root.querySelector('.toast'),
     bar: root.querySelector('.bar'),
@@ -1254,11 +1266,51 @@
   function endMarquee(d) {
     ui.marquee.style.display = 'none';
     if (d.moved && d.rect && d.rect.w > 4 && d.rect.h > 4) {
-      addMask(regionAnchor(d.rect), { w: d.rect.w, h: d.rect.h });
+      if (state.tool === 'crop') setCrop(regionAnchor(d.rect), { w: d.rect.w, h: d.rect.h });
+      else addMask(regionAnchor(d.rect), { w: d.rect.w, h: d.rect.h });
     }
   }
 
+  /* ============================================================ 6 영역
+   * 캡처·복사할 부분을 고른다. 요소를 누르면 그 요소, Shift+드래그(또는 빈 곳 드래그)하면 그 영역.
+   * 가리기 박스와 같은 기준(요소·영역 기준점)을 써서 스크롤·레이아웃이 바뀌어도 따라간다. 하나만 둔다.
+   * 화면에는 바깥을 어둡게 보여 주고(UI 층, 캡처 직전에 사라짐), 캡처하면 service worker 가 가리기를 칠한 뒤 이 부분만 잘라 낸다.
+   * 되돌리기(Ctrl+Z)·전체 복원으로 없앤다. 페이지 전체 캡처에는 쓰지 않는다. */
+
+  function setCrop(anchor, size) {
+    const prev = state.crop;
+    state.crop = { anchor, size, view: null, last: null };
+    layoutMasks();
+    push('crop', null, () => { state.crop = prev; layoutMasks(); });
+    const v = state.crop.view;
+    if (v) toast(`영역 ${Math.round(v.w)}×${Math.round(v.h)} · Enter 저장 · C 복사`, 1600);
+  }
+
+  function cropElement(el) {
+    if (!usable(el)) return;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
+    setCandidate(null);
+    setCrop({ el }, null);
+  }
+
+  function layoutCrop() {
+    const c = state.crop;
+    const s = ui.crop.style;
+    if (!c) { s.display = 'none'; return; }
+    let r = null;
+    try { r = maskRect(c); } catch (_) { r = c.view; }
+    c.view = r;
+    if (!r) { s.display = 'none'; return; }
+    s.display = 'block';
+    s.left = r.x + 'px';
+    s.top = r.y + 'px';
+    s.width = r.w + 'px';
+    s.height = r.h + 'px';
+  }
+
   function layoutMasks() {
+    layoutCrop();
     for (const m of state.masks) {
       let r = null;
       try { r = maskRect(m); } catch (_) { r = m.view; } // 계산이 깨지면 직전 자리를 지킨다
@@ -1324,8 +1376,8 @@
 
     const p = pt(e);
     if (state.tool === 'move') startMove(p);
-    else if (state.tool === 'mask' && e.shiftKey) startMarquee(p);
-    else if (state.tool === 'mask' && !state.candidate) startMarquee(p);
+    else if ((state.tool === 'mask' || state.tool === 'crop') && e.shiftKey) startMarquee(p);
+    else if ((state.tool === 'mask' || state.tool === 'crop') && !state.candidate) startMarquee(p);
   }
 
   function onPointerUp(e) {
@@ -1353,6 +1405,7 @@
     if (state.tool === 'hide') hideEl(state.candidate || pickAt(p.x, p.y));
     else if (state.tool === 'text') startTextEdit(p.x, p.y);
     else if (state.tool === 'mask') maskElement(state.candidate || pickAt(p.x, p.y));
+    else if (state.tool === 'crop') cropElement(state.candidate || pickAt(p.x, p.y));
   }
 
   function onKey(e) {
@@ -1466,11 +1519,30 @@
       .filter(Boolean)
       .map((r) => ({ x: r.x, y: r.y, w: r.w, h: r.h }));
 
+    // 6 영역: 고른 부분만 저장·복사한다. 화면에 보이지 않으면 찍지 않는다
+    let crop = null;
+    let cropNote = '';
+    if (state.crop) {
+      const v = state.crop.view;
+      if (!v || v.w < 1 || v.h < 1) {
+        host.classList.remove('capturing');
+        setStatus('');
+        lockBar(false);
+        state.busy = false;
+        toast('고른 영역이 화면에 보이지 않습니다 · 보이게 스크롤한 뒤 다시 하세요', 3200);
+        return;
+      }
+      crop = { x: v.x, y: v.y, w: v.w, h: v.h };
+      const whole = state.crop.last;
+      if (whole && (whole.w - v.w > 1 || whole.h - v.h > 1)) cropNote = ' · 화면 밖 부분은 빠졌습니다';
+    }
+
     const res = await send({
       type: 'CLEANSHOT_CAPTURE',
       copy: !!opts.copy,
       pageUrl: location.href,
       masks,
+      crop,
       viewport: { w: window.innerWidth, h: window.innerHeight },
       dpr: window.devicePixelRatio || 1
     });
@@ -1480,20 +1552,20 @@
     lockBar(false);
     state.busy = false;
 
-    if (opts.copy) { await afterCopy(res); return; }
-    afterSave(res, typeof note === 'string' && note ? note : '저장했습니다', '캡처 실패');
+    if (opts.copy) { await afterCopy(res, cropNote); return; }
+    afterSave(res, (typeof note === 'string' && note ? note : '저장했습니다') + cropNote, '캡처 실패');
   }
 
   /* 복사: 서비스 워커가 가리기까지 칠한 PNG 를 클립보드에 넣고, 되면 전체 복원 후 닫는다.
      클립보드를 쓸 수 없는 페이지(https 가 아닌 http 주소 등)이거나 브라우저가 거부하면,
      정리한 상태를 그대로 두고 이유를 알린다 (Enter 로 파일 저장은 그대로 할 수 있다). */
-  async function afterCopy(res) {
+  async function afterCopy(res, note = '') {
     if (!res || !res.ok || !res.dataUrl) {
       toast(`복사 실패 · ${(res && res.error) || '알 수 없는 오류'}`, 3200);
       return;
     }
     const err = await copyPng(res.dataUrl);
-    if (!err) { finish('클립보드에 복사했습니다'); return; }
+    if (!err) { finish('클립보드에 복사했습니다' + note); return; }
     toast(`클립보드에 복사하지 못했습니다 · ${err} · Enter 로 파일 저장은 됩니다`, 4200);
   }
 

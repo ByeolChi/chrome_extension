@@ -155,7 +155,7 @@ async function wheel(x, y, dy) {
 const KEYS = {
   1: { code: 'Digit1', vk: 49, text: '1' }, 2: { code: 'Digit2', vk: 50, text: '2' },
   3: { code: 'Digit3', vk: 51, text: '3' }, 4: { code: 'Digit4', vk: 52, text: '4' },
-  5: { code: 'Digit5', vk: 53, text: '5' },
+  5: { code: 'Digit5', vk: 53, text: '5' }, 6: { code: 'Digit6', vk: 54, text: '6' },
   Enter: { code: 'Enter', vk: 13, text: '\r' }, Escape: { code: 'Escape', vk: 27 },
   Tab: { code: 'Tab', vk: 9 }, ArrowUp: { code: 'ArrowUp', vk: 38 }, ArrowDown: { code: 'ArrowDown', vk: 40 },
   z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' },
@@ -474,7 +474,17 @@ const cases = {
     await move(10, 300);
     await sleep(100);
     await shot('dialog');
-    check('화면 두 장 저장', true);
+    await key('Escape');
+    await main(`document.getElementById('dlg').close()`);
+    // 6 영역: 고른 부분 테두리와 바깥 어둡게
+    await activate();
+    await key('6');
+    const fs2 = await rectMain('#flowSecret');
+    await drag(fs2.x - 12, fs2.y - 12, fs2.x + fs2.w + 120, fs2.y + fs2.h + 60, SHIFT);
+    await move(10, 300);
+    await sleep(100);
+    await shot('region');
+    check('화면 세 장 저장', true);
   },
 
   /* 여러 요소에 걸친 영역은 예전처럼 문서 좌표에 붙는다 */
@@ -788,6 +798,80 @@ const cases = {
       check('클립보드의 PNG 는 보이는 화면 크기이고 가리기가 칠해짐', !!clip && clip.w === clip.vw && clip.black > 0.999, JSON.stringify(clip));
       const off = await iso(`!(window.__cleanShot && window.__cleanShot.state.active)`);
       check('복사한 뒤에는 전체 복원 후 닫힘 (저장과 같음)', off);
+    } finally {
+      await cdp.send('Browser.resetPermissions', {}).catch(() => {});
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, pageS).catch(() => {});
+      await sleep(300);
+    }
+  },
+
+  /* 6 영역: 고른 요소·끈 영역만 저장(가리기는 칠한 채), 바깥을 어둡게 한 표시는 찍히지 않음, 되돌리기, 복사도 그 부분만 */
+  async region() {
+    const near = (a, b, tol = 2) => Math.abs(a - b) <= tol;
+    // 1) 가리기를 품은 영역을 Shift+드래그 → 그 부분만, 가린 곳은 검정, 바깥 여백은 어둡지 않음
+    await freshPage();
+    await activate();
+    await key('5');
+    const r = await rectMain('#flowSecret');
+    await click(center(r).x, center(r).y);
+    await key('6');
+    const M = 12;
+    await drag(r.x - M, r.y - M, r.x + r.w + M, r.y + r.h + M, SHIFT);
+    const a = await captureAndRead();
+    const okName = !!a.file && /-area\.png$/.test(a.file);
+    check('영역(Shift+드래그)을 고르면 그 부분만 -area.png 로 저장', okName && near(a.img.width, (r.w + 2 * M) * DPR, 2 * DPR) && near(a.img.height, (r.h + 2 * M) * DPR, 2 * DPR),
+      a.file ? `${path.basename(a.file)} ${a.img.width}×${a.img.height} (기대 ${(r.w + 2 * M) * DPR}×${(r.h + 2 * M) * DPR})` : 'no file');
+    if (a.img) {
+      const inner = blackRatio(a.img, (M + 1) * DPR, (M + 1) * DPR, (r.w - 2) * DPR, (r.h - 2) * DPR);
+      // 가린 칸 왼쪽 옆 여백(흰 바탕) — 영역 표시의 어둡게 한 그림자가 찍혔다면 어둡다
+      const side = pixel(a.img, Math.round(4 * DPR), Math.round((M + r.h / 2) * DPR));
+      check('잘라 낸 그림에도 가리기가 칠해지고, 영역 표시(바깥 어둡게)는 찍히지 않음', inner > 0.999 && sameRgb(side, [255, 255, 255]), `black=${inner.toFixed(4)} side=${side}`);
+    }
+    await sleep(900);
+
+    // 2) 요소를 누르면 그 요소 크기 그대로
+    await freshPage();
+    await activate();
+    await key('6');
+    const b = await rectMain('#banner');
+    await click(center(b).x, center(b).y);
+    const c = await captureAndRead();
+    const mid = c.img ? pixel(c.img, Math.floor(c.img.width / 2), Math.floor(c.img.height / 3)) : null;
+    check('요소(배너)를 누르면 그 요소만 저장', !!c.img && near(c.img.width, b.w * DPR, 2 * DPR) && near(c.img.height, b.h * DPR, 2 * DPR) && sameRgb(mid, [0, 128, 255]),
+      c.img ? `${c.img.width}×${c.img.height} (기대 ${b.w * DPR}×${b.h * DPR}) mid=${mid}` : 'no file');
+    await sleep(900);
+
+    // 3) 되돌리기로 영역을 없앰
+    await freshPage();
+    await activate();
+    await key('6');
+    await click(center(b).x, center(b).y);
+    const set = await iso(`!!window.__cleanShot.state.crop`);
+    await key('z', CTRL);
+    const unset = await iso(`window.__cleanShot.state.crop === null`);
+    check('Ctrl+Z 로 고른 영역을 없앰', set && unset, JSON.stringify({ set, unset }));
+    await key('Escape');
+    await sleep(300);
+
+    // 4) 복사도 고른 부분만
+    const ORIGIN = `http://127.0.0.1:${WEB}`;
+    await freshPage();
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, pageS);
+    await cdp.send('Browser.grantPermissions', { origin: ORIGIN, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    try {
+      await activate();
+      await key('6');
+      await click(center(b).x, center(b).y);
+      await key('c');
+      await sleep(900);
+      const clip = await main(`(async () => {
+        const items = await navigator.clipboard.read();
+        const it = items.find((x) => x.types.includes('image/png'));
+        if (!it) return null;
+        const bmp = await createImageBitmap(await it.getType('image/png'));
+        return { w: bmp.width, h: bmp.height };
+      })()`);
+      check('C 로 복사해도 고른 요소 부분만', !!clip && near(clip.w, b.w * DPR, 2 * DPR) && near(clip.h, b.h * DPR, 2 * DPR), JSON.stringify(clip));
     } finally {
       await cdp.send('Browser.resetPermissions', {}).catch(() => {});
       await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, pageS).catch(() => {});
