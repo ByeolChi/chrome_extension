@@ -92,7 +92,7 @@ const HANDLERS = {
   /* 선택 모드가 열려 있는 동안 워커를 깨워 둔다 (캡처 때 콜드 스타트 방지) */
   CLEANSHOT_PING: async () => ({ ok: true }),
 
-  /* 현재 화면을 찍어 바로 저장한다 */
+  /* 현재 화면을 찍어 바로 저장한다. msg.copy 면 저장하지 않고 (가리기를 칠한) PNG 를 돌려준다 — 피커가 클립보드에 넣는다 */
   CLEANSHOT_CAPTURE: async (msg, sender) => {
     const shot = await grab(sender);
     if (!shot.ok) return shot;
@@ -105,9 +105,10 @@ const HANDLERS = {
       try {
         dataUrl = await burnMasks(dataUrl, masks, msg.viewport, msg.dpr);
       } catch (err) {
-        return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 저장하지 않았습니다 (${describe(err)})` };
+        return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 ${msg.copy ? '복사' : '저장'}하지 않았습니다 (${describe(err)})` };
       }
     }
+    if (msg.copy) return { ok: true, dataUrl };
     return save(dataUrl, msg.pageUrl || sender.tab.url);
   },
 

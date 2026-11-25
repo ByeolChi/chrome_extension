@@ -158,7 +158,8 @@ const KEYS = {
   5: { code: 'Digit5', vk: 53, text: '5' },
   Enter: { code: 'Enter', vk: 13, text: '\r' }, Escape: { code: 'Escape', vk: 27 },
   Tab: { code: 'Tab', vk: 9 }, ArrowUp: { code: 'ArrowUp', vk: 38 }, ArrowDown: { code: 'ArrowDown', vk: 40 },
-  z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' }
+  z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' },
+  c: { code: 'KeyC', vk: 67, text: 'c' }, 'ㅊ': { code: 'KeyC', vk: 67, text: 'ㅊ' }
 };
 async function key(k, modifiers = 0) {
   const d = KEYS[k];
@@ -736,6 +737,62 @@ const cases = {
     const pr = await rectMain('#pop');
     const px = shot.img ? pixel(shot.img, Math.round((pr.x + pr.w - 4) * DPR), Math.round((pr.y + pr.h / 2) * DPR)) : null;
     check('가리지 않은 popover 테두리 안쪽 픽셀은 흰색 그대로', px && px[0] === 255 && px[1] === 255 && px[2] === 255, px);
+  },
+
+  /* 클립보드에 복사 (C 키): 막히면 정리한 상태를 두고 알림, 되면 가리기를 칠한 PNG 가 클립보드에 들어가고 파일은 만들지 않음 */
+  async clipboard() {
+    const ORIGIN = `http://127.0.0.1:${WEB}`;
+    const toastText = () => iso(`(() => { const h = document.getElementById('__cleanshot_host__'); return h ? chrome.dom.openOrClosedShadowRoot(h).querySelector('.toast').textContent : ''; })()`);
+    const waitToast = async (re) => {
+      let t = '';
+      for (let i = 0; i < 160 && !re.test(t); i++) { t = await toastText(); await sleep(25); }
+      return t;
+    };
+    await freshPage();
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, pageS);
+    await cdp.send('Browser.setPermission', { origin: ORIGIN, permission: { name: 'clipboard-write' }, setting: 'denied' });
+    try {
+      await activate();
+      await key('5');
+      const r = await rectMain('#fixedSecret');
+      await click(center(r).x, center(r).y);
+      const before = new Set(listFiles());
+
+      // 1) 클립보드 쓰기가 막힌 경우
+      await key('c');
+      const t1 = await waitToast(/복사하지 못했습니다|복사했습니다/);
+      await sleep(300);
+      const stillOn = await iso(`!!(window.__cleanShot && window.__cleanShot.state.active && window.__cleanShot.state.masks.length === 1)`);
+      check('클립보드가 막히면 이유를 알리고, 정리한 상태(가리기)는 그대로 둠', /클립보드에 복사하지 못했습니다/.test(t1) && stillOn, `${t1} active+mask=${stillOn}`);
+
+      // 2) 허용된 경우 — 한글 입력 상태(ㅊ)로 눌러도 C 키로 본다
+      await cdp.send('Browser.grantPermissions', { origin: ORIGIN, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+      await iso(`(() => { const h = document.getElementById('__cleanshot_host__'); chrome.dom.openOrClosedShadowRoot(h).querySelector('.toast').textContent = ''; return true; })()`);   // 앞의 알림을 지운다
+      await key('ㅊ');
+      const t2 = await waitToast(/클립보드에 복사했습니다|복사하지 못했습니다/);
+      check('C 키(한글 입력 상태 포함): 클립보드에 복사했다고 알림', /클립보드에 복사했습니다/.test(t2), t2);
+      await sleep(900);
+      check('복사는 파일로 저장하지 않음', listFiles().filter((f) => !before.has(f)).length === 0);
+      const box = scaled(r);
+      const clip = await main(`(async () => {
+        const items = await navigator.clipboard.read();
+        const it = items.find((x) => x.types.includes('image/png'));
+        if (!it) return { types: items.map((x) => x.types) };
+        const bmp = await createImageBitmap(await it.getType('image/png'));
+        const c = new OffscreenCanvas(bmp.width, bmp.height); const x = c.getContext('2d'); x.drawImage(bmp, 0, 0);
+        const r = ${JSON.stringify(box)};
+        const d = x.getImageData(Math.round(r.x), Math.round(r.y), Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h))).data;
+        let black = 0; for (let i = 0; i < d.length; i += 4) if (d[i] < 8 && d[i + 1] < 8 && d[i + 2] < 8) black++;
+        return { w: bmp.width, h: bmp.height, black: black / (d.length / 4), vw: Math.round(innerWidth * devicePixelRatio) };
+      })()`);
+      check('클립보드의 PNG 는 보이는 화면 크기이고 가리기가 칠해짐', !!clip && clip.w === clip.vw && clip.black > 0.999, JSON.stringify(clip));
+      const off = await iso(`!(window.__cleanShot && window.__cleanShot.state.active)`);
+      check('복사한 뒤에는 전체 복원 후 닫힘 (저장과 같음)', off);
+    } finally {
+      await cdp.send('Browser.resetPermissions', {}).catch(() => {});
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, pageS).catch(() => {});
+      await sleep(300);
+    }
   },
 
   /* 3 저장 실패 시 대체 경로 */
