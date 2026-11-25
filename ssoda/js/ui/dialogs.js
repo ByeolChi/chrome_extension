@@ -40,19 +40,41 @@ const MOD = isMac() ? '⌘' : 'Ctrl';
 /* ---------------- 가져오기 ---------------- */
 export function openImport(initialText = '') {
   const ta = h('textarea.import-ta', {
-    placeholder: 'cURL 명령, Postman Collection / Environment JSON, 또는 URL을 붙여넣으세요\n\n예) curl -X POST https://api.example.com/login -H "Content-Type: application/json" -d \'{"id":"kim"}\'',
+    placeholder: 'cURL 명령, Postman Collection / Environment JSON, OpenAPI(JSON·YAML), HAR, 또는 URL을 붙여넣으세요\n\n예) curl -X POST https://api.example.com/login -H "Content-Type: application/json" -d \'{"id":"kim"}\'',
     spellcheck: 'false',
     autofocus: true,
   });
   ta.value = initialText;
-  const fileIn = h('input', { type: 'file', accept: '.json,.txt,.sh,.curl,application/json,text/plain', multiple: true, style: { display: 'none' } });
+  const fileIn = h('input', { type: 'file', accept: '.json,.yaml,.yml,.har,.txt,.sh,.curl,application/json,text/plain', multiple: true, style: { display: 'none' } });
   const status = h('div.import-status');
   const drop = h('div.dropzone',
     icon('import', 28),
     h('div.dz-title', '파일을 여기로 끌어다 놓거나'),
     h('button.btn.btn-sm', { onclick: () => fileIn.click() }, '파일 선택'),
-    h('div.dz-sub', 'Postman Collection v2.0/v2.1, Environment, Ssoda 백업(.json) 지원'),
+    h('div.dz-sub', 'Postman Collection v2.0/v2.1·Environment, OpenAPI 3·Swagger 2(.json·.yaml), HAR(.har), Ssoda 백업(.json) 지원'),
     fileIn);
+  // 주소에서 바로 가져오기 (예: Spring 의 /v3/api-docs). {{변수}} 는 지금 환경으로 바꾸고, SSH 환경이면 터널을 거친다
+  const urlIn = h('input.input.import-url', { placeholder: '문서 주소  예) http://localhost:8080/v3/api-docs  ·  {{baseUrl}}/swagger.json', spellcheck: 'false', 'aria-label': '가져올 문서 주소' });
+  const urlBtn = h('button.btn', {
+    onclick: async () => {
+      const u = urlIn.value.trim();
+      if (!u) return toast('가져올 문서의 주소를 넣으세요.', 'error');
+      urlBtn.disabled = true;
+      urlBtn.textContent = '받는 중…';
+      try {
+        showResults([await app.importFromUrl(u)]);
+      } catch (e) {
+        showResults([{ error: e.message }]);
+      } finally {
+        urlBtn.disabled = false;
+        urlBtn.textContent = '주소에서 가져오기';
+      }
+    },
+  }, '주소에서 가져오기');
+  urlIn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) urlBtn.click();
+  });
+  const urlRow = h('div.import-url-row', urlIn, urlBtn);
   const handleFiles = async (files) => {
     const results = [];
     for (const f of files) {
@@ -120,9 +142,9 @@ export function openImport(initialText = '') {
   });
   const m = openModal({
     title: '가져오기',
-    subtitle: 'cURL · Postman Collection · Environment · URL',
+    subtitle: 'cURL · Postman Collection · Environment · OpenAPI · HAR · URL',
     width: 680,
-    body: h('div.import', ta, drop, status),
+    body: h('div.import', urlRow, ta, drop, status),
     footer: [h('span.foot-hint', `${MOD}+Enter 로 가져오기`), h('div.flex1'), h('button.btn', { onclick: () => m.close() }, '닫기'), importBtn],
   });
 }

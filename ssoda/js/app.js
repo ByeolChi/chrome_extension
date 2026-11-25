@@ -857,9 +857,10 @@ export const app = {
   },
 
   /* ---------------- 가져오기 ---------------- */
-  // 텍스트(cURL/Postman JSON/URL) 가져오기. 결과 요약 반환
-  importText(text, { openCurlInTab = true } = {}) {
-    const r = detectImport(text);
+  // 텍스트(cURL · Postman JSON · OpenAPI JSON/YAML · HAR · URL) 가져오기. 결과 요약 반환
+  // sourceUrl: 주소에서 받은 문서면 그 주소 (OpenAPI 의 상대 서버 주소 기준)
+  importText(text, { openCurlInTab = true, sourceUrl = '' } = {}) {
+    const r = detectImport(text, { sourceUrl });
     if (r.kind === 'curl' || r.kind === 'url') {
       if (openCurlInTab) this.newRequestTab(r.request, r.name || 'Untitled Request');
       return { kind: r.kind, warnings: r.warnings || [], message: 'cURL 명령을 새 탭으로 가져왔습니다.' };
@@ -870,7 +871,9 @@ export const app = {
       store.changed('collections');
       this.saveWorkspace();
       this.ui.showSidebar && this.ui.showSidebar('collections');
-      return { kind: 'collection', warnings: r.warnings, message: `컬렉션 "${r.collection.name}"을(를) 가져왔습니다.` };
+      const from = r.source === 'openapi' ? 'OpenAPI 문서에서 ' : r.source === 'har' ? 'HAR 에서 ' : '';
+      const message = from ? `${from}요청 ${r.count}개를 컬렉션 "${r.collection.name}"(으)로 가져왔습니다.` : `컬렉션 "${r.collection.name}"을(를) 가져왔습니다.`;
+      return { kind: 'collection', collectionId: r.collection.id, warnings: r.warnings, message };
     }
     if (r.kind === 'environment') {
       store.state.environments.push(r.environment);
@@ -882,6 +885,25 @@ export const app = {
       return { kind: 'backup', data: r.data, warnings: [], message: '백업 파일' };
     }
     throw new Error('지원하지 않는 형식입니다.');
+  },
+
+  // 주소에서 문서를 받아 가져온다 (예: http://서버/v3/api-docs). {{변수}} 는 지금 환경으로 바꾸고, SSH 환경이면 터널을 거친다
+  async importFromUrl(url) {
+    const draft = normalizeRequest(newRequest({ method: 'GET', url: String(url || '').trim(), headers: [kvRow('Accept', 'application/json, application/yaml;q=0.9, */*;q=0.8')] }));
+    const tab = { type: 'request', draft };
+    const env = this.activeEnv();
+    let engine = this.engineOf(tab);
+    let ssh = null;
+    if (this.tunnelOf(env)) {
+      ssh = await this.sshConfigFor(env);
+      if (!ssh) return { cancelled: true };
+      engine = 'curl';
+    }
+    const res = await this.execute(tab, { engine, ssh, env });
+    if (!res.ok) throw new Error(`문서를 받지 못했습니다: ${res.error.message}${res.error.hint ? ' — ' + res.error.hint : ''}`);
+    if (res.status >= 400) throw new Error(`문서를 받지 못했습니다: 서버가 ${res.status} ${res.statusText || ''}`.trim() + ' 을(를) 돌려주었습니다.');
+    const text = new TextDecoder('utf-8').decode(res.body);
+    return this.importText(text, { openCurlInTab: false, sourceUrl: res.url || res.sentUrl || draft.url });
   },
 
   applyCurlToTab(tab, text) {

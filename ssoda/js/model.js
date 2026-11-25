@@ -44,6 +44,7 @@ export function newRequest(partial = {}) {
     body: newBody(),
     settings: { followRedirects: null, timeout: null, useBrowserCookies: false, useCookieJar: true, engine: null, curl: { ...DEFAULT_CURL_OPTS } },
     tests: { extract: [], assert: [] }, // 응답값 꺼내기·확인 (checks.js)
+    pathVars: [], // 경로 변수: 주소의 /:이름 칸에 넣을 값 (Params 탭)
     description: '',
   };
   return normalizeRequest(Object.assign(r, partial));
@@ -82,6 +83,7 @@ export function normalizeRequest(r) {
       r.settings || {}
     ),
     tests: normalizeTests(r.tests),
+    pathVars: normKv(r.pathVars),
     description: String(r.description || ''),
   };
   out.settings.curl = { ...DEFAULT_CURL_OPTS, ...((r.settings && r.settings.curl) || {}) };
@@ -291,5 +293,44 @@ function stripIds(req) {
     c.body.formdata = s(c.body.formdata);
   }
   if (c.tests) c.tests = { extract: s(c.tests.extract), assert: s(c.tests.assert) };
+  c.pathVars = s(c.pathVars);
   return c;
+}
+
+/* ---------------- 경로 변수 (/:이름) ---------------- */
+// Postman 처럼 경로 칸 전체가 :이름 이면 경로 변수다. 포트(host:8080)나 시각(12:30)처럼 칸 처음이 ':' 가 아니면 고르지 않는다
+const PATH_VAR_SEG = /^:([A-Za-z_][A-Za-z0-9_-]*)$/;
+
+/** 주소의 경로 변수 이름 (나온 순서, 겹치지 않게) */
+export function pathVarNames(url) {
+  const path = String(url || '').split(/[?#]/)[0];
+  const names = [];
+  for (const seg of path.split('/')) {
+    const m = seg.match(PATH_VAR_SEG);
+    if (m && !names.includes(m[1])) names.push(m[1]);
+  }
+  return names;
+}
+
+/** 주소에 맞춰 경로 변수 표를 고친다: 있던 값은 그대로, 주소에서 없어진 이름은 빼고, 새 이름은 빈 값으로 */
+export function syncPathVars(url, oldVars) {
+  return pathVarNames(url).map((k) => (oldVars || []).find((v) => v.key === k) || kvRow(k, ''));
+}
+
+/** 주소의 /:이름 칸을 값으로 바꾼다. vals: Map(이름 → 값). 값이 빈 이름은 그대로 두고 missing 에 넣는다 */
+export function fillPathVars(url, vals, missing = []) {
+  const s = String(url || '');
+  const cut = s.search(/[?#]/);
+  const head = cut < 0 ? s : s.slice(0, cut);
+  const tail = cut < 0 ? '' : s.slice(cut);
+  return head.split('/').map((seg) => {
+    const m = seg.match(PATH_VAR_SEG);
+    if (!m || !vals.has(m[1])) return seg;
+    const v = vals.get(m[1]);
+    if (v === '') {
+      if (!missing.includes(m[1])) missing.push(m[1]);
+      return seg;
+    }
+    return v;
+  }).join('/') + tail;
 }

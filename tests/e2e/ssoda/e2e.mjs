@@ -70,6 +70,12 @@ const server = http.createServer((req, res) => {
     }
     if (u.pathname === '/me') return json({ auth: req.headers.authorization || null, id: u.searchParams.get('id') });
     if (u.pathname === '/fail-me') return json({ error: 'boom' }, 500);
+    // 가져오기 시험: 주소에서 받는 OpenAPI(YAML, 서버 주소는 상대 주소 /), 경로 변수로 부르는 API
+    if (u.pathname === '/openapi.yaml') {
+      res.writeHead(200, { 'Content-Type': 'application/yaml; charset=utf-8' });
+      return res.end('openapi: 3.0.0\ninfo:\n  title: E2E API\nservers:\n  - url: /\npaths:\n  /items/{itemId}:\n    get:\n      summary: 아이템 하나\n      parameters:\n        - { name: itemId, in: path, required: true, schema: { type: integer }, example: 7 }\n');
+    }
+    if (u.pathname.startsWith('/items/')) return json({ id: decodeURIComponent(u.pathname.slice('/items/'.length)) });
     json({ path: u.pathname });
   });
 });
@@ -671,6 +677,64 @@ await check('러너: 데이터 파일(CSV) 행마다 컬렉션을 차례로 실�
   assert(r.histAfter === 0, '러너 실행이 히스토리에 남음: ' + r.histAfter);
   assert(r.stop.runs === 3 && r.stop.stoppedOnFailure && /실패해서 멈춤/.test(r.stop.text), JSON.stringify(r.stop));
   return `${r.summary.replace(/\s+/g, ' ')} · 실패하면 멈춤: ${r.stop.runs}개에서 멈춤`;
+});
+
+await check('가져오기: 주소에서 OpenAPI(YAML)를 받아 컬렉션으로, Path Variables 표에 값을 넣어 보내면 그 주소로 감 / HAR 붙여넣기', async () => {
+  seen.length = 0;
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const before = app.store.state.collections.length;
+    document.querySelector('.topbar button[title^="가져오기"]').click();
+    await sleep(300);
+    const urlIn = document.querySelector('.modal .import-url');
+    urlIn.value = base + '/openapi.yaml';
+    [...document.querySelectorAll('.modal button')].find((b) => b.textContent.trim() === '주소에서 가져오기').click();
+    for (let i = 0; i < 60 && app.store.state.collections.length === before; i++) await sleep(100);
+    const col = app.store.state.collections[app.store.state.collections.length - 1];
+    const modalOpen = !!document.querySelector('.modal .import-url');
+    const item = col.items[0];
+    app.openItem(item.id);
+    await sleep(300);
+    const tab = app.activeTab();
+    const view = app.views.get(tab.id);
+    view.el.querySelector('.req-subtabs .subtab[data-sub="params"]').click();
+    await sleep(100);
+    const pvText = (view.el.querySelector('.pv-table') || {}).innerText || '';
+    const valIn = view.el.querySelector('.pv-table .kv-row:not(.kv-head) .vi-input');
+    const shown = valIn ? valIn.value : null;
+    valIn.value = '99';
+    valIn.dispatchEvent(new Event('input', { bubbles: true }));
+    const res = await app.send(tab, { engine: 'browser' });
+    // HAR: 붙여넣기 (정적 파일은 빼고 fetch 만)
+    const har = JSON.stringify({ log: { entries: [
+      { _resourceType: 'script', request: { method: 'GET', url: base + '/app.js', headers: [] } },
+      { _resourceType: 'fetch', request: { method: 'POST', url: base + '/echo', headers: [{ name: 'content-type', value: 'application/json' }], postData: { mimeType: 'application/json', text: '{"from":"har"}' } } },
+    ] } });
+    const before2 = app.store.state.collections.length;
+    if (!document.querySelector('.modal textarea.import-ta')) {
+      document.querySelector('.topbar button[title^="가져오기"]').click();
+      await sleep(300);
+    }
+    document.querySelector('.modal textarea.import-ta').value = har;
+    [...document.querySelectorAll('.modal button')].find((b) => b.textContent.trim() === '가져오기').click();
+    await sleep(300);
+    const status = (document.querySelector('.modal .import-status') || {}).innerText || '';
+    document.querySelectorAll('.modal-x').forEach((x) => x.click());
+    const harCol = app.store.state.collections.length > before2 ? app.store.state.collections[app.store.state.collections.length - 1] : null;
+    return {
+      name: col.name, baseUrl: (col.variables.find((v) => v.key === 'baseUrl') || {}).value, url: item.request.url, modalOpen,
+      pvText, shown, draftPv: JSON.parse(JSON.stringify(tab.draft.pathVars)), status: res.status, body: res.ok ? new TextDecoder().decode(res.body) : res.error.message,
+      harCount: harCol ? harCol.items.length : -1, harBody: harCol ? harCol.items[0].request.body.raw : '', harStatus: status,
+    };
+  }, BASE);
+  const hit = seen.find((s) => s.path.startsWith('/items/'));
+  assert(r.name === 'E2E API' && r.baseUrl === BASE && r.url === '{{baseUrl}}/items/:itemId' && !r.modalOpen, JSON.stringify({ name: r.name, baseUrl: r.baseUrl, url: r.url, modalOpen: r.modalOpen }));
+  assert(/:itemId/.test(r.pvText) && r.shown === '7', JSON.stringify({ pv: r.pvText, shown: r.shown }));
+  assert(r.draftPv.length === 1 && r.draftPv[0].value === '99', JSON.stringify(r.draftPv));
+  assert(hit && hit.path === '/items/99' && r.status === 200 && /"id":"99"/.test(r.body), JSON.stringify({ path: hit && hit.path, status: r.status, body: r.body }));
+  assert(r.harCount === 1 && r.harBody === '{"from":"har"}' && /1개는 뺐습니다/.test(r.harStatus), JSON.stringify({ n: r.harCount, body: r.harBody, status: r.harStatus.slice(0, 200) }));
+  return `OpenAPI → ${r.url} → 서버가 받은 주소 ${hit.path}`;
 });
 
 await check('기본 타임아웃 60초: 예전 설정의 0(무제한)은 다시 열 때 한 번 60초로 바꾸고 알림', async () => {

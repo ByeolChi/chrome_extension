@@ -1,6 +1,7 @@
 // 에디터 상태(draft) → 실제 전송용 요청(prepared) 변환 (순수 함수)
 import { resolveRequest, resolveString, unresolvedVariables } from './variables.js';
 import { userAuthOpt } from './curl-runner.js';
+import { fillPathVars } from './model.js';
 
 export const RAW_CONTENT_TYPES = {
   json: 'application/json',
@@ -45,6 +46,13 @@ export function prepareRequest(draft, ctx = {}) {
   if (draft.body?.mode === 'raw') check(draft.body.raw);
 
   let url = String(r.url || '').trim();
+  // 경로 변수: /:이름 칸을 Params 탭 Path Variables 의 값으로 ({{변수}} 를 바꾼 뒤)
+  if ((draft.pathVars || []).length) {
+    const vals = new Map(draft.pathVars.filter((v) => v.enabled !== false && v.key).map((v) => [v.key, resolveString(v.value, scope)]));
+    const missing = [];
+    url = fillPathVars(url, vals, missing);
+    if (missing.length) warnings.push(`경로 변수 ${missing.map((k) => ':' + k).join(', ')} 의 값이 비어 있어 주소에 그대로 남았습니다. Params 탭의 Path Variables 에 값을 넣으세요.`);
+  }
   if (url && !hasScheme(url)) url = 'http://' + url;
 
   const headers = [];
