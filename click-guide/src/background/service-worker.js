@@ -6,6 +6,7 @@
 import { getSettings, migrateApiKey } from '../common/settings.js';
 import { describeStep, suggestGuideTitle } from '../common/describe.js';
 import { localPageTitle } from '../common/util.js';
+import { fieldClicksToMerge } from '../common/steps.js';
 import * as db from '../common/db.js';
 import '../shared/redact-core.js';   // 공용 가리기 코어 → globalThis.RedactCore (CleanShot Picker 와 같은 코드)
 
@@ -671,7 +672,18 @@ async function stopRecording({ openEditor = true, discard = false } = {}) {
   if (sessionId && discard) {
     try { await db.deleteSession(sessionId); } catch (e) { console.warn('[ClickGuide] 기록 삭제 실패', e); }
   } else if (sessionId) {
-    const steps = await db.getSteps(sessionId);
+    let steps = await db.getSteps(sessionId);
+    // 입력란을 클릭한 단계 바로 뒤에 그 칸의 입력 단계가 있으면 클릭 단계를 뺀다 (입력 단계가 같은 칸을 하이라이트함)
+    const extra = fieldClicksToMerge(steps);
+    if (extra.length) {
+      try {
+        for (const s of extra) await db.deleteStep(s);
+        steps = steps.filter((s) => !extra.includes(s));
+        steps.forEach((s, k) => { s.index = k; });
+        await db.putSteps(steps);
+        await db.updateSession(sessionId, { stepCount: steps.length, mergedFieldClicks: extra.length });
+      } catch (e) { console.warn('[ClickGuide] 입력란 클릭 단계 합치기 실패', e); }
+    }
     const cfg = await settings();
     const ses = await db.getSession(sessionId);
     if (ses && !ses.name) {

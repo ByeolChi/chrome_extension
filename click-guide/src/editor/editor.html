@@ -12,6 +12,8 @@
   <div class="brand"><span class="mark"></span><strong>ClickGuide</strong></div>
   <select id="session-select" title="가이드 선택"></select>
   <span class="spacer"></span>
+  <button id="btn-undo" class="sm ghost" title="되돌리기 (Ctrl+Z)" disabled>되돌리기</button>
+  <button id="btn-redo" class="sm ghost" title="다시 하기 (Ctrl+Shift+Z)" disabled>다시 하기</button>
   <button id="btn-ai" class="sm" title="LLM으로 단계 문장을 다듬습니다">AI로 문장 다듬기</button>
   <div class="menu">
     <button id="btn-export" class="primary sm">내보내기 ▾</button>
@@ -56,20 +58,33 @@
       <span class="num"></span>
       <input class="s-title" aria-label="단계 제목">
       <div class="tools">
+        <button class="sm ghost t-drag" title="끌어서 순서 바꾸기" aria-label="끌어서 순서 바꾸기">⠿</button>
         <button class="sm ghost t-up" title="위로">↑</button>
         <button class="sm ghost t-down" title="아래로">↓</button>
         <button class="sm ghost t-hl" title="하이라이트 표시 전환">하이라이트</button>
-        <button class="sm ghost t-redact" title="가릴 영역을 드래그해서 지정">가리기</button>
-        <button class="sm ghost t-reset" title="자동 생성 문장으로 되돌리기">문장 복원</button>
-        <button class="sm ghost t-del danger" title="이 단계 삭제">삭제</button>
+        <button class="sm ghost t-draw" title="화살표·박스·글자·번호·확대·가리기·자르기">그리기</button>
+        <div class="menu step-menu">
+          <button class="sm ghost t-more" title="더 보기" aria-label="더 보기">⋯</button>
+          <div class="dropdown step-dropdown" hidden>
+            <button data-act="note-below">아래에 메모 넣기</button>
+            <button data-act="merge-up">위 단계와 합치기</button>
+            <button data-act="split">단계 나누기 (같은 화면을 복사)</button>
+            <button data-act="reset">문장 복원 (자동 생성 문장으로)</button>
+          </div>
+        </div>
+        <button class="sm ghost t-del danger" title="이 단계 삭제 (되돌리기 가능)">삭제</button>
       </div>
     </div>
     <textarea class="s-desc" rows="2" aria-label="단계 설명"></textarea>
-    <div class="shot" hidden>
-      <img alt="">
-      <div class="overlay"></div>
-      <div class="redact-hint" hidden>가릴 영역을 드래그하세요 · ESC로 종료</div>
+    <div class="draw-bar" hidden>
+      <div class="draw-tools" role="toolbar" aria-label="그리기 도구"></div>
+      <div class="draw-colors" role="group" aria-label="색"></div>
+      <span class="spacer"></span>
+      <button class="sm ghost d-del" title="고른 것 지우기 (Delete)" disabled>지우기</button>
+      <button class="sm ghost d-uncrop" title="자른 것을 원래대로" disabled>자르기 해제</button>
+      <button class="sm primary d-done">완료</button>
     </div>
+    <div class="shot" hidden></div>
     <p class="s-meta faint"></p>
   </li>
 </template>

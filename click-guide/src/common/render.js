@@ -1,27 +1,9 @@
-/* 내보내기 렌더링: 스크린샷에 하이라이트/가림을 굽고, HTML·Markdown 문서를 만든다. */
+/* 내보내기 렌더링: 스크린샷에 가림·하이라이트·주석을 굽고, HTML·Markdown 문서를 만든다.
+ * 그림은 편집기 미리보기와 같은 코드(annotate.js)로 그린다. */
 import { escapeHtml, formatDate, placeName, shareableUrl, localPageTitle } from './util.js';
-import '../shared/redact-core.js';   // 공용 가리기 코어 → globalThis.RedactCore
-
-const RC = globalThis.RedactCore;
+import { paintStep, cropPixels } from './annotate.js';
 
 /* ---------------- 이미지 굽기 ---------------- */
-
-function roundRectPath(ctx, x, y, w, h, r) {
-  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
-
-function hexToRgba(hex, a) {
-  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(String(hex || '#ff3b30'));
-  if (!m) return `rgba(255,59,48,${a})`;
-  return `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})`;
-}
 
 export function loadImage(src) {
   return new Promise((resolve, reject) => {
@@ -33,8 +15,9 @@ export function loadImage(src) {
 }
 
 /**
- * 스크린샷 Blob 에 가림 영역과 하이라이트를 그려 dataURL 로 돌려준다.
- * step.nrect / step.redactions 는 0~1 정규화 좌표.
+ * 스크린샷 Blob 에 가림·하이라이트·주석을 그리고 자르기까지 해서 dataURL 로 돌려준다.
+ * step.nrect / redactions / annotations / crop 은 0~1 정규화 좌표. 녹화 중 가린 곳은 저장할 때 이미 칠해져 있다.
+ * opts.highlight: 하이라이트를 그릴지 (없으면 설정을 따름. AI 로 보내는 그림은 false)
  */
 export async function bakeStepImage(blob, step, settings, opts = {}) {
   if (!blob) return null;
@@ -46,49 +29,18 @@ export async function bakeStepImage(blob, step, settings, opts = {}) {
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
-
-    // 1) 편집기에서 추가한 가림 영역 (녹화 중 가린 곳은 이미 저장 시점에 처리됨). 0~1 좌표라 이미지 크기를 곱한다.
-    const reds = RC.toPixelRects(step.redactions || [], w, h, w, h);
-    RC.paintRedactions(ctx, reds, {
-      style: settings && settings.redactStyle === 'blur' ? 'blur' : 'box', source: img, width: w, height: h, blurPx: 16
-    });
-
-    // 2) 하이라이트
-    const showHl = (opts.highlight !== undefined ? opts.highlight : settings.highlight) && step.highlight !== false && step.nrect;
-    if (showHl) {
-      const pad = Math.max(2, Math.round(w * 0.002));
-      const x = Math.max(0, step.nrect.x * w - pad);
-      const y = Math.max(0, step.nrect.y * h - pad);
-      const rw = Math.min(w - x, step.nrect.w * w + pad * 2);
-      const rh = Math.min(h - y, step.nrect.h * h + pad * 2);
-      const lw = Math.max(2, Math.round((settings.highlightWidth || 3) * (w / 1280)));
-      const radius = Math.max(4, lw * 2);
-      const color = settings.highlightColor || '#ff3b30';
-
-      if (settings.dimOutside) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(0, 0, w, h);
-        roundRectPath(ctx, x, y, rw, rh, radius);
-        ctx.fillStyle = 'rgba(0,0,0,.30)';
-        ctx.fill('evenodd');
-        ctx.restore();
-      }
-      ctx.save();
-      roundRectPath(ctx, x, y, rw, rh, radius);
-      ctx.lineWidth = lw + Math.round(lw * 2.2);
-      ctx.strokeStyle = hexToRgba(color, 0.22);
-      ctx.stroke();
-      ctx.lineWidth = lw;
-      ctx.strokeStyle = color;
-      ctx.stroke();
-      ctx.restore();
+    const showHl = !!((opts.highlight !== undefined ? opts.highlight : settings.highlight) && step.highlight !== false && step.nrect);
+    paintStep(ctx, img, step, settings, { width: w, height: h, highlight: showHl });
+    let out = canvas;
+    const c = cropPixels(step.crop, w, h);
+    if (c) {
+      out = document.createElement('canvas');
+      out.width = c.w; out.height = c.h;
+      out.getContext('2d').drawImage(canvas, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
     }
-
     return {
-      dataUrl: canvas.toDataURL('image/jpeg', opts.quality || 0.85),
-      width: w, height: h
+      dataUrl: out.toDataURL('image/jpeg', opts.quality || 0.85),
+      width: out.width, height: out.height
     };
   } finally {
     URL.revokeObjectURL(url);
@@ -234,6 +186,7 @@ export function buildJsonExport(session, steps, images) {
       number: i + 1, type: s.type, title: s.title, description: s.description,
       url: shareableUrl(s.url), pageTitle: s.pageTitle ? localPageTitle(s.pageTitle, s.url || '') : s.pageTitle, element: el(s.el),
       value: s.value, masked: s.masked, highlightRect: s.nrect, redactions: s.redactions,
+      annotations: s.annotations || [], crop: s.crop || null,
       image: (images && images.get(s.id)) || null
     }))
   };

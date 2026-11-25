@@ -28,6 +28,8 @@
 }
 
 * { box-sizing: border-box; }
+/* hidden 속성은 늘 숨김 (.dropdown·button 처럼 display 를 정한 규칙이 이기지 않게) */
+[hidden] { display: none !important; }
 body {
   margin: 0; font-family: var(--font); color: var(--text);
   background: var(--bg); font-size: 14px; line-height: 1.55;
