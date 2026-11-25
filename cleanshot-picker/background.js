@@ -92,7 +92,8 @@ const HANDLERS = {
   /* 선택 모드가 열려 있는 동안 워커를 깨워 둔다 (캡처 때 콜드 스타트 방지) */
   CLEANSHOT_PING: async () => ({ ok: true }),
 
-  /* 현재 화면을 찍어 바로 저장한다. msg.copy 면 저장하지 않고 (가리기를 칠한) PNG 를 돌려준다 — 피커가 클립보드에 넣는다 */
+  /* 현재 화면을 찍어 바로 저장한다. msg.copy 면 저장하지 않고 (가리기를 칠한) PNG 를 돌려준다 — 피커가 클립보드에 넣는다.
+     msg.crop(화면 CSS px)이 있으면 가리기를 칠한 뒤 그 부분만 잘라 낸다 (6 영역, 파일 이름 끝에 -area) */
   CLEANSHOT_CAPTURE: async (msg, sender) => {
     const shot = await grab(sender);
     if (!shot.ok) return shot;
@@ -108,8 +109,16 @@ const HANDLERS = {
         return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 ${msg.copy ? '복사' : '저장'}하지 않았습니다 (${describe(err)})` };
       }
     }
+    const crop = cleanMasks(msg.crop ? [msg.crop] : [])[0] || null;
+    if (crop) {
+      try {
+        dataUrl = await cropPng(dataUrl, crop, msg.viewport, msg.dpr);
+      } catch (err) {
+        return { ok: false, error: `고른 영역을 잘라 내지 못했습니다 (${describe(err)})` };
+      }
+    }
     if (msg.copy) return { ok: true, dataUrl };
-    return save(dataUrl, msg.pageUrl || sender.tab.url);
+    return save(dataUrl, msg.pageUrl || sender.tab.url, crop ? '-area' : '');
   },
 
   /* 전체 페이지 캡처 — 아래 "전체 페이지" 참고 */
@@ -181,6 +190,29 @@ async function burnMasks(dataUrl, masks, viewport, dpr) {
     ctx.drawImage(bmp, 0, 0);
     const px = RC.toPixelRects(masks, scaleOf(bmp.width, vw, dpr), scaleOf(bmp.height, vh, dpr), bmp.width, bmp.height);
     RC.paintRedactions(ctx, px, { style: 'box' });
+    const out = await canvas.convertToBlob({ type: 'image/png' });
+    return blobToDataUrl(out);
+  } finally {
+    bmp.close();
+  }
+}
+
+/* 찍은 PNG 에서 crop(화면 CSS px) 부분만 잘라 다시 PNG 로 만든다. 경계는 바깥쪽으로 반올림하고 이미지 안으로 자른다 */
+async function cropPng(dataUrl, crop, viewport, dpr) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  try {
+    const vw = viewport && viewport.w > 0 ? viewport.w : bmp.width;
+    const vh = viewport && viewport.h > 0 ? viewport.h : bmp.height;
+    const sx = scaleOf(bmp.width, vw, dpr);
+    const sy = scaleOf(bmp.height, vh, dpr);
+    const x0 = Math.max(0, Math.floor(crop.x * sx));
+    const y0 = Math.max(0, Math.floor(crop.y * sy));
+    const x1 = Math.min(bmp.width, Math.ceil((crop.x + crop.w) * sx));
+    const y1 = Math.min(bmp.height, Math.ceil((crop.y + crop.h) * sy));
+    if (x1 - x0 < 1 || y1 - y0 < 1) throw new Error('영역이 화면 밖입니다');
+    const canvas = new OffscreenCanvas(x1 - x0, y1 - y0);
+    canvas.getContext('2d').drawImage(bmp, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
     const out = await canvas.convertToBlob({ type: 'image/png' });
     return blobToDataUrl(out);
   } finally {
