@@ -1,6 +1,7 @@
 // 전체 백업 / 가져오기
 // 가이드는 IndexedDB 에, 설정은 chrome.storage 에 있어 둘 다 확장 ID 에 묶여 있다. 다른 PC·다른 폴더로 옮기거나
 // 확장 ID 가 바뀌면(manifest key 추가 등) 새로 시작하므로, 원본 그대로 ZIP 하나로 옮길 수 있게 한다.
+// AI API 키(비밀 보관소, secrets.js)는 백업에 넣지 않고, 가져올 때도 바꾸지 않는다.
 //   backup.json            형식, 가이드·단계 레코드, 설정(AI API 키 제외), 스크린샷 목록
 //   shots/<id>.<확장자>     스크린샷 원본 (편집기에서 고친 가림·하이라이트는 단계 레코드에 그대로 있다)
 import * as db from './db.js';
@@ -114,8 +115,8 @@ export async function applyBackup(plan, { settings = false, onProgress } = {}) {
     if (onProgress) onProgress(res.sessions, newSessions.length);
   }
   if (settings && meta.settings) {
-    const cur = await getSettings();
-    await setSettings({ ...meta.settings, ai: { ...(meta.settings.ai || {}), apiKey: cur.ai.apiKey } });
+    // 백업에 키가 들어 있더라도 쓰지 않는다. setSettings 는 ai.apiKey 가 없으면 지금 키를 그대로 둔다
+    await setSettings(settingsForBackup(meta.settings));
   }
   return res;
 }

@@ -5,9 +5,9 @@
 | 시험 | 항목 | 주요 내용 |
 |---|---|---|
 | `ssoda/e2e.mjs` | 17 | JSON Beautify·응답 Pretty 에서 큰 정수 보존, 끝나지 않는 SSE 응답이 다음 요청을 막지 않음, 같은 서버 대기 표시와 타임아웃, 히스토리(보낸 시점 기록, 컬렉션 인증·변수 유지), 백업 복원 확인창, 도우미 업데이트 안내, 다른 서버로 리다이렉트될 때 그 서버 차례를 기다려 헤더가 섞이지 않음(서버가 받은 헤더로 판정), 리다이렉트 메서드·본문(303·307·308·302)과 20번 한도, SSE 받는 중 화면·멈춤·타임아웃·Events 보기, 기본 타임아웃 60초와 예전 설정(0) 옮기기, 앱 탭 두 개 |
-| `click-guide/e2e.mjs` | 52 | 녹화 대상 탭 한정, 기록 버리기, 이동 단계 스크린샷 가리기, SPA 화면 전환, iframe 좌표·값 전달, AI 로 보내는 내용, 녹화 바(closed shadow root) 조작, 설정값 보정, 속도 진단, 뒤로 가기 캐시 |
+| `click-guide/e2e.mjs` | 65 | 녹화 대상 탭 한정, 기록 버리기, 이동 단계 스크린샷 가리기, SPA 화면 전환, iframe 좌표·값 전달, AI 로 보내는 내용, 녹화 바(closed shadow root) 조작, 설정값 보정, 속도 진단, 뒤로 가기 캐시, API 키가 웹페이지 쪽 스크립트도 읽는 storage.local 에 없음(예전 키 옮기기, 확장 재시작 뒤 유지), 로컬 파일(file://) 녹화(파일 URL 접근 허용에 따름, 단계 문장·페이지 제목·가이드 이름에 폴더 경로 없음) |
 | `click-guide/redact.mjs` | 15 | 공용 가리기 코어(`shared/redact-core.js`)로 스크린샷을 가림. 화면 글자 속 휴대폰·주민번호·이메일·계좌번호는 검정으로 칠하고 비슷한 숫자는 그대로 둠, 클릭한 뒤에 뜬 모달과 클릭과 촬영 사이에 움직인 영역, 클릭하지 않은 다른 출처 iframe 안, shadow root 안(웹 컴포넌트의 닫힌 것 포함), 개인정보 모양의 입력값(`●●●●` 기록과 칸 가리기), 흐리게 설정, 화면 개인정보 자동 가리기 끄기 |
-| `click-guide/backup.mjs` | 12 | 확장 ID 고정(manifest `key` → 고정 ID), `key` 를 뺀 이전 버전에서 전체 백업 내려받기 → 새 프로필의 고정 ID 확장으로 가져오기. 가이드·단계·스크린샷 바이트 일치, API 키 제외·유지, 손상된 백업 거부, 다시 가져와도 겹치지 않음 |
+| `click-guide/backup.mjs` | 13 | 확장 ID 고정(manifest `key` → 고정 ID), `key` 를 뺀 이전 버전에서 전체 백업 내려받기 → 새 프로필의 고정 ID 확장으로 가져오기. 가이드·단계·스크린샷 바이트 일치, API 키 제외·유지, 가져온 뒤에도 API 키가 storage.local 에 없음, 손상된 백업 거부, 다시 가져와도 겹치지 않음 |
 | `cleanshot-picker/e2e.mjs` | 113 | 가리기 박스가 요소를 따라감(고정·sticky·내부 스크롤·iframe·영역), 캡처 PNG 에 검정이 칠해졌는지 픽셀로 판정, dialog·popover 위 표시, 텍스트 되돌리기, shadow DOM·iframe 안 요소 선택, 대체 저장, 전체 페이지 캡처(문서·안쪽 스크롤 영역, 저장된 PNG 의 세로줄 전체를 문서와 대조, 고정 머리글·바닥글·sticky 한 번씩, 장마다 가리기, `Esc` 로 멈춤, 다른 탭 전환, 긴 페이지 자르기, 확대 150%). 화면 배율 1·2 에서 각각 실행 |
 
 ## 준비
@@ -21,7 +21,7 @@
 ## 실행
 
 ```
-npm run test:e2e                          # 전부 차례로 (이 PC 에서 약 3분)
+npm run test:e2e                          # 전부 차례로 (이 PC 에서 약 5분)
 node tests/e2e/run.mjs ssoda              # 하나만 (ssoda / click-guide / cleanshot-picker)
 node tests/e2e/click-guide/e2e.mjs --only=tabs,discard   # 구역 일부만
 ```
@@ -37,7 +37,8 @@ node tests/e2e/click-guide/e2e.mjs --only=tabs,discard   # 구역 일부만
 | `ONLY` | cleanshot-picker 에서 실행할 구역 (쉼표로 구분). `ONLY=screens` 는 눈으로 볼 화면만 임시 폴더에 저장 |
 | `CDP_PORT` | 브라우저 디버깅 포트 |
 
-- click-guide 는 `--headed` 를 붙이면 창을 띄워 실행합니다. `--only=` 구역: `tabs` `iframe` `spa` `navredact` `discard` `width` `speed` `editor` `bar` `bfcache`
+- click-guide 는 `--headed` 를 붙이면 창을 띄워 실행합니다. `--only=` 구역: `tabs` `iframe` `spa` `navredact` `discard` `width` `speed` `editor` `bar` `bfcache` `apikey` `file`
+  - `file` 구역은 chrome://extensions 에서 "파일 URL에 대한 액세스 허용"을 껐다 켜며 확장을 두 번 다시 시작하므로 맨 끝에 돕니다.
 - cleanshot-picker 의 `ONLY` 구역: `overlay` `fixedScroll` `stickyScroll` `layoutShift` `innerScroll` `regionDoc` `iframeText` `zoom` `regions` `picking` `iframeMask` `textUndo` `dialog` `popoverBurn` `fallback` `fullCapture` `fullPageDoc` `fullPagePanel` `fullPageCancel` `fullPageSwitchSim` `fullPageSwitch` `fullPageTruncate` `fullPageZoom` `timing` `screens`
   - `fullCapture` 는 가리기 여러 개를 보이는 화면 한 장으로 찍는 시험이고, 전체 페이지 캡처는 `fullPage…` 구역입니다. 시험 페이지는 `site/full.html`(문서 스크롤, `?bands=N` 으로 길이 조절)과 `site/panel.html`(안쪽 영역만 스크롤)입니다.
 

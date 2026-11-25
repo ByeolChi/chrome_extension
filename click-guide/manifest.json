@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClickGuide — 클릭 자동 캡처 매뉴얼 생성기",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqfLR5CXK+SIKX+6gyWyJQVC3HlGWFX/sjJ0/a4I3M6rQrt3diJAtLVEqqJqH0czO5j9PKDhbmo2NWPqkBAyOhtnlWzx3ctGZWwPa2xlumhUD4qv9zIm4dY7HHHwpsGCfg5rTGL7I9OyHn13Qk2ghvQZIxin4gGSwykBzaMzVQEH0KTHF6NkerlHS4Ri3AhwPVNqNBUcaNkaeZl2jonUJZcsUS5roJ8rDNUouD2VT3tU1B5gWJmAUujX65XxPLSkWtppGQCOytZ7lMClW4CzSFRsx//zK5s+ENICMe0MY4x0FGaYzMBs86XUdw5AFX+611Z4V3Ayb2ngt1TxrWbNkPQIDAQAB",
   "description": "웹에서 클릭·입력하는 과정을 자동으로 캡처하고 단계별 설명을 붙여 매뉴얼 가이드를 만듭니다.",
   "default_locale": "ko",

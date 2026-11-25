@@ -2,7 +2,7 @@ import * as db from '../common/db.js';
 import { getSettings } from '../common/settings.js';
 import { describeStep, suggestGuideTitle } from '../common/describe.js';
 import { enhanceSteps } from '../common/ai.js';
-import { bakeStepImage, buildGuideHtml, buildMarkdown, dataUrlToUint8 } from '../common/render.js';
+import { bakeStepImage, buildGuideHtml, buildMarkdown, buildJsonExport, dataUrlToUint8 } from '../common/render.js';
 import { createZip } from '../lib/zip.js';
 import { downloadBlob, slugify, formatDate, bytes } from '../common/util.js';
 
@@ -422,7 +422,7 @@ menu.addEventListener('click', (e) => {
 /* ------------------------------------------------------------------ */
 
 $('#btn-ai').addEventListener('click', async () => {
-  S.settings = await getSettings();
+  S.settings = await getSettings({ withApiKey: true });   // AI 다듬기에만 키를 꺼낸다
   if (!S.settings.ai || S.settings.ai.provider === 'none') {
     toast('설정에서 AI 제공자와 API 키를 먼저 등록해 주세요.', true, 4000);
     chrome.runtime.openOptionsPage();
@@ -541,19 +541,7 @@ async function doExport(kind) {
   }
 
   if (kind === 'json') {
-    const payload = {
-      format: 'clickguide/v1',
-      exportedAt: new Date().toISOString(),
-      guide: {
-        id: S.session.id, name: S.session.name, description: S.session.description,
-        createdAt: S.session.createdAt, startUrl: S.session.startUrl, lang: S.session.lang
-      },
-      steps: S.steps.map((s, i) => ({
-        number: i + 1, type: s.type, title: s.title, description: s.description,
-        url: s.url, pageTitle: s.pageTitle, element: s.el, value: s.value, masked: s.masked,
-        highlightRect: s.nrect, redactions: s.redactions, image: images.get(s.id) || null
-      }))
-    };
+    const payload = buildJsonExport(S.session, S.steps, images);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     downloadBlob(blob, `${baseName()}.json`);
     toast(`JSON으로 저장했습니다 (${bytes(blob.size)}).`);

@@ -106,7 +106,7 @@ async function loadModels() {
   hint.style.color = '';
   try {
     await setSettings(collect());
-    const s = await getSettings();
+    const s = await getSettings({ withApiKey: true });
     const models = await listModels(s.ai);
     const dl = $('#model-list');
     dl.innerHTML = '';
@@ -183,7 +183,7 @@ $('#ai-test').addEventListener('click', async () => {
   out.textContent = '확인 중…';
   await setSettings(collect());
   try {
-    const s = await getSettings();
+    const s = await getSettings({ withApiKey: true });
     const r = await testConnection(s.ai);
     out.textContent = `연결됨 — 응답: ${r || '(빈 응답)'}`;
     out.style.color = 'var(--accent)';
@@ -238,7 +238,7 @@ $('#backup-file').addEventListener('change', async () => {
       settings: doSettings,
       onProgress: (d, n) => { state.textContent = `가져오는 중… ${d} / ${n}`; }
     });
-    if (doSettings) load(await getSettings());
+    if (doSettings) load(await getSettings({ withApiKey: true }));
     state.textContent = (doGuides ? `가이드 ${r.sessions}개 · 단계 ${r.steps}개 · 스크린샷 ${r.shots}개를 가져왔습니다.` : '') +
       (doSettings ? (doGuides ? ' ' : '') + '설정을 백업 파일의 값으로 바꿨습니다.' : '');
     await showUsage();
@@ -310,4 +310,4 @@ async function showUsage() {
     `가이드 ${sessions.length}개 · 단계 ${steps}개` + (est && est.usage ? ` · 사용 중 ${bytes(est.usage)}` : '');
 }
 
-(async () => { load(await getSettings()); showResolved(); await showUsage(); })();
+(async () => { load(await getSettings({ withApiKey: true })); showResolved(); await showUsage(); })();
