@@ -224,6 +224,7 @@
         <span class="sep"></span>
         <button class="shot primary" title="보이는 화면 (Enter)">캡처</button>
         <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
+        <button class="copy" title="보이는 화면을 클립보드에 복사 (C)">복사</button>
         <span class="status"></span>
         <button class="flip" title="툴바를 위/아래로 (Tab)">⇅</button>
         <button class="close" title="Esc">닫기</button>
@@ -248,6 +249,7 @@
     reset: root.querySelector('.reset'),
     shot: root.querySelector('.shot'),
     full: root.querySelector('.full'),
+    copy: root.querySelector('.copy'),
     flip: root.querySelector('.flip'),
     close: root.querySelector('.close')
   };
@@ -258,6 +260,7 @@
   ui.reset.addEventListener('click', () => { restoreAll(); paintBar(); });
   ui.shot.addEventListener('click', () => captureViewport());
   ui.full.addEventListener('click', () => captureFullPage());
+  ui.copy.addEventListener('click', () => captureViewport('', { copy: true }));
   ui.flip.addEventListener('click', flipBar);
   ui.close.addEventListener('click', deactivate);
   ui.handles.forEach((h) =>
@@ -1383,6 +1386,13 @@
       return;
     }
 
+    // C: 보이는 화면을 클립보드에 복사. 한글 입력 상태에서도 되도록 키 이름이 아니라 키 위치(code)로 본다
+    if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      block(e);
+      captureViewport('', { copy: true });
+      return;
+    }
+
     if (e.key === 'Tab') { block(e); flipBar(); return; }
 
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
@@ -1435,8 +1445,9 @@
     });
   }
 
-  /* note: 저장했을 때 알릴 문구 (전체 페이지 캡처가 스크롤할 내용이 없어 이리로 넘어온 경우) */
-  async function captureViewport(note) {
+  /* note: 저장했을 때 알릴 문구 (전체 페이지 캡처가 스크롤할 내용이 없어 이리로 넘어온 경우)
+     opts.copy: 파일로 저장하지 않고 클립보드에 복사한다 */
+  async function captureViewport(note, opts = {}) {
     if (state.busy) return;
     state.busy = true;
     lockBar(true);
@@ -1457,6 +1468,7 @@
 
     const res = await send({
       type: 'CLEANSHOT_CAPTURE',
+      copy: !!opts.copy,
       pageUrl: location.href,
       masks,
       viewport: { w: window.innerWidth, h: window.innerHeight },
@@ -1468,7 +1480,45 @@
     lockBar(false);
     state.busy = false;
 
+    if (opts.copy) { await afterCopy(res); return; }
     afterSave(res, typeof note === 'string' && note ? note : '저장했습니다', '캡처 실패');
+  }
+
+  /* 복사: 서비스 워커가 가리기까지 칠한 PNG 를 클립보드에 넣고, 되면 전체 복원 후 닫는다.
+     클립보드를 쓸 수 없는 페이지(https 가 아닌 http 주소 등)이거나 브라우저가 거부하면,
+     정리한 상태를 그대로 두고 이유를 알린다 (Enter 로 파일 저장은 그대로 할 수 있다). */
+  async function afterCopy(res) {
+    if (!res || !res.ok || !res.dataUrl) {
+      toast(`복사 실패 · ${(res && res.error) || '알 수 없는 오류'}`, 3200);
+      return;
+    }
+    const err = await copyPng(res.dataUrl);
+    if (!err) { finish('클립보드에 복사했습니다'); return; }
+    toast(`클립보드에 복사하지 못했습니다 · ${err} · Enter 로 파일 저장은 됩니다`, 4200);
+  }
+
+  function pngBlob(dataUrl) {
+    const comma = dataUrl.indexOf(',');
+    const bin = atob(dataUrl.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: 'image/png' });
+  }
+
+  /** PNG 를 클립보드에 넣는다. 되면 빈 문자열, 안 되면 이유 */
+  async function copyPng(dataUrl) {
+    if (!window.isSecureContext || !navigator.clipboard || typeof ClipboardItem === 'undefined') {
+      return '이 페이지(https 가 아닌 주소)에서는 브라우저가 클립보드 쓰기를 막습니다';
+    }
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob(dataUrl) })]);
+      return '';
+    } catch (err) {
+      const m = String((err && err.message) || err);
+      if (/focus/i.test(m)) return '이 탭에 포커스가 없습니다. 페이지를 한 번 누른 뒤 다시 하세요';
+      if (err && err.name === 'NotAllowedError') return '브라우저가 클립보드 쓰기를 허용하지 않았습니다 (사이트 설정의 클립보드 권한을 확인하세요)';
+      return m;
+    }
   }
 
   /* 저장 결과를 알린다. 저장했으면 전체 복원 후 닫는다.
@@ -1852,11 +1902,7 @@
      선택 모드의 클릭 차단을 거치지 않는다. 폴더는 지정할 수 없어 파일 이름만 쓴다. */
   function saveInPage(dataUrl, filename) {
     try {
-      const comma = dataUrl.indexOf(',');
-      const bin = atob(dataUrl.slice(comma + 1));
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+      const url = URL.createObjectURL(pngBlob(dataUrl));
       const a = document.createElement('a');
       a.href = url;
       a.download = short(filename) || 'cleanshot.png';
@@ -1871,6 +1917,7 @@
   function lockBar(on) {
     ui.shot.disabled = on;
     ui.full.disabled = on;
+    ui.copy.disabled = on;
   }
 
   function finish(message) {
