@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>cleanshot panel</title>
+<!-- 전체 페이지 캡처 시험: 문서는 스크롤되지 않고 안쪽 영역(#main)만 스크롤되는 관리 화면 모양.
+     머리글·옆 메뉴는 빠지고 #main 의 내용 전체가 저장되어야 한다. -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  #top { position: absolute; top: 0; left: 0; right: 0; height: 80px; background: rgb(20, 40, 60); }
+  #side { position: absolute; top: 80px; left: 0; bottom: 0; width: 200px; background: rgb(60, 40, 20); }
+  #main { position: absolute; top: 80px; left: 200px; right: 0; bottom: 0; overflow: auto; }
+  .band { height: 100px; }
+  #pstk { position: sticky; top: 0; height: 30px; background: rgb(0, 200, 0); z-index: 2; }
+  #psecret { width: 200px; height: 40px; margin: 30px 0 30px 100px; background: rgb(255, 0, 0); }
+  #fab { position: fixed; right: 30px; bottom: 30px; width: 50px; height: 50px; background: rgb(0, 0, 255); }
+</style>
+</head>
+<body>
+  <div id="top"></div>
+  <div id="side"></div>
+  <div id="main"></div>
+  <div id="fab"></div>
+<script>
+  const main = document.getElementById('main');
+  window.__bandColor = (i) => [100 + (i * 37) % 120, 100 + (i * 71) % 120, 100 + (i * 13) % 120];
+  for (let i = 0; i < 30; i++) {
+    const d = document.createElement('div');
+    d.className = 'band';
+    d.id = 'band' + i;
+    d.style.background = `rgb(${window.__bandColor(i).join(',')})`;
+    main.appendChild(d);
+    if (i === 4) { const s = document.createElement('div'); s.id = 'pstk'; main.appendChild(s); }
+    if (i === 21) { const s = document.createElement('div'); s.id = 'psecret'; main.appendChild(s); }
+  }
+</script>
+</body>
+</html>

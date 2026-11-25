@@ -8,7 +8,7 @@
 | `click-guide/e2e.mjs` | 52 | 녹화 대상 탭 한정, 기록 버리기, 이동 단계 스크린샷 가리기, SPA 화면 전환, iframe 좌표·값 전달, AI 로 보내는 내용, 녹화 바(closed shadow root) 조작, 설정값 보정, 속도 진단, 뒤로 가기 캐시 |
 | `click-guide/redact.mjs` | 15 | 공용 가리기 코어(`shared/redact-core.js`)로 스크린샷을 가림. 화면 글자 속 휴대폰·주민번호·이메일·계좌번호는 검정으로 칠하고 비슷한 숫자는 그대로 둠, 클릭한 뒤에 뜬 모달과 클릭과 촬영 사이에 움직인 영역, 클릭하지 않은 다른 출처 iframe 안, shadow root 안(웹 컴포넌트의 닫힌 것 포함), 개인정보 모양의 입력값(`●●●●` 기록과 칸 가리기), 흐리게 설정, 화면 개인정보 자동 가리기 끄기 |
 | `click-guide/backup.mjs` | 12 | 확장 ID 고정(manifest `key` → 고정 ID), `key` 를 뺀 이전 버전에서 전체 백업 내려받기 → 새 프로필의 고정 ID 확장으로 가져오기. 가이드·단계·스크린샷 바이트 일치, API 키 제외·유지, 손상된 백업 거부, 다시 가져와도 겹치지 않음 |
-| `cleanshot-picker/e2e.mjs` | 69 | 가리기 박스가 요소를 따라감(고정·sticky·내부 스크롤·iframe·영역), 캡처 PNG 에 검정이 칠해졌는지 픽셀로 판정, dialog·popover 위 표시, 텍스트 되돌리기, shadow DOM·iframe 안 요소 선택, 대체 저장. 화면 배율 1·2 에서 각각 실행 |
+| `cleanshot-picker/e2e.mjs` | 113 | 가리기 박스가 요소를 따라감(고정·sticky·내부 스크롤·iframe·영역), 캡처 PNG 에 검정이 칠해졌는지 픽셀로 판정, dialog·popover 위 표시, 텍스트 되돌리기, shadow DOM·iframe 안 요소 선택, 대체 저장, 전체 페이지 캡처(문서·안쪽 스크롤 영역, 저장된 PNG 의 세로줄 전체를 문서와 대조, 고정 머리글·바닥글·sticky 한 번씩, 장마다 가리기, `Esc` 로 멈춤, 다른 탭 전환, 긴 페이지 자르기, 확대 150%). 화면 배율 1·2 에서 각각 실행 |
 
 ## 준비
 
@@ -38,7 +38,8 @@ node tests/e2e/click-guide/e2e.mjs --only=tabs,discard   # 구역 일부만
 | `CDP_PORT` | 브라우저 디버깅 포트 |
 
 - click-guide 는 `--headed` 를 붙이면 창을 띄워 실행합니다. `--only=` 구역: `tabs` `iframe` `spa` `navredact` `discard` `width` `speed` `editor` `bar` `bfcache`
-- cleanshot-picker 의 `ONLY` 구역: `overlay` `fixedScroll` `stickyScroll` `layoutShift` `innerScroll` `regionDoc` `iframeText` `zoom` `regions` `picking` `iframeMask` `textUndo` `dialog` `popoverBurn` `fallback` `fullCapture` `timing` `screens`
+- cleanshot-picker 의 `ONLY` 구역: `overlay` `fixedScroll` `stickyScroll` `layoutShift` `innerScroll` `regionDoc` `iframeText` `zoom` `regions` `picking` `iframeMask` `textUndo` `dialog` `popoverBurn` `fallback` `fullCapture` `fullPageDoc` `fullPagePanel` `fullPageCancel` `fullPageSwitchSim` `fullPageSwitch` `fullPageTruncate` `fullPageZoom` `timing` `screens`
+  - `fullCapture` 는 가리기 여러 개를 보이는 화면 한 장으로 찍는 시험이고, 전체 페이지 캡처는 `fullPage…` 구역입니다. 시험 페이지는 `site/full.html`(문서 스크롤, `?bands=N` 으로 길이 조절)과 `site/panel.html`(안쪽 영역만 스크롤)입니다.
 
 ## 알아 둘 점
 

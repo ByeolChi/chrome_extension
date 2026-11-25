@@ -1,5 +1,6 @@
-// CleanShot Picker 0단계 수정 e2e 시험
-// 실행: 저장소 최상위에서 node tests/e2e/cleanshot-picker/e2e.mjs   (화면 배율 2: DPR=2, 다른 사본: CLEANSHOT_EXT=<확장 폴더>)
+// CleanShot Picker e2e 시험 (0단계 수정 + 전체 페이지 캡처)
+// 실행: 저장소 최상위에서 node tests/e2e/cleanshot-picker/e2e.mjs   (화면 배율 2: DPR=2, 다른 사본: CLEANSHOT_EXT=<확장 폴더>,
+//       일부만: ONLY=fullPageDoc,fullPagePanel)
 // 요구 사항과 시험 내용은 tests/e2e/README.md 참고
 // Playwright Chromium 131 에 확장의 시험용 사본을 로드한다. 사본은 코드가 같고
 // manifest 에 host_permissions <all_urls> 만 더했다 — CDP 로는 activeTab(사용자 클릭)을 줄 수 없어서다.
@@ -73,6 +74,7 @@ const { proc, cdp } = await launch({
 });
 
 let pageS = null;
+let pageTargetId = null;
 let swS = null;
 let mainFrameId = null;
 const contexts = new Map();
@@ -230,6 +232,81 @@ async function captureAndRead() {
 
 const scaled = (r, inset = 1) => ({ x: r.x * DPR + inset, y: r.y * DPR + inset, w: r.w * DPR - 2 * inset, h: r.h * DPR - 2 * inset });
 
+/* ---------------------------------------------------------------- 전체 페이지 캡처 도우미 */
+const sameRgb = (p, c) => !!p && !!c && p[0] === c[0] && p[1] === c[1] && p[2] === c[2];
+const HDR = [20, 40, 60];
+const FTR = [60, 40, 20];
+const GREEN = [0, 200, 0];
+const BLUE = [0, 0, 255];
+const FULL_URL = (q = '') => `http://127.0.0.1:${WEB}/full.html${q}`;
+const styleSnap = () => main(`JSON.stringify([...document.querySelectorAll('*')].map((e) => e.getAttribute('style')))`);
+const swFull = () => sw(`(async () => { const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); return { runs: fullRuns.size, badge: await chrome.action.getBadgeText({ tabId: tab.id }) }; })()`);
+
+/* full.html 의 배치(문서 좌표). sticky 가 붙기 전(맨 위)에 잰다. hs 는 고정 머리글 안 요소의 화면 좌표. */
+const fullLayout = () => main(`(() => {
+  const sy = scrollY;
+  const doc = (el) => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top + sy, w: b.width, h: b.height }; };
+  const hs = document.getElementById('hdrSecret').getBoundingClientRect();
+  return {
+    W: document.documentElement.clientWidth, H: document.scrollingElement.scrollHeight, vh: document.documentElement.clientHeight,
+    bands: [...document.querySelectorAll('.band')].map((b, i) => ({ ...doc(b), c: window.__bandColor(i) })),
+    stk: doc(document.getElementById('stk')), deep: doc(document.getElementById('deep')), tfix: doc(document.getElementById('tfix')),
+    hs: { x: hs.left, y: hs.top, w: hs.width, h: hs.height }
+  };
+})()`);
+
+/* 전체 캡처를 시작하고 새 PNG 를 기다리며, 그동안 뜬 안내 문구를 모은다. want 가 있으면 그 문구가 뜰 때까지 조금 더 본다. */
+async function fullShot(start, { timeout = 45000, want = null } = {}) {
+  const before = new Set(listFiles());
+  const t0 = Date.now();
+  await start();
+  const toasts = new Set();
+  let file = null;
+  let fileAt = 0;
+  while (Date.now() - t0 < timeout) {
+    const t = await toastText().catch(() => '');
+    if (t) toasts.add(t);
+    if (!file) {
+      const files = listFiles().filter((f) => !before.has(f));
+      const done = files.filter((f) => f.endsWith('.png'));
+      if (done.length && !files.some((f) => f.endsWith('.crdownload'))) { file = done[0]; fileAt = Date.now(); }
+    }
+    if (file && (!want || [...toasts].some((x) => want.test(x)) || Date.now() - fileAt > 1500)) break;
+    await sleep(40);
+  }
+  if (file) await sleep(150);
+  return { file, img: file ? decodePng(fs.readFileSync(file)) : null, ms: (fileAt || Date.now()) - t0, toasts: [...toasts] };
+}
+
+/* 새로 생긴 PNG 들 (멈춘 시험에서 아무것도 저장되지 않았는지 볼 때) */
+const newPngs = (before) => listFiles().filter((f) => !before.has(f) && f.endsWith('.png'));
+
+/* 이미지의 세로줄 x(CSS px)를 맨 위부터 맨 아래까지 모두 보고, 기대 색 expect(문서 y)와 다른 줄을 모은다.
+   expect 가 null 이면 그 줄은 보지 않고, 기대 색이 바뀌는 경계의 앞뒤 한 줄도 건너뛴다(반올림).
+   장 사이 이음매의 빈 줄·어긋남, 장마다 되풀이된 머리글·바닥글·sticky·검정 박스를 모두 잡는다. */
+function columnErrors(img, x, scale, expect) {
+  const bad = [];
+  const px = Math.round(x * scale);
+  const at = (row) => expect((row + 0.5) / scale);
+  for (let row = 0; row < img.height; row++) {
+    const want = at(row);
+    if (!want || at(row - 1) !== want || at(row + 1) !== want) continue;
+    const got = pixel(img, px, row);
+    if (!sameRgb(got, want) || got[3] !== 255) bad.push({ row, y: Math.round((row + 0.5) / scale), want, got });
+  }
+  return bad;
+}
+
+/* full.html 의 문서 y 에서 기대하는 색 (머리글·바닥글 자리는 보지 않음). H 를 주면 그 높이를 문서 끝으로 본다. */
+const fullExpect = (L, H = L.H) => (y) => {
+  if (y < 50 || y >= H - 40) return null;
+  if (y >= L.stk.y && y < L.stk.y + L.stk.h) return GREEN;
+  const b = L.bands.find((q) => y >= q.y && y < q.y + q.h);
+  return b ? b.c : null;
+};
+const BLACK = [0, 0, 0];
+const WHITE = [255, 255, 255];
+
 /* ---------------------------------------------------------------- 시작 */
 async function setup() {
   let swT = null;
@@ -246,6 +323,7 @@ async function setup() {
 
   const { targetInfos } = await cdp.send('Target.getTargets');
   const pageT = targetInfos.find((t) => t.type === 'page');
+  pageTargetId = pageT.targetId;
   pageS = (await cdp.send('Target.attachToTarget', { targetId: pageT.targetId, flatten: true })).sessionId;
   await cdp.send('Page.enable', {}, pageS);
   await cdp.send('Runtime.enable', {}, pageS);
@@ -728,6 +806,248 @@ const cases = {
     await sleep(1000);
     const snapAfter = await main(`JSON.stringify([...document.querySelectorAll('*')].map((e) => e.getAttribute('style')))`);
     check('저장 후 페이지 인라인 스타일이 모두 원래대로', snapAfter === snapBefore);
+  },
+
+  /* 전체 페이지(문서 스크롤): 띠가 모두 제자리, 고정 머리글·바닥글은 한 번씩, sticky 는 제자리 한 번,
+     장마다 가리기, transform 안 fixed 는 내용과 함께, 끝나면 스크롤·스타일 복원 */
+  async fullPageDoc() {
+    await freshPage(FULL_URL());
+    const L = await fullLayout();
+    await main('scrollTo(0, 700)');
+    await sleep(150);
+    const styleBefore = await styleSnap();
+    await activate();
+    await key('5');
+    const hs = await rectMain('#hdrSecret');
+    await click(center(hs).x, center(hs).y);
+    await main(`document.getElementById('deep').scrollIntoView({ block: 'center' })`);
+    await sleep(250);
+    const dp = await rectMain('#deep');
+    await click(center(dp).x, center(dp).y);
+    await main('scrollTo(0, 700)');
+    await sleep(250);
+    check('전체 페이지 준비: 가리기 2개 (고정 머리글 안, 아래쪽)', (await masks()).length === 2);
+
+    const shot = await fullShot(() => key('Enter', SHIFT));
+    if (!shot.img) { check('전체 페이지 PNG 저장 (Shift+Enter)', false, `파일 없음 ${JSON.stringify(shot.toasts)}`); return; }
+    const img = shot.img;
+    const at = (x, y) => pixel(img, Math.round(x * DPR), Math.round(y * DPR));
+    const X = 1000; // 다른 요소가 없는 세로줄
+    console.log(`   전체 페이지 ${Math.ceil(L.H / L.vh)}장 ${img.width}x${img.height}: ${shot.ms}ms`);
+    check('전체 페이지: 파일 이름이 -full.png 로 끝남', /-full\.png$/.test(shot.file), path.basename(shot.file));
+    check('전체 페이지: PNG 크기 = 문서 너비(스크롤 막대 제외) × 전체 높이 × DPR',
+      Math.abs(img.width - L.W * DPR) <= 1 && Math.abs(img.height - L.H * DPR) <= 1, `${img.width}x${img.height} 기대 ${L.W * DPR}x${L.H * DPR}`);
+
+    const exp = fullExpect(L);
+    const col = columnErrors(img, X, DPR, exp);
+    check('전체 페이지: 세로줄 전체가 문서와 같음 (띠 제자리, 이음매 빈 줄 없음, 머리글·바닥글·sticky 되풀이 없음)',
+      col.length === 0, col.length ? col.slice(0, 4) : `띠 ${L.bands.length}개, ${img.height}줄`);
+    check('고정 머리글: 맨 위에 한 번', sameRgb(at(X, 25), HDR), at(X, 25));
+    check('고정 바닥글: 맨 아래에 한 번', sameRgb(at(X, L.H - 20), FTR) && sameRgb(at(X, L.H - 39), FTR), [at(X, L.H - 39), at(X, L.H - 20)]);
+    check('sticky 막대: 제자리에 한 번', sameRgb(at(X, L.stk.y + 15), GREEN), at(X, L.stk.y + 15));
+
+    const br1 = blackRatio(img, ...Object.values(scaled(L.hs)));
+    check('고정 머리글 안 요소 가리기: 맨 위에 검정', br1 > 0.999, `black=${br1.toFixed(4)}`);
+    const col2 = columnErrors(img, L.hs.x + 60, DPR, (y) => (y >= L.deep.y && y < L.deep.y + L.deep.h ? BLACK : exp(y)));
+    check('고정 머리글 안 요소 가리기: 다음 장들에 검정 박스가 되풀이되지 않음 (그 세로줄 전체가 문서와 같음)', col2.length === 0, col2.slice(0, 4));
+    const br2 = blackRatio(img, ...Object.values(scaled(L.deep)));
+    check('아래쪽 요소 가리기: 제자리에 검정', br2 > 0.999, `black=${br2.toFixed(4)} ${fmt(L.deep)}`);
+    check('transform 안의 fixed 요소는 내용과 함께 제자리에', sameRgb(at(L.tfix.x + 50, L.tfix.y + 20), BLUE), at(L.tfix.x + 50, L.tfix.y + 20));
+
+    await sleep(1200);
+    const sy = await main('scrollY');
+    check('전체 캡처 뒤 스크롤 위치 복원', Math.abs(sy - 700) < 1, sy);
+    check('전체 캡처 뒤 페이지 인라인 스타일이 모두 원래대로', (await styleSnap()) === styleBefore);
+    check('전체 캡처 뒤 피커가 닫힘', !(await iso('window.__cleanShot.state.active')));
+    const s = await swFull();
+    check('전체 캡처 뒤 service worker 정리 (진행 목록 비움, 배지 지움)', s.runs === 0 && s.badge === '', s);
+  },
+
+  /* 전체 페이지(안쪽 스크롤 영역): 문서는 스크롤되지 않는 관리 화면. 툴바의 "전체" 버튼으로 찍는다. */
+  async fullPagePanel() {
+    await freshPage(`http://127.0.0.1:${WEB}/panel.html`);
+    const L = await main(`(() => {
+      const m = document.getElementById('main');
+      const mr = m.getBoundingClientRect();
+      const clip = { x: mr.left + m.clientLeft, y: mr.top + m.clientTop, w: m.clientWidth, h: m.clientHeight };
+      const c = (el) => { const b = el.getBoundingClientRect(); return { x: b.left - clip.x, y: b.top - clip.y + m.scrollTop, w: b.width, h: b.height }; };
+      const f = document.getElementById('fab').getBoundingClientRect();
+      return { clip, total: m.scrollHeight, bands: [...m.querySelectorAll('.band')].map((b, i) => ({ ...c(b), c: window.__bandColor(i) })),
+        stk: c(document.getElementById('pstk')), secret: c(document.getElementById('psecret')),
+        fab: { x: f.left - clip.x, y: f.top - clip.y, w: f.width, h: f.height } };
+    })()`);
+    await main(`document.getElementById('main').scrollTop = 300`);
+    await sleep(150);
+    const styleBefore = await styleSnap();
+    await activate();
+    await key('5');
+    await main(`document.getElementById('psecret').scrollIntoView({ block: 'center' })`);
+    await sleep(250);
+    const ps = await rectMain('#psecret');
+    await click(center(ps).x, center(ps).y);
+    await main(`document.getElementById('main').scrollTop = 300`);
+    await sleep(250);
+
+    const btn = await uiRect('.full');
+    const shot = await fullShot(() => click(center(btn).x, center(btn).y), { want: /스크롤 영역 전체를 저장했습니다/ });
+    if (!shot.img) { check('스크롤 영역: PNG 저장 ("전체" 버튼)', false, `파일 없음 ${JSON.stringify(shot.toasts)}`); return; }
+    const img = shot.img;
+    const at = (x, y) => pixel(img, Math.round(x * DPR), Math.round(y * DPR));
+    const X = 400;
+    console.log(`   스크롤 영역 ${Math.ceil(L.total / L.clip.h)}장 ${img.width}x${img.height}: ${shot.ms}ms`);
+    check('스크롤 영역: PNG 크기 = 영역 너비 × 내용 높이 × DPR (머리글·옆 메뉴 빠짐)',
+      Math.abs(img.width - L.clip.w * DPR) <= 1 && Math.abs(img.height - L.total * DPR) <= 1, `${img.width}x${img.height} 기대 ${L.clip.w * DPR}x${L.total * DPR}`);
+    check('스크롤 영역: 맨 위가 머리글이 아니라 첫 띠', sameRgb(at(X, 20), L.bands[0].c), at(X, 20));
+    check('스크롤 영역 안내 문구', shot.toasts.some((t) => /스크롤 영역 전체를 저장했습니다/.test(t)), shot.toasts);
+    const pexp = (y) => {
+      if (y >= L.stk.y && y < L.stk.y + L.stk.h) return GREEN;
+      if (y >= L.secret.y - 30 && y < L.secret.y + L.secret.h + 30) return WHITE; // #psecret 이 있는 줄(여백 포함)의 빈 바탕
+      const b = L.bands.find((q) => y >= q.y && y < q.y + q.h);
+      return b ? b.c : null;
+    };
+    const col = columnErrors(img, X, DPR, pexp);
+    check('스크롤 영역: 세로줄 전체가 내용과 같음 (띠 제자리, 이음매 빈 줄 없음, sticky 되풀이 없음)', col.length === 0, col.slice(0, 4));
+    check('스크롤 영역 sticky: 제자리에 한 번', sameRgb(at(X, L.stk.y + 15), GREEN), at(X, L.stk.y + 15));
+    const br = blackRatio(img, ...Object.values(scaled(L.secret)));
+    check('스크롤 영역 안 요소 가리기: 제자리에 검정', br > 0.999, `black=${br.toFixed(4)} ${fmt(L.secret)}`);
+    const fabY = L.total - L.clip.h + L.fab.y; // 마지막 장(맨 끝)에서 버튼이 놓이는 내용 좌표
+    check('화면에 붙은 버튼(fixed): 마지막 장 자리에 한 번', sameRgb(at(L.fab.x + 25, fabY + 25), BLUE), at(L.fab.x + 25, fabY + 25));
+    const colFab = columnErrors(img, L.fab.x + 25, DPR, (y) => (y >= fabY && y < fabY + L.fab.h ? BLUE : pexp(y)));
+    check('화면에 붙은 버튼(fixed): 앞 장들에는 없음 (그 세로줄 전체가 내용과 같음)', colFab.length === 0, colFab.slice(0, 4));
+
+    await sleep(1200);
+    const st = await main(`document.getElementById('main').scrollTop`);
+    check('스크롤 영역 캡처 뒤 스크롤 위치 복원', Math.abs(st - 300) < 1, st);
+    check('스크롤 영역 캡처 뒤 인라인 스타일이 모두 원래대로', (await styleSnap()) === styleBefore);
+  },
+
+  /* 전체 캡처 도중 Esc: 저장하지 않고, 찍느라 바꾼 것만 되돌리고, 사용자가 정리한 것은 남긴다 */
+  async fullPageCancel() {
+    await freshPage(FULL_URL('?bands=80'));
+    await main('scrollTo(0, 400)');
+    await sleep(150);
+    await activate();
+    await key('1');
+    const b = await rectMain('#band5');
+    await click(center(b).x, center(b).y);
+    check('멈춤 시험 준비: 띠 하나를 지움', await main(`document.getElementById('band5').style.visibility === 'hidden'`));
+    const before = new Set(listFiles());
+    await key('Enter', SHIFT);
+    await sleep(2300); // 안내 0.7초 + 두세 장
+    const mid = await main('scrollY');
+    const midRuns = (await swFull()).runs;
+    await key('Escape');
+    let t = '';
+    for (let i = 0; i < 160 && !/멈췄습니다/.test(t); i++) { t = await toastText().catch(() => ''); await sleep(25); }
+    await sleep(1500);
+    const files = newPngs(before);
+    check('멈추면 파일을 저장하지 않음', files.length === 0, files.map((f) => path.basename(f)));
+    check('멈춤 안내 문구', /멈췄습니다/.test(t), t);
+    const s = await main(`({ sy: scrollY, vis: document.getElementById('band5').style.visibility, hdr: document.getElementById('hdr').getAttribute('style'), ftr: document.getElementById('ftr').getAttribute('style'), stk: document.getElementById('stk').getAttribute('style'), html: document.documentElement.getAttribute('style'), body: document.body.getAttribute('style') })`);
+    check('멈춘 뒤 스크롤 위치와 찍느라 바꾼 스타일 복원, 정리한 것은 그대로',
+      Math.abs(s.sy - 400) < 1 && s.vis === 'hidden' && s.hdr === null && s.ftr === null && s.stk === null && s.html === null && s.body === null, { mid, midRuns, ...s });
+    check('멈춘 뒤 피커는 켜진 채 다시 쓸 수 있음', await iso('window.__cleanShot.state.active && !window.__cleanShot.state.busy && !window.__cleanShot.state.full'));
+    const w = await swFull();
+    check('멈춘 뒤 service worker 가 쌓던 이미지를 버리고 배지를 지움', w.runs === 0 && w.badge === '', w);
+    await key('Escape');
+  },
+
+  /* 찍는 사이 탭이 활성 탭이 아니게 되면(시험에서는 확인 함수를 바꿔 흉내) 멈추고 저장하지 않는다 */
+  async fullPageSwitchSim() {
+    await freshPage(FULL_URL('?bands=60'));
+    await sw(`(() => { self.__origStill = stillActive; let n = 0; stillActive = async (run) => (++n <= 3) && self.__origStill(run); })()`);
+    try {
+      await activate();
+      const before = new Set(listFiles());
+      await key('Enter', SHIFT);
+      let t = '';
+      for (let i = 0; i < 300 && !/다른 탭/.test(t); i++) { t = await toastText().catch(() => ''); await sleep(40); }
+      await sleep(1200);
+      check('활성 탭이 아니게 되면 멈추고 알림', /다른 탭으로 바뀌어 멈췄습니다/.test(t), t);
+      check('활성 탭이 아니게 되면 저장하지 않음', newPngs(before).length === 0, newPngs(before).map((f) => path.basename(f)));
+      const w = await swFull();
+      check('멈춘 뒤 service worker 정리', w.runs === 0 && w.badge === '', w);
+      check('멈춘 뒤 스크롤 위치 복원', Math.abs((await main('scrollY')) - 0) < 1);
+    } finally {
+      await sw(`stillActive = self.__origStill`);
+    }
+    await key('Escape');
+  },
+
+  /* 실제로 다른 탭을 열었다 닫아도, 다른 탭 화면(자홍색)이 저장된 이미지에 섞이지 않는다 */
+  async fullPageSwitch() {
+    await freshPage(FULL_URL('?bands=80'));
+    await activate();
+    const before = new Set(listFiles());
+    await key('Enter', SHIFT);
+    await sleep(1800);
+    const { targetId } = await cdp.send('Target.createTarget', { url: 'data:text/html,<body style="margin:0;background:rgb(250,0,250)"></body>' });
+    await sleep(2500);
+    const activeUrl = await sw(`chrome.tabs.query({ active: true }).then((t) => t.map((x) => (x.url || x.pendingUrl || '').slice(0, 24)))`);
+    await cdp.send('Target.closeTarget', { targetId });
+    await cdp.send('Target.activateTarget', { targetId: pageTargetId });
+    for (let i = 0; i < 600; i++) {
+      if (!(await iso('!!window.__cleanShot.state.busy').catch(() => false))) break;
+      await sleep(50);
+    }
+    await sleep(1500);
+    let t = await toastText().catch(() => '');
+    const files = newPngs(before);
+    let magenta = 0;
+    for (const f of files) {
+      const img = decodePng(fs.readFileSync(f));
+      for (let y = 0; y < img.height; y += 7) for (let x = 0; x < img.width; x += 13) if (sameRgb(pixel(img, x, y), [250, 0, 250])) magenta++;
+    }
+    console.log(`   다른 탭 연 동안 활성 탭: ${JSON.stringify(activeUrl)} → 결과: ${files.length ? '끝까지 찍어 저장' : '멈춤'} ${t}`);
+    check('다른 탭을 연 동안 그 탭 화면이 이미지에 섞이지 않음', magenta === 0, { files: files.map((f) => path.basename(f)), magenta });
+    const w = await swFull();
+    check('다른 탭 시험 뒤 service worker 정리', w.runs === 0 && w.badge === '', w);
+    if (await iso('window.__cleanShot.state.active').catch(() => false)) await key('Escape');
+  },
+
+  /* 너무 긴 페이지: 캔버스 한도(시험에서 1500px 로 줄임)까지만 저장하고 알린다 */
+  async fullPageTruncate() {
+    await freshPage(FULL_URL());
+    const W = await main('document.documentElement.clientWidth');
+    const L = await fullLayout();
+    await sw(`FULL_LIMITS.area = ${Math.round(W * DPR)} * ${Math.round(1500 * DPR)}`);
+    try {
+      await activate();
+      const shot = await fullShot(() => key('Enter', SHIFT), { want: /너무 길어/ });
+      if (!shot.img) { check('긴 페이지: PNG 저장', false, `파일 없음 ${JSON.stringify(shot.toasts)}`); return; }
+      const img = shot.img;
+      check('긴 페이지: 한도 높이까지만 저장', Math.abs(img.height - 1500 * DPR) <= 1 && Math.abs(img.width - W * DPR) <= 1, `${img.width}x${img.height}`);
+      check('긴 페이지: 잘랐다는 안내', shot.toasts.some((t) => /너무 길어 위에서 1500px 까지만/.test(t)), shot.toasts);
+      const col = columnErrors(img, 1000, DPR, fullExpect(L, 1500));
+      check('긴 페이지: 저장한 부분의 세로줄 전체가 문서와 같음', col.length === 0, col.slice(0, 4));
+      check('긴 페이지: 바닥글은 저장한 부분의 맨 아래에', sameRgb(pixel(img, Math.round(1000 * DPR), Math.round(1480 * DPR)), FTR), pixel(img, Math.round(1000 * DPR), Math.round(1480 * DPR)));
+    } finally {
+      await sw(`FULL_LIMITS.area = 2 ** 26`);
+    }
+    await sleep(900);
+  },
+
+  /* 페이지 확대 150% 에서도 이어 붙인 자리가 맞는지 */
+  async fullPageZoom() {
+    await freshPage(FULL_URL());
+    await sw(`(async () => { const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await chrome.tabs.setZoom(tab.id, 1.5); })()`);
+    await sleep(500);
+    try {
+      const L = await fullLayout();
+      await activate();
+      const shot = await fullShot(() => key('Enter', SHIFT));
+      if (!shot.img) { check('확대 150% 전체 페이지: PNG 저장', false, `파일 없음 ${JSON.stringify(shot.toasts)}`); return; }
+      const img = shot.img;
+      const z = DPR * 1.5;
+      const X = 600; // 확대하면 화면 너비가 약 850 CSS px 로 줄어든다
+      check('확대 150% 전체 페이지: PNG 크기 = 문서 × 배율 × 1.5', Math.abs(img.width - L.W * z) <= 2 && Math.abs(img.height - L.H * z) <= 2, `${img.width}x${img.height} 기대 ${L.W * z}x${L.H * z}`);
+      const col = columnErrors(img, X, z, fullExpect(L));
+      check('확대 150% 전체 페이지: 세로줄 전체가 문서와 같음 (이음매 빈 줄 없음)', col.length === 0, col.slice(0, 4));
+      check('확대 150% 전체 페이지: 바닥글이 맨 아래에', sameRgb(pixel(img, Math.round(X * z), img.height - Math.round(20 * z)), FTR), pixel(img, Math.round(X * z), img.height - Math.round(20 * z)));
+    } finally {
+      await sw(`(async () => { const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await chrome.tabs.setZoom(tab.id, 1); })()`);
+      await sleep(900);
+    }
   },
 
   /* 가리기 없을 때 저장 시간 (빠른 경로 유지 확인) */
