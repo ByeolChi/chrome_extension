@@ -26,6 +26,17 @@ export const DEFAULT_SETTINGS = {
   highlightWidth: 3,
   dimOutside: false,           // 하이라이트 밖 영역을 살짝 어둡게
 
+  exportImageWidth: 0,         // 내보낼 때 이미지 가로 최대(px). 0 = 저장된 크기 그대로
+
+  // Word·PowerPoint 양식
+  doc: {
+    headerText: '',            // 머리글 (비우면 가이드 제목). Word 는 쪽 위, PowerPoint 는 슬라이드 아래
+    author: '',                // 작성자: 개정 이력 첫 줄과 문서 속성. 비우면 넣지 않는다
+    logo: '',                  // 로고 이미지 (PNG·JPEG data URL, 설정 화면에서 줄여 넣는다)
+    toc: true,                 // Word 목차
+    revisions: true            // Word 개정 이력 표
+  },
+
   // AI 문장 다듬기 (선택)
   ai: {
     provider: 'none',          // 'none' | 'openai' | 'anthropic'
@@ -49,10 +60,23 @@ const NUMERIC = {
 };
 
 const REDACT_STYLES = ['box', 'blur'];
+export const EXPORT_WIDTHS = [0, 1280, 960];
+export const LOGO_MAX_CHARS = 700000;   // data URL 길이 (약 500KB). 설정 화면에서 가로 600px 안으로 줄여 넣는다
+
+/** Word·PowerPoint 양식: 글 길이·형식을 지키고, 로고는 PNG·JPEG data URL 만 */
+export function normalizeDoc(d) {
+  const src = d && typeof d === 'object' ? d : {};
+  const text = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const logo = typeof src.logo === 'string' && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(src.logo) && src.logo.length <= LOGO_MAX_CHARS ? src.logo : '';
+  return { headerText: text(src.headerText, 120), author: text(src.author, 60), logo, toc: src.toc !== false, revisions: src.revisions !== false };
+}
 
 export function normalizeSettings(s) {
   const out = { ...s };
   if (!REDACT_STYLES.includes(out.redactStyle)) out.redactStyle = DEFAULT_SETTINGS.redactStyle;
+  if (!EXPORT_WIDTHS.includes(Number(out.exportImageWidth))) out.exportImageWidth = 0;
+  else out.exportImageWidth = Number(out.exportImageWidth);
+  out.doc = normalizeDoc(out.doc);
   for (const [key, r] of Object.entries(NUMERIC)) {
     const v = s[key];
     const n = (v === '' || v === null || v === undefined) ? NaN : Number(v);
@@ -100,7 +124,7 @@ export async function getSettings({ withApiKey = false } = {}) {
     try { await moveLegacyApiKey(s); } catch (e) { console.warn('[ClickGuide] API 키를 비밀 보관소로 옮기지 못했습니다:', e); }
     s = withoutApiKey(s);
   }
-  const out = normalizeSettings({ ...DEFAULT_SETTINGS, ...s, ai: { ...DEFAULT_SETTINGS.ai, ...(s.ai || {}) } });
+  const out = normalizeSettings({ ...DEFAULT_SETTINGS, ...s, ai: { ...DEFAULT_SETTINGS.ai, ...(s.ai || {}) }, doc: { ...DEFAULT_SETTINGS.doc, ...(s.doc || {}) } });
   out.ai.apiKey = withApiKey ? await getApiKey() : '';
   return out;
 }
@@ -113,7 +137,7 @@ export async function setSettings(patch) {
   const p = patch || {};
   const keyGiven = hasApiKey(p);
   const cur = await getSettings();
-  const next = normalizeSettings({ ...cur, ...p, ai: { ...cur.ai, ...(p.ai || {}) } });
+  const next = normalizeSettings({ ...cur, ...p, ai: { ...cur.ai, ...(p.ai || {}) }, doc: { ...cur.doc, ...(p.doc || {}) } });
   const key = keyGiven ? String(p.ai.apiKey ?? '') : '';
   if (keyGiven) await setApiKey(key);
   await chrome.storage.local.set({ cg_settings: withoutApiKey(next) });
@@ -125,5 +149,5 @@ export async function setSettings(patch) {
 export async function resetSettings() {
   await chrome.storage.local.set({ cg_settings: {} });
   await setApiKey('');
-  return { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai } };
+  return { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai }, doc: { ...DEFAULT_SETTINGS.doc } };
 }

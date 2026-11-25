@@ -1,4 +1,4 @@
-import { getSettings, setSettings, resetSettings, DEFAULT_SETTINGS } from '../common/settings.js';
+import { getSettings, setSettings, resetSettings, DEFAULT_SETTINGS, LOGO_MAX_CHARS } from '../common/settings.js';
 import { listSessions, deleteSession, estimateUsage } from '../common/db.js';
 import { testConnection, listModels, resolveEndpoint } from '../common/ai.js';
 import { bytes, downloadBlob, formatDate } from '../common/util.js';
@@ -44,7 +44,66 @@ function load(s) {
   $('#aiImages').checked = !!s.ai.includeScreenshots;
   $('#aiExtra').value = s.ai.extraPrompt || '';
   toggleAi();
+
+  const d = s.doc || {};
+  $('#docHeader').value = d.headerText || '';
+  $('#docAuthor').value = d.author || '';
+  $('#docToc').checked = d.toc !== false;
+  $('#docRevisions').checked = d.revisions !== false;
+  docLogo = d.logo || '';
+  showLogo();
 }
+
+/* ---- 문서 양식의 로고: 고른 이미지를 가로 600px·세로 200px 안으로 줄여 data URL 로 설정에 둔다 ---- */
+let docLogo = '';
+
+function showLogo(error = '') {
+  const img = $('#docLogoPreview');
+  img.hidden = !docLogo;
+  if (docLogo) img.src = docLogo; else img.removeAttribute('src');
+  $('#docLogoClear').hidden = !docLogo;
+  const msg = $('#docLogoError');
+  msg.textContent = error;
+  msg.hidden = !error;
+}
+
+async function shrinkLogo(file) {
+  if (!/^image\/(png|jpeg)$/.test(file.type)) throw new Error('PNG 나 JPEG 이미지만 쓸 수 있습니다.');
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, 600 / bmp.width, 200 / bmp.height);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * scale));
+  c.height = Math.max(1, Math.round(bmp.height * scale));
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close();
+  let url = c.toDataURL('image/png');
+  if (url.length > LOGO_MAX_CHARS) url = c.toDataURL('image/jpeg', 0.9);   // 사진처럼 색이 많은 로고
+  if (url.length > LOGO_MAX_CHARS) throw new Error('로고 이미지가 너무 큽니다. 더 단순한 이미지를 골라 주세요.');
+  return url;
+}
+
+$('#docLogoPick').addEventListener('click', () => $('#docLogoFile').click());
+$('#docLogoFile').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    docLogo = await shrinkLogo(file);
+    showLogo();
+    await setSettings(collect());
+    flashSaved();
+  } catch (err) {
+    showLogo(err.message || String(err));
+  }
+});
+$('#docLogoClear').addEventListener('click', async () => {
+  docLogo = '';
+  showLogo();
+  await setSettings(collect());
+  flashSaved();
+});
 
 function collect() {
   const patch = {};
@@ -64,6 +123,13 @@ function collect() {
     apiKey: $('#aiKey').value,
     includeScreenshots: $('#aiImages').checked,
     extraPrompt: $('#aiExtra').value
+  };
+  patch.doc = {
+    headerText: $('#docHeader').value,
+    author: $('#docAuthor').value,
+    logo: docLogo,
+    toc: $('#docToc').checked,
+    revisions: $('#docRevisions').checked
   };
   return patch;
 }

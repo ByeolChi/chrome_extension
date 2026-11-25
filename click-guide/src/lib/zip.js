@@ -35,9 +35,9 @@ class Writer {
 
 /**
  * files: [{ name: 'a/b.txt', data: Uint8Array }]
- * 반환: Blob (application/zip)
+ * 반환: Blob (type 이 없으면 application/zip. Word·PowerPoint 파일도 ZIP 이라 형식만 바꿔 준다)
  */
-export function createZip(files, date) {
+export function createZip(files, date, type) {
   const enc = new TextEncoder();
   const w = new Writer();
   const central = [];
@@ -82,5 +82,5 @@ export function createZip(files, date) {
   w.u32(cdSize); w.u32(cdStart);
   w.u16(0);
 
-  return w.blob();
+  return w.blob(type);
 }

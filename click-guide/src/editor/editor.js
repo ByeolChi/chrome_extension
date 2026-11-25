@@ -1,8 +1,11 @@
 import * as db from '../common/db.js';
-import { getSettings } from '../common/settings.js';
+import { getSettings, setSettings } from '../common/settings.js';
 import { describeStep, suggestGuideTitle } from '../common/describe.js';
 import { enhanceSteps } from '../common/ai.js';
-import { bakeStepImage, buildGuideHtml, buildMarkdown, buildJsonExport, dataUrlToUint8 } from '../common/render.js';
+import { bakeStepImage, buildGuideHtml, buildMarkdown, buildJsonExport, dataUrlToUint8, loadImage } from '../common/render.js';
+import { buildDocx, DOCX_MIME } from '../common/docx.js';
+import { buildPptx, PPTX_MIME } from '../common/pptx.js';
+import { exportStrings } from '../common/ooxml.js';
 import { PALETTE, normalizeAnnotations, normalizeCrop } from '../common/annotate.js';
 import { mergedDescription } from '../common/steps.js';
 import { createZip } from '../lib/zip.js';
@@ -180,6 +183,7 @@ async function openSession(id) {
   $('#guide-title').value = S.session.name || suggestGuideTitle(S.steps, S.settings.lang);
   $('#guide-desc').value = S.session.description || '';
   autoGrow($('#guide-desc'));
+  renderRevisions();
   history.replaceState(null, '', `?session=${id}`);
   await renderSteps();
   updateStats();
@@ -514,12 +518,91 @@ async function resetText(step, li) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 개정 이력 (Word 문서 앞쪽 표)                                          */
+/* ------------------------------------------------------------------ */
+
+const REV_KEYS = [['version', '버전'], ['date', '날짜'], ['author', '작성자'], ['note', '내용']];
+
+function renderRevisions() {
+  const rows = Array.isArray(S.session.revisions) ? S.session.revisions : [];
+  const body = $('#rev-rows');
+  body.innerHTML = '';
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.dataset.i = String(i);
+    for (const [key, label] of REV_KEYS) {
+      const td = document.createElement('td');
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'rev-in';
+      inp.dataset.key = key;
+      inp.value = r[key] || '';
+      inp.setAttribute('aria-label', label);
+      td.append(inp);
+      tr.append(td);
+    }
+    const td = document.createElement('td');
+    const del = document.createElement('button');
+    del.className = 'sm ghost rev-del';
+    del.textContent = '✕';
+    del.title = '이 줄 지우기';
+    td.append(del);
+    tr.append(td);
+    body.append(tr);
+  });
+  $('.rev-table').hidden = rows.length === 0;
+}
+
+function saveRevisions() {
+  const sid = S.session.id;
+  const rows = clone(S.session.revisions || []);
+  debounceSave('rev-' + sid, () => db.updateSession(sid, { revisions: rows }));
+}
+
+/** 다음 버전: 1.0 → 1.1, 3 → 4, 모르는 형식이면 빈 칸 */
+function nextVersion(v) {
+  const s = String(v || '').trim();
+  let m = s.match(/^(\d+)\.(\d+)$/);
+  if (m) return `${m[1]}.${Number(m[2]) + 1}`;
+  m = s.match(/^\d+$/);
+  return m ? String(Number(s) + 1) : '';
+}
+
+$('#rev-add').addEventListener('click', () => {
+  if (!S.session) return;
+  const rows = S.session.revisions || (S.session.revisions = []);
+  const last = rows[rows.length - 1];
+  const author = (S.settings.doc && S.settings.doc.author) || '';
+  rows.push(rows.length
+    ? { version: nextVersion(last && last.version), date: formatDate(Date.now()), author, note: '' }
+    : { version: '1.0', date: formatDate(S.session.createdAt), author, note: exportStrings(S.session.lang || S.settings.lang).initial });
+  renderRevisions();
+  saveRevisions();
+  const inputs = $$('#rev-rows tr:last-child input');
+  if (inputs[3]) inputs[3].focus();
+});
+
+$('#rev-rows').addEventListener('click', (e) => {
+  const b = e.target.closest('.rev-del');
+  if (!b || !S.session || !Array.isArray(S.session.revisions)) return;
+  S.session.revisions.splice(Number(b.closest('tr').dataset.i), 1);
+  renderRevisions();
+  saveRevisions();
+});
+
+/* ------------------------------------------------------------------ */
 /* 입력·클릭                                                            */
 /* ------------------------------------------------------------------ */
 
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (!S.session) return;
+  if (t.classList.contains('rev-in')) {
+    const rows = S.session.revisions || [];
+    const row = rows[Number(t.closest('tr').dataset.i)];
+    if (row) { row[t.dataset.key] = t.value; saveRevisions(); }
+    return;
+  }
   // 저장은 0.5초 뒤에 일어난다. 그 사이 다른 가이드로 바꿔도 입력한 가이드에 저장되도록 지금의 가이드를 붙잡아 둔다.
   const sid = S.session.id;
   if (t.id === 'guide-title') {
@@ -710,7 +793,17 @@ $('#btn-delete').addEventListener('click', async () => {
 });
 
 const menu = $('#export-menu');
-$('#btn-export').addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
+$('#btn-export').addEventListener('click', (e) => {
+  e.stopPropagation();
+  menu.hidden = !menu.hidden;
+  if (!menu.hidden) $('#export-width').value = String(S.settings.exportImageWidth || 0);
+});
+// 내보낼 이미지 크기는 다음에도 쓰도록 설정에 저장한다
+$('#export-width').addEventListener('change', async (e) => {
+  const v = Number(e.target.value) || 0;
+  S.settings = { ...S.settings, exportImageWidth: v };
+  try { await setSettings({ exportImageWidth: v }); } catch (err) { toast('설정을 저장하지 못했습니다: ' + err.message, true, 4000); }
+});
 document.addEventListener('click', (e) => { if (!e.target.closest('.menu')) menu.hidden = true; });
 menu.addEventListener('click', (e) => {
   const b = e.target.closest('[data-export]');
@@ -788,6 +881,7 @@ $('#btn-ai').addEventListener('click', async () => {
 /* 내보내기                                                             */
 /* ------------------------------------------------------------------ */
 
+/** 단계마다 가림·하이라이트·그림을 구운 이미지 → Map<stepId, { dataUrl, width, height }> (설정의 내보내기 이미지 크기로 줄임) */
 async function bakeAll(onProgress) {
   const map = new Map();
   let i = 0;
@@ -797,10 +891,22 @@ async function bakeAll(onProgress) {
     if (!step.shotId) continue;
     const blob = await db.getShot(step.shotId);
     if (!blob) continue;
-    const baked = await bakeStepImage(blob, step, S.settings);
-    if (baked) map.set(step.id, baked.dataUrl);
+    const baked = await bakeStepImage(blob, step, S.settings, { maxWidth: S.settings.exportImageWidth || 0 });
+    if (baked) map.set(step.id, baked);
   }
   return map;
+}
+
+/** 설정의 로고(data URL) → { data, width, height }. 없거나 읽지 못하면 null */
+async function loadLogo() {
+  const url = S.settings.doc && S.settings.doc.logo;
+  if (!url) return null;
+  try {
+    const img = await loadImage(url);
+    return { data: await dataUrlToUint8(url), width: img.naturalWidth, height: img.naturalHeight };
+  } catch (_) {
+    return null;
+  }
 }
 
 function baseName() {
@@ -811,17 +917,33 @@ async function doExport(kind) {
   if (!S.session) return;
   await flushSaves();
   const t = toast('이미지 준비 중… 0 / ' + S.steps.length, false, 0);
-  const images = await bakeAll((d, n) => { t.textContent = `이미지 준비 중… ${d} / ${n}`; });
+  const baked = await bakeAll((d, n) => { t.textContent = `이미지 준비 중… ${d} / ${n}`; });
+  const images = new Map([...baked].map(([id, b]) => [id, b.dataUrl]));
+  const lang = S.settings.lang;
+
+  if (kind === 'docx' || kind === 'pptx') {
+    t.textContent = kind === 'docx' ? 'Word 문서를 만드는 중…' : 'PowerPoint 를 만드는 중…';
+    const shots = new Map();
+    for (const [id, b] of baked) shots.set(id, { data: await dataUrlToUint8(b.dataUrl), width: b.width, height: b.height });
+    const build = kind === 'docx' ? buildDocx : buildPptx;
+    const files = build({ session: S.session, steps: S.steps, images: shots, settings: S.settings, logo: await loadLogo(), now: new Date() });
+    const blob = createZip(files, new Date(), kind === 'docx' ? DOCX_MIME : PPTX_MIME);
+    downloadBlob(blob, `${baseName()}.${kind}`);
+    toast(kind === 'docx'
+      ? `Word 문서로 저장했습니다 (${bytes(blob.size)}).${S.settings.doc && S.settings.doc.toc !== false && S.steps.length ? " 처음 열 때 필드를 업데이트할지 물으면 '예'를 누르세요 (목차의 쪽 번호)." : ''}`
+      : `PowerPoint 로 저장했습니다 (${bytes(blob.size)}).`, false, kind === 'docx' ? 7000 : 3500);
+    return;
+  }
 
   if (kind === 'html') {
-    const html = buildGuideHtml(S.session, S.steps, images, { showUrls: false });
+    const html = buildGuideHtml(S.session, S.steps, images, { showUrls: false, lang });
     downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), `${baseName()}.html`);
     toast(`HTML로 저장했습니다 (${bytes(new Blob([html]).size)}).`);
     return;
   }
 
   if (kind === 'pdf') {
-    const html = buildGuideHtml(S.session, S.steps, images, { showUrls: false });
+    const html = buildGuideHtml(S.session, S.steps, images, { showUrls: false, lang });
     t.textContent = '인쇄 창을 준비하는 중…';
     await printHtml(html);
     toast('인쇄 창에서 “대상”을 “PDF로 저장”으로 선택하세요.', false, 5000);
@@ -835,7 +957,7 @@ async function doExport(kind) {
       if (images.has(s.id)) names.set(s.id, `images/step-${String(i + 1).padStart(2, '0')}.jpg`);
     });
     for (const [id, name] of names) files.push({ name, data: await dataUrlToUint8(images.get(id)) });
-    const md = buildMarkdown(S.session, S.steps, names, { showUrls: false });
+    const md = buildMarkdown(S.session, S.steps, names, { showUrls: false, lang });
     files.unshift({ name: 'guide.md', data: new TextEncoder().encode(md) });
     const zip = createZip(files);
     downloadBlob(zip, `${baseName()}.zip`);

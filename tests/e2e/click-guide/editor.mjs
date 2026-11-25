@@ -1,4 +1,4 @@
-// ClickGuide 편집기 E2E: 그리기(주석·가림·자르기·확대), 되돌리기, 단계 다루기, 녹화 끝의 입력란 클릭 합치기
+// ClickGuide 편집기 E2E: 그리기(주석·가림·자르기·확대), 되돌리기, 단계 다루기, 녹화 끝의 입력란 클릭 합치기, 내보내기(개정 이력·이미지 크기·Word·PowerPoint)
 // 실행: 저장소 최상위에서 node tests/e2e/click-guide/editor.mjs   (다른 사본: CG_EXT=<확장 폴더>)
 // 그림은 실제 마우스·키보드 입력(CDP)으로 그리고, 내보내기에 쓰는 이미지(bakeStepImage)의 픽셀로 판정한다.
 import fs from 'node:fs';
@@ -325,6 +325,87 @@ try {
   check('S-7 메모·나누기·합치기를 차례로 되돌리면 처음 세 단계로', o8.map((s) => s.id).join() === mk.ids.join() && o8.map((s) => s.description).join() === '설명 1,설명 2,설명 3', JSON.stringify(o8.map((s) => s.title)));
 } catch (e) { check('S 구역 실행 오류', false, (e && e.message || String(e)).slice(0, 200)); }
 
+/* ============ 4. 내보내기: 문서 양식·개정 이력·이미지 크기, Word·PowerPoint 파일 ============ */
+const DL = tempDir('click-guide-editor-dl-');
+const dec = new TextDecoder();
+const { readZip } = await import(new URL('../../../click-guide/src/lib/unzip.js', import.meta.url).href);
+async function waitFile(re, ms = 20000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms;) {
+    const f = fs.readdirSync(DL).find((x) => re.test(x));
+    if (f) { await sleep(400); return path.join(DL, f); }
+    await sleep(200);
+  }
+  return null;
+}
+try {
+  await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: DL, eventsEnabled: true });
+  // 설정의 문서 양식: 머리글·작성자·로고(120×40 PNG)·목차·개정 이력
+  await extEval(`(async () => {
+    const c = new OffscreenCanvas(120, 40); const x = c.getContext('2d'); x.fillStyle = '#2f6df6'; x.fillRect(0, 0, 120, 40);
+    const blob = await c.convertToBlob({ type: 'image/png' });
+    const logo = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+    const m = await import('/src/common/settings.js');
+    await m.setSettings({ exportImageWidth: 0, doc: { headerText: '시험 팀 매뉴얼', author: '시험자', logo, toc: true, revisions: true } });
+    return true;
+  })()`);
+  await pageEval(ed, 'location.reload(), true');
+  await sleep(1500);
+  await activate(ed);
+
+  // 개정 이력: 줄 둘 추가 → 둘째 줄 내용 입력 → 가이드에 저장
+  await pageEval(ed, `(() => { document.querySelector('#rev-box').open = true; document.querySelector('#rev-add').click(); document.querySelector('#rev-add').click(); return true; })()`);
+  await sleep(200);
+  await typeText(ed, '화면 바뀜');
+  await sleep(900);
+  const revs = await extEval(`import('/src/common/db.js').then((db) => db.getSession(${JSON.stringify(mk.sid)})).then((s) => s.revisions || [])`);
+  check('X-1 개정 이력 줄 추가: 첫 줄은 1.0·작성자·최초 작성, 다음 줄은 1.1, 입력한 내용이 가이드에 저장됨',
+    revs.length === 2 && revs[0].version === '1.0' && revs[0].author === '시험자' && revs[0].note === '최초 작성' && revs[1].version === '1.1' && revs[1].note === '화면 바뀜',
+    JSON.stringify(revs));
+
+  // 이미지 크기 고르기 → 설정에 저장
+  await pageEval(ed, `(() => { document.querySelector('#btn-export').click(); const s = document.querySelector('#export-width'); s.value = '960'; s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+  await sleep(500);
+  const width = await extEval(`import('/src/common/settings.js').then((m) => m.getSettings()).then((s) => s.exportImageWidth)`);
+  const shrunk = await pageEval(ed, `(async () => {
+    const db = await import('/src/common/db.js'); const { bakeStepImage } = await import('/src/common/render.js'); const { getSettings } = await import('/src/common/settings.js');
+    const st = (await db.getSteps(${JSON.stringify(mk.sid)}))[1]; const out = await bakeStepImage(await db.getShot(st.shotId), st, await getSettings(), { maxWidth: 400 });
+    return [out.width, out.height];
+  })()`);
+  check('X-2 내보낼 이미지 크기를 고르면 설정에 남고, 그 폭으로 줄여 구움 (800×400 → 400×200)', width === 960 && shrunk[0] === 400 && shrunk[1] === 200, JSON.stringify({ width, shrunk }));
+
+  // Word
+  await pageEval(ed, `document.querySelector('[data-export="docx"]').click(), true`);
+  const docxPath = await waitFile(/\.docx$/);
+  let docx = null;
+  if (docxPath) {
+    const z = await readZip(new Uint8Array(fs.readFileSync(docxPath)));
+    const doc = dec.decode(await z.read('word/document.xml'));
+    docx = {
+      first: z.names[0], headings: (doc.match(/<w:pStyle w:val="Heading1"\/>/g) || []).length, toc: doc.includes('TOC \\o "1-1"'),
+      rev: doc.includes('화면 바뀜') && doc.includes('최초 작성'), shots: z.names.filter((n) => /^word\/media\/step-/.test(n)).length,
+      logo: z.names.includes('word/media/logo.png'), header: dec.decode(await z.read('word/header1.xml')).includes('시험 팀 매뉴얼'),
+      font: dec.decode(await z.read('word/styles.xml')).includes('맑은 고딕'),
+    };
+  }
+  check('X-3 Word 로 내보내면 단계 제목 3개·목차·개정 이력·그림 3장·머리글 로고와 글이 들어감',
+    !!docx && docx.first === '[Content_Types].xml' && docx.headings === 3 && docx.toc && docx.rev && docx.shots === 3 && docx.logo && docx.header && docx.font,
+    JSON.stringify({ file: docxPath && path.basename(docxPath), ...docx }));
+
+  // PowerPoint
+  await pageEval(ed, `(() => { document.querySelector('#btn-export').click(); document.querySelector('[data-export="pptx"]').click(); return true; })()`);
+  const pptxPath = await waitFile(/\.pptx$/);
+  let pptx = null;
+  if (pptxPath) {
+    const z = await readZip(new Uint8Array(fs.readFileSync(pptxPath)));
+    const slides = z.names.filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n));
+    const s2 = dec.decode(await z.read('ppt/slides/slide2.xml'));
+    pptx = { slides: slides.length, shots: z.names.filter((n) => /^ppt\/media\/step-/.test(n)).length, logo: z.names.includes('ppt/media/logo.png'),
+      footer: s2.includes('<a:t>시험 팀 매뉴얼</a:t>') && s2.includes('<a:t>1 / 3</a:t>'), title: s2.includes('<a:t>단계 1</a:t>') };
+  }
+  check('X-4 PowerPoint 로 내보내면 표지 + 단계마다 한 장, 그림·로고·아래쪽 머리글과 쪽 번호',
+    !!pptx && pptx.slides === 4 && pptx.shots === 3 && pptx.logo && pptx.footer && pptx.title, JSON.stringify({ file: pptxPath && path.basename(pptxPath), ...pptx }));
+} catch (e) { check('X 구역 실행 오류', false, (e && e.message || String(e)).slice(0, 200)); }
+
 const pass = results.filter((r) => r.ok).length;
 console.log(`\nClickGuide 편집기: ${pass} / ${results.length} 통과`);
 try { await cdp.send('Browser.close'); } catch (_) { /* noop */ }
@@ -333,4 +414,5 @@ try { proc.kill(); } catch (_) { /* noop */ }
 for (const s of servers) s.close();
 await sleep(500);
 try { fs.rmSync(PROFILE, { recursive: true, force: true }); } catch (_) { /* 잠금 해제 전일 수 있음 */ }
+try { fs.rmSync(DL, { recursive: true, force: true }); } catch (_) { /* noop */ }
 process.exit(pass === results.length ? 0 : 1);
