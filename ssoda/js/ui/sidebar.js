@@ -438,6 +438,8 @@ export class Sidebar {
       const row = h('div.hist-row', { tabindex: '0', title: `${e.request.method} ${e.request.url}\n${timeLabel(e.ts)}` },
         h('span.tree-method.' + methodClass(e.request.method), methodShort(e.request.method)),
         h('span.hist-url', e.name ? h('span.hist-name', e.name) : null, h('span', e.request.url)),
+        // Tests 탭의 확인 결과 (통과/전체)
+        e.checks ? h('span.hist-checks' + (e.checks.failed ? '.ck-bad' : '.ck-good'), { title: `확인 ${e.checks.passed}개 통과, ${e.checks.failed}개 실패` }, `${e.checks.passed}/${e.checks.passed + e.checks.failed}`) : null,
         h('span.hist-status.' + statusClass(e.status), e.status ? String(e.status) : 'ERR'));
       const more = h('button.icon-btn.tree-more', { title: '더 보기' }, icon('more', 15));
       more.addEventListener('click', (ev) => {

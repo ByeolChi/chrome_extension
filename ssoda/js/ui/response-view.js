@@ -6,6 +6,7 @@ import { openMenu, popover, toast } from './overlay.js';
 import { parseSetCookie } from '../cookiejar.js';
 import { formatJson } from '../json-format.js';
 import { isEventStream, parseSse } from '../sse.js';
+import { describeAssert } from '../checks.js';
 import { app } from '../app.js';
 
 const LIVE_ROWS = 1000; // 받는 중에 화면에 두는 이벤트 수 (오래된 것부터 뺌. 전체는 끝난 뒤 결과에 남음)
@@ -149,17 +150,52 @@ export class ResponseView {
       );
       return;
     }
+    if (this.sub === 'tests' && !r.checks) this.sub = 'body';
     this.el.appendChild(this.renderBar());
     const body = h('div.resp-body');
     this.el.appendChild(body);
-    if (!r.ok && this.sub !== 'timeline') {
+    if (!r.ok && this.sub !== 'timeline' && this.sub !== 'tests') {
       body.appendChild(this.renderError());
       return;
     }
     if (this.sub === 'body') body.appendChild(this.renderBody());
     else if (this.sub === 'headers') body.appendChild(this.renderHeaders());
     else if (this.sub === 'cookies') body.appendChild(this.renderCookies());
+    else if (this.sub === 'tests') body.appendChild(this.renderChecks());
     else if (this.sub === 'timeline') body.appendChild(this.renderTimeline());
+  }
+
+  /* ---------------- Tests (응답값 꺼내기·확인 결과) ---------------- */
+  renderChecks() {
+    const c = this.result.checks;
+    const wrap = h('div.ck-wrap');
+    if (c.skipped) {
+      wrap.appendChild(h('div.body-empty', c.skipped));
+      return wrap;
+    }
+    const mark = (ok) => h('span.ck-mark.' + (ok ? 'ck-ok' : 'ck-fail'), icon(ok ? 'check' : 'x', 14));
+    if (c.captures.length) {
+      const saved = c.captures.filter((x) => x.ok).length;
+      wrap.appendChild(h('div.ck-sec', `변수로 꺼낸 값 · ${saved}/${c.captures.length}`));
+      c.captures.forEach((x) => {
+        wrap.appendChild(h('div.ck-row',
+          mark(x.ok),
+          h('div.ck-main',
+            h('div.ck-desc', h('b', x.name), x.ok ? ' = ' : '', x.ok ? h('span.ck-val', x.value.length > 300 ? x.value.slice(0, 300) + '…' : x.value) : ''),
+            h('div.ck-sub', x.ok ? `${x.savedTo || ''}에 저장` : x.error, x.note ? h('span.ck-note', ' · ' + x.note) : null))));
+      });
+    }
+    if (c.asserts.length) {
+      wrap.appendChild(h('div.ck-sec', `확인 · ${c.passed}/${c.asserts.length} 통과`));
+      c.asserts.forEach((a) => {
+        wrap.appendChild(h('div.ck-row' + (a.ok ? '' : '.fail'),
+          mark(a.ok),
+          h('div.ck-main',
+            h('div.ck-desc', describeAssert(a)),
+            h('div.ck-sub', '찾은 값: ', h('span.ck-val', a.actual), a.message ? h('span.ck-note', ' · ' + a.message) : null))));
+      });
+    }
+    return wrap;
   }
 
   renderBar() {
@@ -168,11 +204,14 @@ export class ResponseView {
       ['body', 'Body'],
       ['cookies', 'Cookies', r.ok ? r.setCookies.length : 0],
       ['headers', 'Headers', r.ok ? r.headers.length : 0],
-      ['timeline', r.engine === 'curl' ? 'Terminal' : 'Timeline'],
     ];
-    const tabEls = tabs.map(([id, label, count]) =>
+    // Tests: 확인 결과 (통과 수/전체, 하나라도 실패하면 빨강)
+    const ck = r.checks;
+    if (ck) tabs.push(['tests', 'Tests', ck.asserts.length ? `${ck.passed}/${ck.asserts.length}` : 0, ck.skipped ? '' : ck.failed || ck.captures.some((x) => !x.ok) ? '.ck-bad' : '.ck-good']);
+    tabs.push(['timeline', r.engine === 'curl' ? 'Terminal' : 'Timeline']);
+    const tabEls = tabs.map(([id, label, count, cls = '']) =>
       h('button.subtab' + (this.sub === id ? '.active' : ''), { onclick: () => { this.sub = id; this.render(); } },
-        label, count ? h('span.count', `(${count})`) : null)
+        label, count ? h('span.count' + cls, `(${count})`) : cls ? h('span.ck-dot' + cls) : null)
     );
     const meta = h('div.resp-meta');
     if (r.ok) {

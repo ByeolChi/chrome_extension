@@ -1,11 +1,12 @@
 // 앱 컨트롤러: 탭/컬렉션/환경/히스토리/전송
 import { store } from './store.js';
-import { uid, clone, download } from './util.js';
+import { uid, clone, download, kvRow } from './util.js';
+import { countTests, responseContext, runCaptures, runAsserts } from './checks.js';
 import {
   newRequest, newRequestItem, newCollection, newFolder, newEnvironment, findInCollections, reassignIds,
   isDescendant, requestSignature, normalizeRequest, normalizeSsh,
 } from './model.js';
-import { buildScope } from './variables.js';
+import { buildScope, resolveString } from './variables.js';
 import { prepareRequest } from './prepare.js';
 import { sendRequest, getBrowserCookies, initHttpEngine } from './http.js';
 import {
@@ -388,6 +389,8 @@ export const app = {
     } finally {
       this.controllers.delete(tab.id);
     }
+    // Tests 탭: 응답값을 변수로 꺼내고 확인한다 (보낸 시점의 요청 기준)
+    if (countTests(sentDraft.tests)) result.checks = this.runChecks(tab, sentDraft.tests, result);
     this.responses.set(tab.id, result);
     this.addHistory(tab, result, sentDraft);
     const v = this.views.get(tab.id);
@@ -551,6 +554,55 @@ export const app = {
     }
   },
 
+  /* ---------------- 응답값 꺼내기·확인 (Tests 탭) ---------------- */
+  // 꺼낸 값을 먼저 변수에 저장하고, 확인의 기대값·식은 저장한 뒤의 변수로 바꾼다 (방금 꺼낸 값도 쓸 수 있게)
+  runChecks(tab, tests, result) {
+    if (!result.ok) return { skipped: '응답을 받지 못해 실행하지 않았습니다.', captures: [], asserts: [], passed: 0, failed: 0 };
+    const ctx = responseContext(result);
+    const resolver = () => {
+      const scope = this.getScope(tab);
+      return (s) => resolveString(s, scope);
+    };
+    const captures = runCaptures(tests.extract, ctx, resolver());
+    this.saveCaptures(tab, captures);
+    const asserts = runAsserts(tests.assert, ctx, resolver());
+    const failed = asserts.filter((a) => !a.ok).length;
+    return { captures, asserts, passed: asserts.length - failed, failed };
+  },
+
+  // 꺼낸 값을 고른 곳(현재 환경·컬렉션·글로벌)의 변수로 저장. 고른 곳이 없으면 글로벌에 저장하고 알린다
+  saveCaptures(tab, captures) {
+    const changed = new Set();
+    for (const c of captures) {
+      if (!c.ok) continue;
+      let vars = null;
+      let where = '';
+      let key = '';
+      if (c.scope === 'env') {
+        const env = this.activeEnv();
+        if (env) [vars, where, key] = [env.variables, `환경 "${env.name}"`, 'environments'];
+        else c.note = '선택된 환경이 없어 글로벌에 저장했습니다.';
+      } else if (c.scope === 'collection') {
+        const col = this.collectionOfTab(tab);
+        if (col) [vars, where, key] = [col.variables, `컬렉션 "${col.name}"`, 'collections'];
+        else c.note = '컬렉션에 저장된 요청이 아니어서 글로벌에 저장했습니다.';
+      }
+      if (!vars) [vars, where, key] = [store.state.globals.variables, '글로벌', 'globals'];
+      const row = vars.find((v) => v.key === c.name && v.enabled !== false) || vars.find((v) => v.key === c.name);
+      if (row) {
+        row.value = c.value;
+        row.enabled = true;
+      } else vars.push(kvRow(c.name, c.value, true, { description: 'Tests 탭에서 꺼낸 값' }));
+      c.savedTo = where;
+      changed.add(key);
+    }
+    if (!changed.size) return;
+    changed.forEach((k) => store.changed(k));
+    this.ui.refreshVars && this.ui.refreshVars();
+    // 열려 있는 환경·컬렉션 화면도 새 값으로
+    for (const t of this.tabs) if (t.type !== 'request' && this.ui.refreshView) this.ui.refreshView(t);
+  },
+
   addHistory(tab, result, draft = tab.draft) {
     if (!this.settings.historyEnabled) return;
     const req = clone(draft);
@@ -572,6 +624,7 @@ export const app = {
       size: result.ok ? result.size.body : 0,
       engine: result.engine || 'browser',
     };
+    if (result.checks && !result.checks.skipped && result.checks.asserts.length) entry.checks = { passed: result.checks.passed, failed: result.checks.failed };
     const h = store.state.history;
     h.unshift(entry);
     const limit = this.settings.historyLimit > 0 ? this.settings.historyLimit : 300;

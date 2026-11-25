@@ -1012,3 +1012,35 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 .sse-id { color: var(--text-3); white-space: nowrap; }
 .sse-json { grid-column: 4 / -1; margin: 6px 0 2px; padding: 6px 8px; background: var(--bg-3); border-radius: 3px; white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; cursor: text; user-select: text; }
 .sse-empty { padding: 24px; text-align: center; color: var(--text-2); font-family: var(--font); }
+
+/* Tests 탭: 응답값 꺼내기(변수로 저장)·확인 */
+.tests-pane { display: flex; flex-direction: column; gap: 14px; }
+.tests-sub { margin-left: 8px; font-size: 12px; color: var(--text-3); }
+.tests-empty { padding: 14px; border: 1px dashed var(--border-2); border-radius: var(--radius); color: var(--text-3); font-size: 12.5px; text-align: center; }
+.kv-table.cap-table .kv-row { grid-template-columns: 32px minmax(110px, .9fr) 128px minmax(150px, 1.5fr) 118px 32px; }
+.kv-table.ast-table .kv-row { grid-template-columns: 32px 140px minmax(120px, 1.2fr) 112px minmax(120px, 1fr) 32px; }
+.kv-select { width: 100%; height: 31px; border: 1px solid transparent; border-radius: 0; background-color: transparent; font-size: 12.5px; }
+.kv-select:focus { border-color: var(--primary); box-shadow: none; background-color: var(--bg-input); }
+.kv-row.disabled .kv-select { color: var(--text-3); }
+.kv-na { padding: 0 10px; color: var(--text-3); }
+.tests-help { font-size: 12px; color: var(--text-2); line-height: 1.7; padding: 2px 2px 0; word-break: break-all; }
+.tests-help b { color: var(--text); font-weight: 600; margin-right: 2px; }
+.ck-wrap { flex: 1; overflow: auto; padding: 10px 16px 16px; }
+.ck-sec { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 6px 0; }
+.ck-row { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 6px; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 6px; background: var(--bg-code); }
+.ck-row.fail { border-color: rgba(195, 40, 26, .35); background: var(--danger-soft); }
+.ck-mark { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-top: 1px; }
+.ck-ok { color: var(--ok); }
+.ck-fail { color: var(--danger); }
+.ck-desc { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.ck-sub { font-size: 12px; color: var(--text-2); margin-top: 2px; word-break: break-all; }
+.ck-val { font-family: var(--mono); color: var(--text); user-select: text; }
+.ck-note { color: var(--warn); }
+.subtab .count.ck-good { color: var(--ok); }
+.subtab .count.ck-bad { color: var(--danger); }
+.ck-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
+.ck-dot.ck-good { background: var(--ok); }
+.ck-dot.ck-bad { background: var(--danger); }
+.hist-checks { font-size: 10.5px; font-weight: 600; flex: none; padding: 1px 5px; border-radius: 3px; font-family: var(--mono); }
+.hist-checks.ck-good { color: var(--ok); background: rgba(0, 127, 49, .08); }
+.hist-checks.ck-bad { color: var(--danger); background: var(--danger-soft); }
