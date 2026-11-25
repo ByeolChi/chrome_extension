@@ -988,3 +988,27 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 .instance-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
 .instance-card p { margin: 0 0 14px; font-size: 13px; color: var(--text-2); }
 .instance-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+/* SSE (text/event-stream): 받는 중 화면과 Events 보기 */
+.meta-item.static { cursor: default; }
+.meta-item.static:hover { background: transparent; }
+.meta-tag.live-tag { display: inline-flex; align-items: center; gap: 5px; color: var(--ok); background: rgba(0, 127, 49, .08); }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: live-pulse 1.2s ease-in-out infinite; }
+@keyframes live-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+.sse-stop { margin-left: 4px; }
+.sse-hint { color: var(--text-2); font-size: 12px; }
+.sse-summary { color: var(--text-2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sse-box { font-family: var(--mono); font-size: 12px; }
+.sse-list { display: flex; flex-direction: column; }
+.sse-row { display: grid; grid-template-columns: 40px 72px minmax(56px, max-content) minmax(0, 1fr) auto; gap: 0 10px; align-items: baseline; padding: 4px 10px; border-bottom: 1px solid var(--border); }
+.sse-row:last-child { border-bottom: 0; }
+.sse-row.json { cursor: pointer; }
+.sse-row.json:hover { background: var(--bg-hover); }
+.sse-n { color: var(--text-3); text-align: right; }
+.sse-t { color: var(--text-2); white-space: nowrap; }
+.sse-type { color: var(--primary); font-weight: 600; white-space: nowrap; }
+.sse-type.dim { color: var(--text-3); font-weight: 400; }
+.sse-data { white-space: pre-wrap; word-break: break-all; user-select: text; color: var(--text); }
+.sse-id { color: var(--text-3); white-space: nowrap; }
+.sse-json { grid-column: 4 / -1; margin: 6px 0 2px; padding: 6px 8px; background: var(--bg-3); border-radius: 3px; white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; cursor: text; user-select: text; }
+.sse-empty { padding: 24px; text-align: center; color: var(--text-2); font-family: var(--font); }

@@ -1,5 +1,6 @@
 // 규칙 기반 단계 설명 생성기.
 // 콘텐츠 스크립트가 수집한 DOM 메타데이터(step.el)만으로 제목/설명 문장을 만든다.
+import { placeName } from './util.js';
 
 /* ---------- 한국어 조사 처리 ---------- */
 
@@ -105,9 +106,8 @@ export function cleanLabel(raw, max = 48) {
 function quote(s) { return '‘' + s + '’'; }
 
 // 주소에서 사이트 이름(호스트)만 꺼낸다. 경로·쿼리에는 토큰이나 개인정보가 들어 있을 수 있다.
-function hostOf(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ''); } catch (_) { return ''; }
-}
+// 로컬 파일(file://)은 파일 이름만 쓴다. 폴더 경로에는 사용자 이름이 들어 있다.
+const hostOf = placeName;
 
 /* ---------- 본체 ---------- */
 
@@ -182,9 +182,7 @@ export function describeStep(step, lang = 'ko') {
 // 가이드 전체 제목 후보
 export function suggestGuideTitle(steps, lang = 'ko') {
   const first = steps.find((s) => s.type !== 'note');
-  const host = (() => {
-    try { return new URL(first && first.url ? first.url : '').hostname.replace(/^www\./, ''); } catch (_) { return ''; }
-  })();
+  const host = hostOf(first && first.url ? first.url : '');
   const last = [...steps].reverse().find((s) => s.type === 'click' && s.el && s.el.label);
   const lastLabel = last ? cleanLabel(last.el.label, 24) : '';
   if (lang === 'en') return `${host || 'Web'} guide${lastLabel ? ` — ${lastLabel}` : ''}`;

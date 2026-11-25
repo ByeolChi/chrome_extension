@@ -340,6 +340,11 @@ export class RequestView {
     this.response.setWaiting(host);
   }
 
+  // SSE 응답을 받는 중 (http.js 의 onStream)
+  showStream(s) {
+    this.response.setStream(s);
+  }
+
   showResponse(result) {
     this.response.show(result);
   }

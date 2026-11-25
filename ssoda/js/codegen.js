@@ -14,7 +14,15 @@ export const CODEGEN_LANGS = [
   { id: 'go', label: 'Go - net/http', lang: 'go' },
 ];
 
+// 설정의 기본 타임아웃(prepare.js 의 timeoutIsDefault)은 Ssoda 가 보낼 때만 쓰고, 복사하거나 코드로 만들 때는 적지 않는다.
+// 요청에 직접 넣은 타임아웃은 적는다. opts.exact: 실제로 실행한 명령을 보여 줄 때(Terminal)는 기본값도 적는다.
+function forCode(p, opts = {}) {
+  if (!p || !p.settings || !p.settings.timeoutIsDefault || opts.exact) return p;
+  return { ...p, settings: { ...p.settings, timeout: 0, timeoutIsDefault: false } };
+}
+
 export function generateCode(langId, p, opts = {}) {
+  p = forCode(p, opts);
   switch (langId) {
     case 'curl': return genCurl(p, opts);
     case 'curl-cmd': return genCurl(p, { ...opts, shell: 'cmd' });
@@ -51,8 +59,9 @@ function hasHeader(p, name) {
 }
 
 /* ---------------- cURL ---------------- */
-// opts: { shell: 'bash' | 'cmd', multiline: true, short: false, curl: {verbose, insecure, silent, include, compressed, http, extra} }
+// opts: { shell: 'bash' | 'cmd', multiline: true, short: false, exact: false, curl: {verbose, insecure, silent, include, compressed, http, extra} }
 export function genCurl(p, opts = {}) {
+  p = forCode(p, opts);
   const shell = opts.shell === 'cmd' ? 'cmd' : 'bash';
   const short = !!opts.short;
   const multiline = opts.multiline !== false;

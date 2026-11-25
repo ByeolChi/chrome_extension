@@ -284,11 +284,13 @@ export const app = {
   },
 
   // 표시용 cURL 명령 (cURL 탭 / Terminal)
-  curlCommandFor(tab, prepared, { shell, multiline } = {}) {
+  // exact: 실제로 실행한 명령(Terminal). 설정의 기본 타임아웃(--max-time)까지 적는다. 복사·cURL 탭에서는 요청에 넣은 값만 적는다
+  curlCommandFor(tab, prepared, { shell, multiline, exact } = {}) {
     const curl = curlOptsOf(tab.draft);
     return genCurl(prepared, {
       shell: shell || this.settings.curlShell || 'bash',
       multiline: multiline ?? this.settings.curlMultiline !== false,
+      exact: !!exact,
       short: true,
       curl: { ...curl, extraArgs: parseExtraArgs(curl.extra, { ssh: !!this.tunnelOf() }).args },
     });
@@ -352,7 +354,7 @@ export const app = {
         this.ui.toast(`정의되지 않은 변수: ${prepared.unresolved.map((v) => `{{${v}}}`).join(', ')}`, 'error', 4000);
       }
       if (engine === 'curl') {
-        command = this.curlCommandFor(tab, prepared, { shell: 'bash', multiline: true });
+        command = this.curlCommandFor(tab, prepared, { shell: 'bash', multiline: true, exact: true });
         const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal: ctrl.signal, curlPath: this.settings.curlPath || '', command, ssh });
         if (ssh) {
           await this.ensureSshHelper(ssh);
@@ -363,6 +365,8 @@ export const app = {
           signal: ctrl.signal,
           removeOrigin: this.settings.removeOrigin,
           onWait: (host) => this.views.get(tab.id)?.setWaiting?.(host),
+          // SSE 응답은 받는 대로 보여 준다 (멈춤 = 취소 버튼, 그때까지 받은 것이 결과로 남음)
+          onStream: (s) => this.views.get(tab.id)?.showStream?.(s),
         });
       }
       this.captureCookies(result);

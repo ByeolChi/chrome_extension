@@ -3,7 +3,7 @@ import { debounce } from './util.js';
 
 export const DEFAULT_SETTINGS = {
   theme: 'system', // light | dark | system
-  timeout: 0, // ms, 0 = 무제한
+  timeout: 60000, // ms, 0 = 무제한. 응답이 오지 않는 요청이 끝없이 기다리지 않게 60초
   followRedirects: true,
   removeOrigin: true, // curl처럼 Origin 헤더 제거
   autoSaveCookies: true, // 응답 Set-Cookie를 쿠키 관리자에 저장
@@ -17,7 +17,27 @@ export const DEFAULT_SETTINGS = {
   curlPath: '', // curl 실행 파일 경로 (비우면 자동 탐색)
   curlShell: 'bash', // bash | cmd (명령어 표시 형식)
   curlMultiline: true, // 줄바꿈으로 정렬
+  settingsRev: 2, // 저장된 설정의 형식 판 (migrateSettings 참고)
 };
+
+/**
+ * 저장된(또는 백업의) 설정을 지금 형식으로 맞춘다.
+ * 반환: { settings, notes: 사용자에게 알릴 바뀐 점(['timeout'] 등), changed: 다시 저장해야 하면 true }
+ */
+export function migrateSettings(saved) {
+  const src = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  const settings = { ...DEFAULT_SETTINGS, ...src };
+  const rev = Number(src.settingsRev) || 1;
+  const notes = [];
+  // 2판: 기본 타임아웃 0(무제한) → 60초.
+  // 예전 판의 0 은 대부분 처음 값 그대로이므로 한 번 60초로 바꾸고 알린다. 직접 넣은 값(0 보다 큰 값)은 그대로 둔다.
+  if (rev < 2 && !(Number(src.timeout) > 0)) {
+    settings.timeout = DEFAULT_SETTINGS.timeout;
+    notes.push('timeout');
+  }
+  settings.settingsRev = DEFAULT_SETTINGS.settingsRev;
+  return { settings, notes, changed: rev < DEFAULT_SETTINGS.settingsRev };
+}
 
 const KEYS = ['collections', 'environments', 'globals', 'activeEnvId', 'history', 'cookieJar', 'settings', 'workspace'];
 
@@ -66,14 +86,24 @@ class Store {
       }
     }
     const d = DEFAULTS();
+    this.notes = [];
+    let migrated = false;
     for (const k of KEYS) {
       if (data[k] !== undefined && data[k] !== null) {
-        if (k === 'settings') d.settings = { ...DEFAULT_SETTINGS, ...data.settings };
-        else if (k === 'workspace') d.workspace = { ...d.workspace, ...data.workspace };
+        if (k === 'settings') {
+          const m = migrateSettings(data.settings);
+          d.settings = m.settings;
+          this.notes = m.notes;
+          migrated = m.changed;
+        } else if (k === 'workspace') d.workspace = { ...d.workspace, ...data.workspace };
         else d[k] = data[k];
       }
     }
     this.state = d;
+    if (migrated) {
+      this.pending.add('settings');
+      await this.flush();
+    }
     return this.state;
   }
 
@@ -125,7 +155,8 @@ class Store {
   async replaceAll(data) {
     const d = DEFAULTS();
     for (const k of KEYS) if (data[k] !== undefined) d[k] = data[k];
-    d.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+    // 예전 판에서 만든 백업도 지금 판으로 올린 것처럼 맞춘다 (기본 타임아웃 등)
+    d.settings = migrateSettings(data.settings).settings;
     // curl 실행 파일 경로는 백업에서 가져오지 않는다 (조작된 백업으로 다른 프로그램을 실행시키지 못하게)
     d.settings.curlPath = this.state.settings.curlPath || '';
     // 예전 버전 백업의 SSH 비밀번호는 버린다

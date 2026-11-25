@@ -1,4 +1,5 @@
 import { listSessions } from '../common/db.js';
+import { placeName } from '../common/util.js';
 
 const $ = (s) => document.querySelector(s);
 const els = {
@@ -57,30 +58,44 @@ async function renderRecent() {
 
 // 팝업에서 직접 대상 탭을 정한다. 서비스 워커에는 '현재 창' 개념이 없어
 // 여러 창을 띄워 둔 경우 엉뚱한 탭이 잡힐 수 있기 때문이다.
+// 로컬 파일(file://)은 '파일 URL에 대한 액세스 허용'이 켜져 있을 때만 녹화할 수 있다.
 const isWebPage = (t) => !!t && /^https?:\/\//i.test(t.url || '');
+const isLocalFile = (t) => !!t && /^file:/i.test(t.url || '');
+let fileAccess = null;
+async function fileAccessAllowed() {
+  if (fileAccess === null) {
+    try { fileAccess = !!(await chrome.extension.isAllowedFileSchemeAccess()); } catch (_) { fileAccess = false; }
+  }
+  return fileAccess;
+}
+const isRecordable = async (t) => isWebPage(t) || (isLocalFile(t) && await fileAccessAllowed());
 
 async function currentTab() {
   for (const q of [{ active: true, currentWindow: true },
                    { active: true, lastFocusedWindow: true },
                    { active: true }]) {
     try {
-      const t = (await chrome.tabs.query(q)).find(isWebPage);
-      if (t) return t;
+      for (const t of await chrome.tabs.query(q)) if (await isRecordable(t)) return t;
     } catch (_) { /* noop */ }
   }
-  // 웹페이지 탭이 없으면 활성 탭이라도 넘겨서, 왜 안 되는지 안내가 나오게 한다
+  // 녹화할 수 있는 탭이 없으면 활성 탭이라도 넘겨서, 왜 안 되는지 안내가 나오게 한다
   try { return (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null; } catch (_) { return null; }
 }
 
 async function showTargetTab() {
   const t = await currentTab();
   if (!t) { els.targetTab.textContent = '녹화할 웹페이지 탭이 없습니다.'; return; }
-  if (!isWebPage(t)) {
+  if (isLocalFile(t) && !(await fileAccessAllowed())) {
+    els.targetTab.textContent = '로컬 파일은 확장 프로그램 관리에서 “파일 URL에 대한 액세스 허용”을 켜야 녹화할 수 있습니다.';
+    return;
+  }
+  if (!(await isRecordable(t))) {
     els.targetTab.textContent = '이 탭은 녹화할 수 없습니다 (일반 웹페이지를 열어 주세요).';
     return;
   }
-  const host = (() => { try { return new URL(t.url).hostname.replace(/^www\./, ''); } catch (_) { return ''; } })();
-  els.targetTab.textContent = host ? `기록할 탭: ${host}` : '';
+  const name = placeName(t.url);
+  if (isLocalFile(t)) els.targetTab.textContent = `기록할 탭: 로컬 파일${name ? ' ' + name : ''}`;
+  else els.targetTab.textContent = name ? `기록할 탭: ${name}` : '';
 }
 
 els.start.addEventListener('click', async () => {

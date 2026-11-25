@@ -98,7 +98,7 @@ const SNAPSHOT = `(async () => {
   const db = await import('/src/common/db.js');
   const st = await import('/src/common/settings.js');
   const hex = async (b) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await b.arrayBuffer()))).map((x) => x.toString(16).padStart(2, '0')).join('');
-  const out = { sessions: [], settings: await st.getSettings() };
+  const out = { sessions: [], settings: await st.getSettings({ withApiKey: true }), storage: JSON.stringify(await chrome.storage.local.get(null)) };
   for (const s of await db.listSessions()) {
     const steps = await db.getSteps(s.id);
     const shots = {};
@@ -214,6 +214,8 @@ try {
     after.settings.maxImageWidth === 1920 && after.settings.ai.provider === 'openai' && after.settings.ai.model === 'gpt-x' &&
     after.settings.ai.apiKey === 'sk-new-KEEP',
     JSON.stringify({ lang: after.settings.lang, ai: after.settings.ai }));
+  check('가져온 뒤에도 API 키는 storage.local(웹페이지 쪽 스크립트도 읽음)에 없음',
+    !before.storage.includes('sk-test-SECRET') && !after.storage.includes('sk-new-KEEP'), after.storage.slice(0, 200));
 
   // 같은 백업을 다시 가져와도 겹치지 않음
   B.dialogs.length = 0;

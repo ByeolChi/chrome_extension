@@ -1,9 +1,13 @@
 // HTTP 전송 엔진
 // - 확장 프로그램 페이지에서 fetch (host_permissions 덕분에 CORS 제약 없음)
 // - fetch로 설정 불가한 헤더(Cookie, Origin, Referer, User-Agent 등)는 declarativeNetRequest 세션 규칙으로 주입
+// - 리다이렉트는 fetch 가 따라가게 두지 않고(redirect: 'manual') 한 단계씩 직접 따라간다. 단계마다 그 서버로 가는
+//   차례를 기다리고 그 주소에만 헤더 규칙을 걸어, 다른 서버로 리다이렉트될 때 그 서버로 가는 다른 요청의 헤더가 섞이지 않게 한다
 // - webRequest로 실제 전송된 헤더, Set-Cookie 포함 원본 응답 헤더, 리다이렉트, 네트워크 오류 코드를 수집
-import { FORBIDDEN_HEADERS, UNSETTABLE_HEADERS, STATUS_TEXT, dataURLtoBlob } from './util.js';
+// - text/event-stream(SSE) 응답은 받는 대로 해석해 onStream 으로 알리고, 멈추거나 시간이 다 되면 받은 데까지 결과로 돌려준다
+import { FORBIDDEN_HEADERS, UNSETTABLE_HEADERS, STATUS_TEXT, dataURLtoBlob, formatBytes } from './util.js';
 import { base64Utf8 } from './prepare.js';
+import { isEventStream, createSseParser } from './sse.js';
 
 const hasChrome = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id;
 const EXT_ORIGIN = hasChrome ? `chrome-extension://${chrome.runtime.id}` : '';
@@ -12,6 +16,14 @@ const captures = new Set(); // 진행 중인 요청 캡처 (동시 요청 지원
 const hostLocks = new Map(); // 같은 호스트 요청은 순차 처리 (헤더 규칙이 섞이지 않도록)
 const byRequestId = new Map();
 let listenersReady = false;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export const MAX_REDIRECTS = 20; // Chrome 이 스스로 따라갈 때와 같은 한도
+export const STREAM_MAX_BYTES = 32 * 1024 * 1024; // SSE 를 받는 대로 보여 줄 때 쌓아 둘 최대 크기
+// 본문이 있던 요청이 GET 으로 바뀌는 리다이렉트에서 함께 빼는 헤더 (Fetch 표준의 request-body-header names)
+const BODY_HEADERS = new Set(['content-type', 'content-encoding', 'content-language', 'content-location']);
+// 처음 요청과 출처(스킴·호스트·포트)가 다른 곳으로 리다이렉트되면 보내지 않는 인증 정보 (curl 7.83+ 과 같음)
+const CREDENTIAL_HEADERS = new Set(['authorization', 'cookie', 'cookie2']);
 
 export async function initHttpEngine() {
   if (!hasChrome || listenersReady) return;
@@ -51,7 +63,7 @@ export async function initHttpEngine() {
 
   chrome.webRequest.onSendHeaders.addListener((d) => {
     const cap = capOf(d);
-    if (cap) cap.hops.push({ url: d.url, method: d.method, requestHeaders: d.requestHeaders || [], ts: d.timeStamp });
+    if (cap) cap.hops.push({ url: d.url, method: d.method, requestHeaders: d.requestHeaders || [], ts: d.timeStamp, requestId: d.requestId });
   }, filter, ['requestHeaders', 'extraHeaders']);
 
   chrome.webRequest.onHeadersReceived.addListener((d) => {
@@ -64,21 +76,17 @@ export async function initHttpEngine() {
     hop.headersTs = d.timeStamp;
   }, filter, ['responseHeaders', 'extraHeaders']);
 
+  // redirect: 'manual' 이라 브라우저가 따라가지는 않지만, Chrome 내부 리다이렉트(HSTS 등)도 여기로 온다.
+  // 내부 리다이렉트는 네트워크로 나가기 전이라 onSendHeaders 기록이 없을 수 있어 요청 ID 와 함께 따로 남긴다
   chrome.webRequest.onBeforeRedirect.addListener((d) => {
     const cap = capOf(d);
     if (!cap) return;
-    const hop = lastHop(cap);
+    cap.lastRedirect = { requestId: d.requestId, url: d.redirectUrl };
+    const hop = cap.hops[cap.hops.length - 1];
+    if (!hop || hop.requestId !== d.requestId) return;
     hop.redirectUrl = d.redirectUrl;
     hop.ip = d.ip;
     hop.fromCache = d.fromCache;
-    // 다른 서버로 리다이렉트되는데 그 서버로 가는 다른 요청이 헤더 규칙을 쓰는 중이면, 그 규칙이 이 요청에도 적용될 수 있다.
-    // (헤더 규칙은 요청을 구별할 수 없어 주소로만 고른다) 막을 수는 없으므로 결과에 알린다.
-    try {
-      const to = new URL(d.redirectUrl).host;
-      if (to !== cap.host && hostLocks.has(to)) cap.mixedRedirect = to;
-    } catch (e) {
-      /* ignore */
-    }
   }, filter, ['responseHeaders', 'extraHeaders']);
 
   chrome.webRequest.onResponseStarted.addListener((d) => {
@@ -113,24 +121,49 @@ function normalizeUrl(u) {
   }
 }
 
-// 요청별 헤더 규칙: 정확한 URL 규칙(우선순위 2) + 같은 호스트 리다이렉트용 규칙(우선순위 1)
-// http ↔ https 로만 바뀌는 리다이렉트(http://api.example.com → https://api.example.com)에도 User-Agent·Referer 등은
-// curl 처럼 계속 보낸다. Cookie 는 curl(7.83+)도 스킴·포트가 바뀌면 빼므로 그쪽 규칙에서는 뺀다.
+// 요청 한 단계의 헤더 규칙: 이 주소로 가는 요청에만 건다. 서버가 보낸 리다이렉트는 sendRequest 가 단계마다 새 규칙으로 따라간다.
+// - urlFilter 는 * ^ | 를 특수 문자로 읽어 이런 문자가 든 주소는 정확히 고를 수 없으므로, 그때는 같은 서버 전체에 건다
+// - http 주소는 Chrome 이 스스로 https 로 바꿔 보낼 수 있다(HSTS). 이 전환은 fetch 가 리다이렉트로 돌려주지 않고 그대로
+//   따라갈 수 있어, 같은 서버의 https 에도 같은 헤더를 건다 (서버가 보낸 리다이렉트가 아니라 같은 요청이므로 Cookie 도)
+// 같은 서버로 가는 요청은 hostLocks 로 하나씩 보내므로(http·https 기본 포트는 같은 키) 다른 요청에 섞이지 않는다.
 export function buildDnrRules(url, requestHeaders, { tabId = null, extId = '' } = {}) {
   if (!requestHeaders.length) return [];
   const u = new URL(url);
   const base = { resourceTypes: ['xmlhttprequest'], initiatorDomains: [extId] };
   if (tabId != null) base.tabIds = [tabId];
-  const rnd = () => 1 + Math.floor(Math.random() * 2000000000);
-  const rules = [];
-  const add = (priority, urlFilter, headers) => {
-    if (headers.length) rules.push({ id: rnd(), priority, condition: { ...base, urlFilter }, action: { type: 'modifyHeaders', requestHeaders: headers } });
-  };
-  if (!/[*^|]/.test(url)) add(2, '|' + url + '|', requestHeaders);
-  add(1, '|' + u.protocol + '//' + u.host + '/', requestHeaders);
-  const other = u.protocol === 'https:' ? 'http:' : 'https:';
-  add(1, '|' + other + '//' + u.host + '/', requestHeaders.filter((x) => x.header !== 'cookie' && x.header !== 'cookie2'));
+  const rule = (priority, urlFilter) => ({ id: 1 + Math.floor(Math.random() * 2000000000), priority, condition: { ...base, urlFilter }, action: { type: 'modifyHeaders', requestHeaders } });
+  const rules = [rule(2, /[*^|]/.test(url) ? '|' + u.protocol + '//' + u.host + '/' : '|' + url + '|')];
+  if (u.protocol === 'http:') rules.push(rule(1, '|https://' + u.host + '/'));
   return rules;
+}
+
+/**
+ * 리다이렉트 한 단계 뒤의 요청: 메서드·본문, 보낼 헤더 (Fetch 표준 + curl 과 같은 인증 정보 규칙)
+ * - 301·302 의 POST, 303 의 GET·HEAD 아닌 요청은 본문 없는 GET 으로 바뀌고 본문 헤더(Content-Type 등)도 뺀다. 307·308 은 그대로
+ * - 처음 요청과 출처(스킴·호스트·포트)가 다르면 Authorization·Cookie 는 보내지 않는다. 처음 출처로 돌아오면 다시 보낸다
+ * - 그 밖의 헤더(User-Agent·Referer·직접 넣은 헤더)는 curl 처럼 모든 단계에 보낸다
+ */
+export function redirectStep({ status, method, to, origin }) {
+  const toGet = ((status === 301 || status === 302) && method === 'POST') || (status === 303 && method !== 'GET' && method !== 'HEAD');
+  return { method: toGet ? 'GET' : method, dropBody: toGet, crossOrigin: new URL(to).origin !== origin };
+}
+
+// 이 단계에서 보낼 헤더: fetch 로 넣는 것(pairs)과 규칙으로 넣는 것(dnr)
+export function hopHeaders(pairs, dnr, { crossOrigin = false, bodyDropped = false } = {}) {
+  const keep = (name) => !(crossOrigin && CREDENTIAL_HEADERS.has(name)) && !(bodyDropped && BODY_HEADERS.has(name));
+  return {
+    pairs: pairs.filter(([k]) => keep(k.toLowerCase())),
+    dnr: dnr.filter((x) => keep(x.header)),
+  };
+}
+
+const headerOf = (list, name) => ((list || []).find((x) => String(x.name).toLowerCase() === name) || {}).value;
+
+// webRequest 기록이 fetch 결과보다 늦게 올 수 있어 잠시 기다린다. before: 이 단계를 보내기 전의 기록 개수
+async function hopRecord(cap, before, waitMs) {
+  const hop = () => (cap.hops.length > before ? cap.hops[cap.hops.length - 1] : null);
+  for (let i = 0; i < waitMs / 10 && !(hop() && hop().responseHeaders); i++) await sleep(10);
+  return hop();
 }
 
 async function addDnrRules(url, requestHeaders) {
@@ -247,7 +280,8 @@ export async function sendRequest(prepared, opts = {}) {
   url.hash = '';
   const finalUrl = url.href;
 
-  const fetchHeaders = new Headers();
+  const pairs = []; // fetch 로 넣는 헤더 [이름, 값]. 리다이렉트 단계마다 hopHeaders 로 골라 Headers 를 새로 만든다
+  const check = new Headers(); // 값 검사용
   const dnr = [];
   for (const hd of headers) {
     const name = hd.key.trim();
@@ -270,10 +304,11 @@ export async function sendRequest(prepared, opts = {}) {
       continue;
     }
     try {
-      fetchHeaders.append(name, hd.value);
+      check.append(name, hd.value);
     } catch (e) {
       throw new RequestError(`헤더를 설정할 수 없습니다: ${name} (${e.message})`, { code: 'INVALID_HEADER' });
     }
+    pairs.push([name, hd.value]);
   }
   if (opts.removeOrigin !== false && !dnr.some((x) => x.header === 'origin')) {
     dnr.push({ header: 'origin', operation: 'remove' });
@@ -312,98 +347,162 @@ export async function sendRequest(prepared, opts = {}) {
     opts.signal.addEventListener('abort', onAbort);
   }
 
-  // 같은 호스트로 보낸 요청이 헤더 규칙을 쓰는 동안(응답 헤더를 받을 때까지) 대기
-  const tQueued = performance.now();
-  let releaseHost;
-  let waited = false;
-  try {
-    releaseHost = await acquireHost(url.host, controller.signal, opts.onWait ? (host) => { waited = true; opts.onWait(host); } : null);
-    if (waited) opts.onWait(null); // 기다림 끝 → 전송 시작
-  } catch (e) {
-    if (timer) clearTimeout(timer);
-    if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
-    if (timedOut) {
-      throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms). 같은 서버(${url.host})로 보낸 이전 요청의 응답을 기다리는 중이었습니다.`, {
-        code: 'TIMEOUT',
-        hint: '같은 서버로 가는 요청은 헤더가 섞이지 않도록 하나씩 보냅니다. 응답이 오지 않는 이전 요청을 취소한 뒤 다시 보내세요.',
-        elapsed: performance.now() - tQueued,
-        warnings,
-      });
-    }
-    throw e;
-  }
-  const queuedMs = performance.now() - tQueued;
-
   const follow = prepared.settings?.followRedirects !== false;
-  const cap = { url: finalUrl, host: url.host, method: prepared.method, requestId: null, hops: [], netError: null };
+  const cap = { url: finalUrl, method: prepared.method, requestId: null, hops: [], netError: null };
   captures.add(cap);
-  let ruleIds = [];
-  let networkReleased = false;
-  // 요청 헤더를 모두 보낸 뒤(응답 헤더 수신, 리다이렉트 포함) 헤더 규칙을 지우고 같은 호스트의 다음 요청을 보낼 수 있게 한다.
-  // 본문을 오래 받는 응답(대용량 파일, 끝나지 않는 SSE)이 다른 요청을 막지 않게 하기 위해서다.
-  const releaseNetwork = async () => {
-    if (networkReleased) return;
-    networkReleased = true;
-    await removeDnrRules(ruleIds);
-    releaseHost();
-  };
-  const t0 = performance.now();
+  const tQueued = performance.now();
+  let queuedMs = 0;
+  let t0 = null; // 첫 단계의 차례를 얻은 시각
+  let tStart = null;
   let tHeaders = null;
   let tEnd = null;
+  let res = null;
+  let hopUrl = url;
+  let method = prepared.method;
+  let hopBody = body;
+  let bodyDropped = false;
+  // 인증 정보(Authorization·Cookie)를 보내는 출처. 처음 요청의 출처이고, Chrome 이 같은 서버를 https 로 바꾼 것(HSTS)만 따라 바뀐다
+  let credOrigin = url.origin;
+  let before = 0; // 마지막으로 보낸 단계 앞의 webRequest 기록 개수
+  const since = () => performance.now() - (tStart ?? tQueued);
   try {
-    try {
-      ruleIds = await addDnrRules(finalUrl, dnr);
-    } catch (e) {
-      warnings.push('일부 헤더(Cookie/Origin 등)를 적용하지 못했습니다: ' + e.message);
-    }
-    let res;
-    const tStart = performance.now();
-    try {
-      res = await fetch(finalUrl, {
-        method: prepared.method,
-        headers: fetchHeaders,
-        body,
-        redirect: follow ? 'follow' : 'manual',
-        credentials: 'omit',
-        cache: 'no-store',
-        referrerPolicy: 'no-referrer',
-        signal: controller.signal,
-      });
-    } catch (e) {
-      const elapsed = performance.now() - tStart;
-      if (controller.signal.aborted) {
-        if (timedOut) throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms).`, { code: 'TIMEOUT', elapsed, capture: cap, warnings });
-        throw new RequestError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed, capture: cap, warnings });
+    for (let n = 0; ; n++) {
+      const step = hopHeaders(pairs, dnr, { crossOrigin: hopUrl.origin !== credOrigin, bodyDropped });
+      // 1) 같은 서버로 가는 다른 요청이 헤더 규칙을 쓰는 동안(응답 헤더를 받을 때까지) 기다린다
+      const tQ = performance.now();
+      let waited = false;
+      let releaseHost;
+      try {
+        releaseHost = await acquireHost(hopUrl.host, controller.signal, opts.onWait ? (host) => { waited = true; opts.onWait(host); } : null);
+        if (waited) opts.onWait(null); // 기다림 끝 → 전송 시작
+      } catch (e) {
+        if (timedOut) {
+          throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms). 같은 서버(${hopUrl.host})로 보낸 이전 요청의 응답을 기다리는 중이었습니다.`, {
+            code: 'TIMEOUT',
+            hint: '같은 서버로 가는 요청은 헤더가 섞이지 않도록 하나씩 보냅니다. 응답이 오지 않는 이전 요청을 취소한 뒤 다시 보내세요.',
+            elapsed: performance.now() - tQueued,
+            capture: cap,
+            warnings,
+          });
+        }
+        throw new RequestError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed: performance.now() - tQueued, capture: cap, warnings });
       }
-      await new Promise((r) => setTimeout(r, 30)); // onErrorOccurred 이벤트 대기
-      const net = cap.netError;
-      const hint = net ? ERROR_HINTS[net] || '' : '';
-      let msg = net ? `${net}` : e.message || String(e);
-      if (!net && /Failed to fetch/i.test(msg)) msg = '서버에 연결할 수 없습니다 (Failed to fetch).';
-      throw new RequestError(msg, { code: net || 'NETWORK', hint, elapsed, capture: cap, warnings });
+      queuedMs += performance.now() - tQ;
+      if (t0 == null) t0 = performance.now();
+      // 2) 이 주소에만 헤더 규칙을 걸고 보낸다. 응답 헤더를 받으면(리다이렉트 포함) 규칙을 지우고 차례를 넘긴다.
+      //    본문을 오래 받는 응답(대용량 파일, 끝나지 않는 SSE)이 다른 요청을 막지 않게 하기 위해서다.
+      let ruleIds = [];
+      before = cap.hops.length;
+      try {
+        try {
+          ruleIds = await addDnrRules(hopUrl.href, step.dnr);
+        } catch (e) {
+          warnings.push('일부 헤더(Cookie/Origin 등)를 적용하지 못했습니다: ' + e.message);
+        }
+        cap.requestId = null;
+        cap.url = normalizeUrl(hopUrl.href);
+        cap.method = method;
+        cap.netError = null;
+        if (tStart == null) tStart = performance.now();
+        const hdrs = new Headers();
+        step.pairs.forEach(([k, v]) => hdrs.append(k, v));
+        try {
+          res = await fetch(hopUrl.href, {
+            method,
+            headers: hdrs,
+            body: hopBody,
+            redirect: 'manual',
+            credentials: 'omit',
+            cache: 'no-store',
+            referrerPolicy: 'no-referrer',
+            signal: controller.signal,
+          });
+        } catch (e) {
+          if (controller.signal.aborted) {
+            if (timedOut) throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms).`, { code: 'TIMEOUT', elapsed: since(), capture: cap, warnings });
+            throw new RequestError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed: since(), capture: cap, warnings });
+          }
+          await sleep(30); // onErrorOccurred 이벤트 대기
+          const net = cap.netError;
+          const hint = net ? ERROR_HINTS[net] || '' : '';
+          let msg = net ? `${net}` : e.message || String(e);
+          if (!net && /Failed to fetch/i.test(msg)) msg = '서버에 연결할 수 없습니다 (Failed to fetch).';
+          throw new RequestError(msg, { code: net || 'NETWORK', hint, elapsed: since(), capture: cap, warnings });
+        }
+      } finally {
+        await removeDnrRules(ruleIds);
+        releaseHost();
+      }
+      if (res.type !== 'opaqueredirect' || !follow) break;
+      // 3) 리다이렉트: 이 단계의 응답 헤더(Location)를 webRequest 기록에서 읽어 다음 단계를 만든다.
+      //    Chrome 내부 리다이렉트(HSTS 등)는 응답 헤더 기록 없이 onBeforeRedirect 로만 올 수 있다
+      const rid = cap.requestId;
+      let rec = null;
+      let internal = '';
+      for (let i = 0; i < 100; i++) {
+        rec = cap.hops.length > before ? cap.hops[cap.hops.length - 1] : null;
+        internal = rid && cap.lastRedirect && cap.lastRedirect.requestId === rid ? cap.lastRedirect.url : '';
+        if ((rec && rec.responseHeaders) || internal) break;
+        await sleep(10);
+      }
+      const loc = (rec && headerOf(rec.responseHeaders, 'location')) || internal;
+      if (!loc) {
+        warnings.push('리다이렉트 응답의 Location 을 읽지 못해 따라가지 못했습니다.');
+        break;
+      }
+      let next;
+      try {
+        next = new URL(loc, hopUrl);
+      } catch (e) {
+        throw new RequestError(`리다이렉트 주소가 올바르지 않습니다: ${loc}`, { code: 'INVALID_REDIRECT', elapsed: since(), capture: cap, warnings });
+      }
+      if (!/^https?:$/.test(next.protocol)) {
+        throw new RequestError(`지원하지 않는 프로토콜로 리다이렉트되었습니다: ${next.href}`, { code: 'INVALID_REDIRECT', hint: 'http, https 주소로만 따라갑니다.', elapsed: since(), capture: cap, warnings });
+      }
+      if (n + 1 > MAX_REDIRECTS) {
+        throw new RequestError(`리다이렉트가 ${MAX_REDIRECTS}번을 넘었습니다.`, { code: 'net::ERR_TOO_MANY_REDIRECTS', hint: ERROR_HINTS['net::ERR_TOO_MANY_REDIRECTS'], elapsed: since(), capture: cap, warnings });
+      }
+      next.hash = '';
+      if (rec) rec.redirectUrl = next.href;
+      // 응답 기록이 없는 내부 리다이렉트는 307 처럼 메서드·본문을 그대로 둔다
+      const s = redirectStep({ status: rec && rec.statusCode ? rec.statusCode : 307, method, to: next.href, origin: credOrigin });
+      // Chrome 내부 리다이렉트로 같은 서버의 https 로 바뀐 것은 서버가 보낸 리다이렉트가 아니라 같은 요청이다
+      const viaInternal = !!internal && (!rec || !rec.responseHeaders || /Internal Redirect/i.test(rec.statusLine || ''));
+      if (viaInternal && hopUrl.origin === credOrigin && next.host === hopUrl.host && next.protocol === 'https:') credOrigin = next.origin;
+      method = s.method;
+      if (s.dropBody) {
+        hopBody = undefined;
+        bodyDropped = true;
+      }
+      // 이 단계 요청의 늦은 이벤트(따라가지 않고 끝낸 요청의 취소 오류 등)가 다음 단계 기록에 섞이지 않게 묶음을 푼다
+      if (cap.requestId) byRequestId.delete(cap.requestId);
+      hopUrl = next;
     }
     tHeaders = performance.now();
-    await releaseNetwork();
+
+    // 4) 본문. SSE 는 받는 대로 해석해 알리고, 멈추거나 시간이 다 되면 받은 데까지 쓴다
     let buf;
-    try {
-      buf = new Uint8Array(await res.arrayBuffer());
-    } catch (e) {
-      const elapsed = performance.now() - tStart;
-      if (controller.signal.aborted) {
-        if (timedOut) throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms). 응답 본문을 받는 중이었습니다.`, { code: 'TIMEOUT', elapsed, capture: cap, warnings });
-        throw new RequestError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed, capture: cap, warnings });
+    let stream = null;
+    const ctype0 = res.headers.get('content-type') || '';
+    if (res.type !== 'opaqueredirect' && res.body && isEventStream(ctype0)) {
+      const out = await readEventStream(res, { signal: controller.signal, timedOut: () => timedOut, onStream: opts.onStream });
+      buf = out.bytes;
+      stream = out.stream;
+    } else {
+      try {
+        buf = new Uint8Array(await res.arrayBuffer());
+      } catch (e) {
+        if (controller.signal.aborted) {
+          if (timedOut) throw new RequestError(`요청 시간이 초과되었습니다 (${timeout} ms). 응답 본문을 받는 중이었습니다.`, { code: 'TIMEOUT', elapsed: since(), capture: cap, warnings });
+          throw new RequestError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed: since(), capture: cap, warnings });
+        }
+        throw new RequestError('응답 본문을 읽는 중 연결이 끊어졌습니다: ' + (cap.netError || e.message), { code: cap.netError || 'NETWORK', elapsed: since(), capture: cap, warnings });
       }
-      throw new RequestError('응답 본문을 읽는 중 연결이 끊어졌습니다: ' + (cap.netError || e.message), { code: cap.netError || 'NETWORK', elapsed, capture: cap, warnings });
     }
     tEnd = performance.now();
     // webRequest 이벤트가 fetch 완료보다 늦게 도착할 수 있어 잠시 대기
-    for (let i = 0; i < 20; i++) {
-      const lh = cap.hops[cap.hops.length - 1];
-      if (lh && lh.responseHeaders) break;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
-    const lastHop = cap.hops[cap.hops.length - 1];
+    const lastHop = await hopRecord(cap, before, 200);
+    const prior = lastHop ? cap.hops.slice(0, -1) : cap.hops;
     let status = res.status;
     let statusLine = lastHop?.statusLine || '';
     let rawHeaders;
@@ -425,16 +524,19 @@ export async function sendRequest(prepared, opts = {}) {
     });
     // 리다이렉트 경로별 Set-Cookie 도 쿠키 관리자에 반영
     const hopCookies = [];
-    cap.hops.slice(0, -1).forEach((hop) => {
+    prior.forEach((hop) => {
       (hop.responseHeaders || []).forEach((x) => {
         if (x.name.toLowerCase() === 'set-cookie') String(x.value).split('\n').forEach((v) => v.trim() && hopCookies.push({ url: hop.url, value: v.trim() }));
       });
     });
     const headersSize = rawHeaders.reduce((n, x) => n + x.name.length + String(x.value).length + 4, statusLine.length + 2);
-    if (cap.mixedRedirect) {
-      warnings.push(`${cap.mixedRedirect} 로 리다이렉트되는 동안 그 서버로 가는 다른 요청이 진행 중이어서, 그 요청의 Cookie·User-Agent 같은 헤더가 이 요청에 섞였을 수 있습니다. 정확한 결과가 필요하면 다른 요청이 끝난 뒤 다시 보내세요.`);
+    const contentType = (rawHeaders.find((x) => x.name.toLowerCase() === 'content-type') || {}).value || ctype0;
+    if (stream) {
+      const n = stream.events.length;
+      if (stream.end === 'timeout') warnings.push(`타임아웃(${timeout} ms)이 되어 스트림을 끊었습니다. 그때까지 받은 이벤트 ${n}개를 보여 줍니다. 더 오래 받으려면 요청의 Settings 탭이나 설정에서 타임아웃을 늘리거나 0(무제한)으로 두세요.`);
+      else if (stream.end === 'limit') warnings.push(`스트림이 ${formatBytes(STREAM_MAX_BYTES)}를 넘어 받기를 멈췄습니다. 그때까지 받은 이벤트 ${n}개를 보여 줍니다.`);
+      else if (stream.end === 'error') warnings.push(`스트림을 받는 중 연결이 끊어졌습니다 (${cap.netError || stream.error}). 그때까지 받은 이벤트 ${n}개를 보여 줍니다.`);
     }
-    const contentType = (rawHeaders.find((x) => x.name.toLowerCase() === 'content-type') || {}).value || res.headers.get('content-type') || '';
 
     return {
       ok: true,
@@ -442,7 +544,7 @@ export async function sendRequest(prepared, opts = {}) {
       statusText,
       httpVersion,
       statusLine,
-      url: res.url || finalUrl,
+      url: res.url || hopUrl.href,
       redirected: res.redirected || cap.hops.length > 1,
       opaqueRedirect: res.type === 'opaqueredirect',
       headers: rawHeaders,
@@ -464,16 +566,84 @@ export async function sendRequest(prepared, opts = {}) {
       sentUrl: finalUrl,
       method: prepared.method,
       requestBodyPreview: bodyPreview(prepared.body),
+      stream,
       warnings,
       ts: Date.now(),
     };
   } finally {
     if (timer) clearTimeout(timer);
     if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
-    await releaseNetwork();
     captures.delete(cap);
     if (cap.requestId) setTimeout(() => byRequestId.delete(cap.requestId), 2000);
   }
+}
+
+/**
+ * text/event-stream 본문을 받는 대로 읽는다.
+ * onStream({ status, statusText, events, received, elapsed, comments }): 처음(응답 헤더를 받았을 때)과 조각을 받을 때마다.
+ *   events 는 지금까지 받은 이벤트 전체(같은 배열을 계속 늘림)
+ * 반환: { bytes, stream: { kind:'sse', end, error, events, comments, incomplete, duration } }
+ *   end: closed(서버가 끝냄) | stopped(사용자가 멈춤) | timeout | limit(너무 큼) | error(연결 끊김)
+ */
+async function readEventStream(res, { signal, timedOut, onStream }) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  const parser = createSseParser();
+  const chunks = [];
+  const events = [];
+  let size = 0;
+  let end = 'closed';
+  let error = '';
+  const t0 = performance.now();
+  const report = () => {
+    if (!onStream) return;
+    try {
+      onStream({ status: res.status, statusText: res.statusText, events, received: size, elapsed: performance.now() - t0, comments: parser.comments });
+    } catch (e) {
+      /* 화면 오류가 받기를 멈추지 않게 */
+    }
+  };
+  const add = (list) => {
+    for (const ev of list) events.push(ev);
+  };
+  report();
+  for (;;) {
+    let r;
+    try {
+      r = await reader.read();
+    } catch (e) {
+      if (signal.aborted) end = timedOut() ? 'timeout' : 'stopped';
+      else {
+        end = 'error';
+        error = e.message || String(e);
+      }
+      break;
+    }
+    if (r.done) break;
+    chunks.push(r.value);
+    size += r.value.byteLength;
+    add(parser.push(decoder.decode(r.value, { stream: true }), performance.now() - t0));
+    report();
+    if (size >= STREAM_MAX_BYTES) {
+      end = 'limit';
+      try {
+        await reader.cancel();
+      } catch (e) {
+        /* ignore */
+      }
+      break;
+    }
+  }
+  add(parser.push(decoder.decode(), performance.now() - t0));
+  const { incomplete } = parser.end();
+  report();
+  const bytes = new Uint8Array(size);
+  let off = 0;
+  for (const c of chunks) {
+    bytes.set(c, off);
+    off += c.byteLength;
+  }
+  return { bytes, stream: { kind: 'sse', end, error, events, comments: parser.comments, incomplete, duration: performance.now() - t0 } };
 }
 
 function bodyPreview(b) {

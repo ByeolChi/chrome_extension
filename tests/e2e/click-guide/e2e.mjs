@@ -3,13 +3,14 @@
 //       다른 사본을 시험하려면 CG_EXT=<확장 폴더>. 요구 사항과 시험 내용은 tests/e2e/README.md 참고
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { launchChromium, evaluate, sleep } from './cdp.mjs';
 import { startServers, llm } from './server.mjs';
 import { tempDir } from '../lib/chromium.mjs';
 
 const EXT = path.resolve(process.env.CG_EXT || fileURLToPath(new URL('../../../click-guide', import.meta.url)));
 const PROFILE = tempDir('click-guide-e2e-');
+let localDir = null;   // file 구역이 만드는 로컬 HTML 폴더
 const PORT = Number(process.env.CDP_PORT) || 9301;
 const A = 'http://127.0.0.1:18931';
 const B = 'http://127.0.0.1:18932';
@@ -77,8 +78,8 @@ async function navigate(page, url) {
 
 const pageEval = (page, expr) => evaluate(cdp, page.sessionId, expr);
 
-/* 확장 페이지(옵션)에서 메시지 보내기·DB 읽기 */
-const ext = await openPage(`chrome-extension://${extId}/src/options/options.html`);
+/* 확장 페이지(옵션)에서 메시지 보내기·DB 읽기. 확장이 다시 시작되면(파일 URL 접근을 바꿀 때) 새로 연다 */
+let ext = await openPage(`chrome-extension://${extId}/src/options/options.html`);
 const extEval = (expr) => pageEval(ext, expr);
 const sendMsg = (msg) => extEval(`chrome.runtime.sendMessage(${JSON.stringify(msg)})`);
 
@@ -244,10 +245,13 @@ try {
       check('5c-1 콘텐츠 스크립트가 받는 상태 응답에 API 키 없음', resp && !resp.includes('sk-test-SECRET-KEY') && !/"ai"/.test(resp), resp.slice(0, 200));
     } catch (e) { check('5c-1 콘텐츠 스크립트가 받는 상태 응답에 API 키 없음', false, e.message); }
     try {
-      // Chromium 은 storage.local 의 접근 수준을 바꿀 수 없다(setAccessLevel 은 session 전용). 참고로만 기록한다.
-      const got = await contentEval(tabA, `chrome.storage.local.get(null).then(x => 'READ', e => 'DENIED:' + e.message)`);
-      console.log(`INFO  콘텐츠 스크립트의 chrome.storage.local 직접 읽기: ${got} (브라우저 제약, 남은 위험)`);
-    } catch (e) { console.log('INFO  storage 직접 읽기 확인 실패: ' + e.message); }
+      // 콘텐츠 스크립트는 storage.local 을 직접 읽을 수 있다(Chromium 131 에는 storage.local 의 setAccessLevel 이 없음).
+      // 그래서 키는 storage.local 이 아니라 확장 출처의 IndexedDB(비밀 보관소)에 둔다.
+      const got = await contentEval(tabA, `chrome.storage.local.get(null).then(x => JSON.stringify(x), e => 'DENIED:' + e.message)`);
+      check('5c-2 콘텐츠 스크립트가 storage.local 을 직접 읽어도 API 키가 없음', typeof got === 'string' && !got.includes('sk-test-SECRET-KEY'), got.slice(0, 160));
+      const key = await extEval(`import('/src/common/settings.js').then(m => m.getSettings({ withApiKey: true })).then(s => s.ai.apiKey)`);
+      check('5c-3 API 키는 확장 페이지에서 비밀 보관소로 읽힘', key === 'sk-test-SECRET-KEY', String(key));
+    } catch (e) { check('5c-2 콘텐츠 스크립트가 storage.local 을 직접 읽어도 API 키가 없음', false, e.message); }
     await extEval(`(async () => { const m = await import('/src/common/settings.js'); await m.setSettings({ ai: { provider: 'none', apiKey: '' } }); return true; })()`);
   } catch (e) { check('구역 실행 오류', false, (e && e.message || String(e)).slice(0, 200)); }
 
@@ -660,6 +664,142 @@ try {
     await sleep(600);
     check('7-2 녹화를 끝내면 등록된 콘텐츠 스크립트도 해제', (await extEval(`chrome.scripting.getRegisteredContentScripts().then(x => x.length)`)) === 0);
   } catch (e) { check('구역 실행 오류', false, (e && e.message || String(e)).slice(0, 200)); }
+
+  /* ============ API 키: 웹페이지 쪽 스크립트도 읽는 storage.local 이 아니라 확장 출처의 IndexedDB 에 둠 ============ */
+  const secretKey = () => extEval(`import('/src/common/secrets.js').then(m => m.getApiKey())`);
+  const storageText = () => extEval(`chrome.storage.local.get(null).then(x => JSON.stringify(x))`);
+  if (want('apikey')) try {
+    const st0 = await state();
+    if (st0.state && st0.state.recording) await sendMsg({ type: 'STOP', openEditor: false });
+    // 0.3.0 처럼 storage.local 에 키를 둔 상태 → 서비스 워커가 바뀐 설정을 다시 읽을 때 옮겨야 한다
+    await extEval(`chrome.storage.local.set({ cg_settings: { lang: 'ko', ai: { provider: 'openai', model: 'm-legacy', apiKey: 'sk-legacy-E2E' } } }).then(() => true)`);
+    await sleep(200);
+    await sendMsg({ type: 'GET_STATE' });
+    let raw = '';
+    for (let i = 0; i < 20; i++) { raw = await storageText(); if (!raw.includes('sk-legacy-E2E')) break; await sleep(150); }
+    const moved = await secretKey();
+    const model = await extEval(`chrome.storage.local.get('cg_settings').then(g => g.cg_settings && g.cg_settings.ai && g.cg_settings.ai.model)`);
+    check('K-1 예전 버전이 storage.local 에 둔 API 키를 서비스 워커가 비밀 보관소로 옮기고 지움 (다른 설정은 그대로)',
+      !raw.includes('sk-legacy-E2E') && moved === 'sk-legacy-E2E' && model === 'm-legacy', `보관소=${moved} model=${model} storage=${raw.slice(0, 160)}`);
+
+    // 설정 화면에서 키를 입력 → storage.local 에는 없고, 설정 화면을 다시 열면 보임
+    await navigate(ext, `chrome-extension://${extId}/src/options/options.html`);
+    await activate(ext);   // 뒤에 있는 탭은 타이머가 느려져 자동 저장(0.35초 뒤)이 늦다
+    await sleep(400);
+    const shown0 = await extEval(`document.querySelector('#aiKey').value`);
+    await extEval(`(() => { const k = document.querySelector('#aiKey'); k.value = 'sk-typed-E2E'; k.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+    let saved = '';
+    for (let i = 0; i < 30 && saved !== 'sk-typed-E2E'; i++) { await sleep(150); saved = await secretKey(); }
+    raw = await storageText();
+    await navigate(ext, `chrome-extension://${extId}/src/options/options.html`);
+    await sleep(400);
+    const shown = await extEval(`document.querySelector('#aiKey').value`);
+    check('K-2 설정 화면에서 입력한 API 키는 storage.local 에 없고, 설정 화면을 다시 열면 보임',
+      shown0 === 'sk-legacy-E2E' && saved === 'sk-typed-E2E' && shown === 'sk-typed-E2E' && !raw.includes('sk-typed-E2E'),
+      `처음 화면=${shown0} 보관소=${saved} 다시 연 화면=${shown}`);
+    if (!want('file')) await extEval(`import('/src/common/settings.js').then(m => m.setSettings({ ai: { provider: 'none', apiKey: '' } })).then(() => true)`);
+  } catch (e) { check('구역 실행 오류', false, (e && e.message || String(e)).slice(0, 200)); }
+
+  /* ============ 로컬 파일(file://) 녹화: '파일 URL에 대한 액세스 허용'을 따름, 문장에는 파일 이름만 ============ */
+  if (want('file')) try {
+    const st0 = await state();
+    if (st0.state && st0.state.recording) await sendMsg({ type: 'STOP', openEditor: false });
+    const dir = tempDir('cg-local-');   // OS 임시 폴더 (Windows 에서는 C:\Users\<사용자>\AppData\Local\Temp\…)
+    localDir = dir;
+    fs.writeFileSync(path.join(dir, 'start.html'), '<!doctype html><meta charset="utf-8"><title>로컬 시작</title><body style="margin:0;font:16px sans-serif">' +
+      '<button id="go" style="position:absolute;left:20px;top:20px;width:160px;height:40px">확인</button>' +
+      '<a id="next" href="next.html" style="position:absolute;left:20px;top:100px">다음 화면</a></body>');
+    fs.writeFileSync(path.join(dir, 'next.html'), '<!doctype html><meta charset="utf-8"><body style="margin:0">' +
+      '<button style="position:absolute;left:20px;top:20px;width:160px;height:40px">끝</button></body>');
+    const fileUrl = (name) => pathToFileURL(path.join(dir, name)).href;
+    const folder = path.basename(dir);
+    const leaks = (s) => String(s || '').includes(folder) || /AppData|\\Users\\|\/Users\//i.test(String(s || ''));
+
+    const swTarget = async () => (await cdp.send('Target.getTargets')).targetInfos
+      .find((t) => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${extId}/`));
+    // chrome://extensions 의 스위치를 바꾼다. 바뀌면 확장이 다시 시작되므로 새 서비스 워커를 기다리고 설정 화면을 다시 연다
+    const setFileAccess = async (on, beforeReopen) => {
+      if ((await extEval('chrome.extension.isAllowedFileSchemeAccess()')) === on) return;
+      const old = await swTarget();
+      const page = await openPage('chrome://extensions/');
+      // 확장이 다시 시작되면서 이 화면도 다시 그려져 약속(promise)이 끝나지 않을 때가 있어 기다리지 않고 서비스 워커가 바뀌는지만 본다
+      await pageEval(page, `(chrome.developerPrivate.updateExtensionConfiguration({ extensionId: '${extId}', fileAccess: ${on} }).catch(() => {}), true)`);
+      let sw = null;
+      for (let i = 0; i < 50 && !sw; i++) {
+        const t = await swTarget();
+        if (t && (!old || t.targetId !== old.targetId)) sw = t; else await sleep(200);
+      }
+      try { await cdp.send('Target.closeTarget', { targetId: page.targetId }); } catch (_) { /* 이미 닫힘 */ }
+      if (!sw) throw new Error('파일 URL 접근을 바꾼 뒤 확장이 다시 시작되지 않았습니다');
+      if (beforeReopen) await beforeReopen(sw);
+      ext = await openPage(`chrome-extension://${extId}/src/options/options.html`);
+      await sleep(300);
+    };
+
+    // 1) 꺼져 있으면 녹화를 시작하지 않고, 켜는 곳을 알려 준다
+    await setFileAccess(false);
+    if (want('apikey')) {
+      const k = await secretKey();
+      check('K-3 확장이 다시 시작된 뒤에도 API 키가 남음', k === 'sk-typed-E2E', String(k));
+    }
+    const tabF = await openPage(fileUrl('start.html'));
+    await activate(tabF);
+    const n0 = (await sessionsDump()).length;
+    const r0 = await sendMsg({ type: 'START', tabId: await tabIdOf(tabF) });
+    await sleep(400);
+    const st1 = await state();
+    check('F-1 파일 URL 접근이 꺼져 있으면 녹화를 시작하지 않고 켜는 곳을 알림 (빈 가이드도 남지 않음)',
+      r0 && !r0.attached && /파일 URL에 대한 액세스 허용/.test(r0.reason || '') && (await sessionsDump()).length === n0 && !(st1.state && st1.state.recording),
+      JSON.stringify(r0).slice(0, 220));
+
+    // 2) 켜면 확장이 다시 시작된다. 그때 서비스 워커가 storage.local 에 남은 예전 키를 (화면을 열기 전에) 옮기는지도 본다
+    const keyCheck = want('apikey');
+    if (keyCheck) await extEval(`chrome.storage.local.get('cg_settings').then(g => chrome.storage.local.set({ cg_settings: { ...(g.cg_settings || {}), ai: { ...((g.cg_settings || {}).ai || {}), apiKey: 'sk-legacy-RELOAD' } } })).then(() => true)`);
+    let swRaw = '';
+    await setFileAccess(true, keyCheck ? async (sw) => {
+      const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: sw.targetId, flatten: true });
+      for (let i = 0; i < 30; i++) {
+        swRaw = await evaluate(cdp, sessionId, `chrome.storage.local.get('cg_settings').then(g => JSON.stringify(g))`);
+        if (!swRaw.includes('sk-legacy-RELOAD')) break;
+        await sleep(100);
+      }
+    } : null);
+    if (keyCheck) {
+      const reloadKey = await secretKey();
+      check('K-4 서비스 워커가 시작할 때 storage.local 의 예전 키를 옮김 (화면을 열기 전)', !swRaw.includes('sk-legacy-RELOAD') && reloadKey === 'sk-legacy-RELOAD',
+        `보관소=${reloadKey} storage=${swRaw.slice(0, 160)}`);
+    }
+
+    await navigate(tabF, fileUrl('start.html'));
+    await activate(tabF);
+    const r1 = await sendMsg({ type: 'START', tabId: await tabIdOf(tabF) });
+    await sleep(800);
+    check('F-2 파일 URL 접근이 켜져 있으면 로컬 파일도 녹화 시작 (녹화 바 표시)', r1 && r1.ok && r1.attached && (await barInfo(tabF)).length === 1, JSON.stringify(r1).slice(0, 220));
+    await click(tabF, 100, 40);   // '확인' 버튼
+    let s = await waitSteps((x) => x.steps.some((y) => y.type === 'click'), 5000);
+    const first = s && s.steps.find((y) => y.type === 'click');
+    check('F-3 로컬 파일 페이지의 클릭이 스크린샷과 함께 기록됨', first && first.shotId && /확인/.test(first.title || ''),
+      first ? `${first.title} shot=${!!first.shotId} ${first.shotError || ''}` : '단계 없음');
+    await click(tabF, 50, 108);   // '다음 화면' 링크 → 제목 없는 next.html
+    s = await waitSteps((x) => x.steps.some((y) => y.type === 'navigate'), 6000);
+    await navigate(tabF, pathToFileURL(dir).href + '/');   // 폴더 목록 화면: 제목이 'C:\…\cg-local-…\의 색인'
+    s = await waitSteps((x) => x.steps.filter((y) => y.type === 'navigate').length >= 2, 6000);
+    const navs = s ? s.steps.filter((y) => y.type === 'navigate') : [];
+    const toNext = navs.find((y) => /next\.html$/.test(y.url || ''));
+    const toDir = navs.find((y) => /\/$/.test(y.url || ''));
+    check('F-4 제목 없는 로컬 파일로 이동하는 단계는 파일 이름으로 ("next.html로 이동")', toNext && toNext.title === 'next.html로 이동' && !leaks(toNext.title + toNext.description),
+      toNext ? `${toNext.title} / ${toNext.description}` : JSON.stringify(navs.map((y) => y.title)));
+    check('F-5 폴더 목록 화면(제목에 폴더 경로가 있음)으로 이동해도 문장에 경로가 없음', toDir && !leaks(toDir.title + toDir.description),
+      toDir ? `${toDir.title} / ${toDir.description}` : '이동 단계 없음');
+    const pageTitles = s ? await extEval(`import('/src/common/db.js').then(async (db) => (await db.getSteps(${JSON.stringify(s.id)})).map((x) => x.pageTitle || ''))`) : [];
+    check('F-6 단계에 저장한 페이지 제목에도 폴더 경로가 없음', pageTitles.length >= 3 && pageTitles.every((t) => !leaks(t)), JSON.stringify(pageTitles));
+    await sendMsg({ type: 'STOP', openEditor: false });
+    await sleep(600);
+    const done = s ? (await sessionsDump()).find((x) => x.id === s.id) : null;
+    check('F-7 가이드 이름 후보도 파일 이름으로 (폴더 경로 없음)', done && /start\.html/.test(done.name || '') && !leaks(done.name), done ? done.name : '가이드 없음');
+    await extEval(`import('/src/common/settings.js').then(m => m.setSettings({ ai: { provider: 'none', apiKey: '' } })).then(() => true)`);
+    try { await cdp.send('Target.closeTarget', { targetId: tabF.targetId }); } catch (_) { /* 이미 닫힘 */ }
+  } catch (e) { check('구역 실행 오류', false, (e && e.message || String(e)).slice(0, 200)); }
 } catch (e) {
   check('실행 오류', false, e.stack || e.message);
 } finally {
@@ -671,5 +811,6 @@ try {
   for (const s of servers) s.close();
   await sleep(500);
   try { fs.rmSync(PROFILE, { recursive: true, force: true }); } catch (_) { /* 잠금 해제 전일 수 있음 */ }
+  if (localDir) { try { fs.rmSync(localDir, { recursive: true, force: true }); } catch (_) { /* noop */ } }
   process.exit(pass === results.length ? 0 : 1);
 }

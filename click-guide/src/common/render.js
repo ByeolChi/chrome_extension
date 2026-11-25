@@ -1,5 +1,5 @@
 /* 내보내기 렌더링: 스크린샷에 하이라이트/가림을 굽고, HTML·Markdown 문서를 만든다. */
-import { escapeHtml, formatDate } from './util.js';
+import { escapeHtml, formatDate, placeName, shareableUrl, localPageTitle } from './util.js';
 import '../shared/redact-core.js';   // 공용 가리기 코어 → globalThis.RedactCore
 
 const RC = globalThis.RedactCore;
@@ -149,7 +149,7 @@ export function buildGuideHtml(session, steps, images, opts = {}) {
   parts.push(`<title>${escapeHtml(title)}</title><style>${DOC_CSS}</style></head><body><div class="page">`);
   parts.push('<header class="doc">');
   parts.push(`<h1>${escapeHtml(title)}</h1>`);
-  parts.push(`<p class="sub">${steps.length}단계 · ${formatDate(session.createdAt)}${session.startUrl ? ' · ' + escapeHtml(hostOf(session.startUrl)) : ''}</p>`);
+  parts.push(`<p class="sub">${steps.length}단계 · ${formatDate(session.createdAt)}${hostOf(session.startUrl) ? ' · ' + escapeHtml(hostOf(session.startUrl)) : ''}</p>`);
   if (session.description) parts.push(`<p class="desc">${escapeHtml(session.description)}</p>`);
   parts.push('</header><ol class="steps">');
 
@@ -160,7 +160,7 @@ export function buildGuideHtml(session, steps, images, opts = {}) {
     parts.push(`<h2 class="ttl">${escapeHtml(s.title || '')}</h2></div>`);
     parts.push('<div class="body">');
     if (s.description) parts.push(`<p>${escapeHtml(s.description)}</p>`);
-    if (opts.showUrls && s.url) parts.push(`<p class="meta">${escapeHtml(s.url)}</p>`);
+    if (opts.showUrls && s.url) parts.push(`<p class="meta">${escapeHtml(shareableUrl(s.url))}</p>`);
     parts.push('</div>');
     if (img) parts.push(`<figure><img src="${img}" alt="${escapeHtml(s.title || '단계 이미지')}"></figure>`);
     parts.push('</li>');
@@ -172,9 +172,8 @@ export function buildGuideHtml(session, steps, images, opts = {}) {
   return parts.join('\n');
 }
 
-function hostOf(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ''); } catch (_) { return ''; }
-}
+// 머리말에는 사이트 이름만 (로컬 파일은 파일 이름만)
+const hostOf = placeName;
 
 /* ---------------- Markdown ---------------- */
 
@@ -201,14 +200,14 @@ export function buildMarkdown(session, steps, imageNames, opts = {}) {
   const out = [];
   out.push(`# ${mdInline(session.name || '사용 가이드')}`);
   out.push('');
-  out.push(`_${steps.length}단계 · ${formatDate(session.createdAt)}${session.startUrl ? ' · ' + mdInline(hostOf(session.startUrl)) : ''}_`);
+  out.push(`_${steps.length}단계 · ${formatDate(session.createdAt)}${hostOf(session.startUrl) ? ' · ' + mdInline(hostOf(session.startUrl)) : ''}_`);
   if (session.description) { out.push(''); out.push(mdBlock(session.description)); }
   out.push('');
   steps.forEach((s, i) => {
     out.push(`## ${i + 1}. ${mdInline(s.title || '')}`);
     out.push('');
     if (s.description) { out.push(mdBlock(s.description)); out.push(''); }
-    if (opts.showUrls && s.url) { out.push(mdInline(s.url)); out.push(''); }
+    if (opts.showUrls && s.url) { out.push(mdInline(shareableUrl(s.url))); out.push(''); }
     const name = imageNames ? imageNames.get(s.id) : null;
     if (name) { out.push(`![${mdInline((s.title || '단계').replace(/[\[\]]/g, ''))}](${name})`); out.push(''); }
   });
@@ -216,4 +215,26 @@ export function buildMarkdown(session, steps, imageNames, opts = {}) {
   out.push('');
   out.push('_ClickGuide로 만든 가이드_');
   return out.join('\n');
+}
+
+/* ---------------- JSON ---------------- */
+
+/* 데이터로 쓰는 내보내기라 주소를 그대로 넣는다. 단 로컬 파일(file://) 주소는 폴더 경로(사용자 이름이 들어 있음)를
+ * 지우고 파일 이름만 남긴다. 링크 요소의 href 도 같다. images: Map<stepId, dataUrl> */
+export function buildJsonExport(session, steps, images) {
+  const el = (e) => (e && typeof e.href === 'string' && e.href ? { ...e, href: shareableUrl(e.href) } : e);
+  return {
+    format: 'clickguide/v1',
+    exportedAt: new Date().toISOString(),
+    guide: {
+      id: session.id, name: session.name, description: session.description,
+      createdAt: session.createdAt, startUrl: shareableUrl(session.startUrl), lang: session.lang
+    },
+    steps: steps.map((s, i) => ({
+      number: i + 1, type: s.type, title: s.title, description: s.description,
+      url: shareableUrl(s.url), pageTitle: s.pageTitle ? localPageTitle(s.pageTitle, s.url || '') : s.pageTitle, element: el(s.el),
+      value: s.value, masked: s.masked, highlightRect: s.nrect, redactions: s.redactions,
+      image: (images && images.get(s.id)) || null
+    }))
+  };
 }

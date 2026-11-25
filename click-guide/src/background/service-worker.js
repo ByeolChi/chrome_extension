@@ -3,8 +3,9 @@
  * - 화면 캡처(직렬 큐 + 쿼터 재시도) / 리사이즈 / 민감 영역 가리기(검정 칠하기 또는 흐리게)
  * - 단계 저장(IndexedDB)
  */
-import { getSettings } from '../common/settings.js';
+import { getSettings, migrateApiKey } from '../common/settings.js';
 import { describeStep, suggestGuideTitle } from '../common/describe.js';
+import { localPageTitle } from '../common/util.js';
 import * as db from '../common/db.js';
 import '../shared/redact-core.js';   // 공용 가리기 코어 → globalThis.RedactCore (CleanShot Picker 와 같은 코드)
 
@@ -446,6 +447,8 @@ async function addStep(payload, shot, slot) {
   payload.nrect = stepRects(payload, shot);
   if (!slot || !slot.sessionId || discarded.has(slot.sessionId)) return null;
   const cfg = await settings();
+  // 로컬 파일 페이지의 제목에 경로가 들어 있으면(폴더 목록 'C:\Users\…\의 색인' 등) 파일 이름으로 바꾼다
+  payload.title = localPageTitle(payload.title || '', payload.url || '');
 
   let shotId = null;
   if (shot && shot.blob) {
@@ -506,14 +509,29 @@ async function addStep(payload, shot, slot) {
 /* ------------------------------------------------------------------ */
 
 const RECORDABLE = /^https?:\/\//i;
+const LOCAL_FILE = /^file:/i;
 
-function unrecordableReason(tab) {
+/* 로컬 파일(file://)은 chrome://extensions 에서 '파일 URL에 대한 액세스 허용'을 켰을 때만 녹화할 수 있다.
+ * 압축 해제로 올린 확장은 처음부터 켜져 있는 경우가 많고, 정책으로 설치한 확장은 꺼져 있다. */
+async function fileAccessAllowed() {
+  try { return !!(await chrome.extension.isAllowedFileSchemeAccess()); } catch (_) { return false; }
+}
+
+async function isRecordableUrl(url) {
+  if (RECORDABLE.test(url || '')) return true;
+  return LOCAL_FILE.test(url || '') && await fileAccessAllowed();
+}
+
+async function unrecordableReason(tab) {
   const url = (tab && tab.url) || '';
   if (!url) return '탭 주소를 읽을 수 없습니다. 확장에 이 사이트 접근 권한이 있는지 확인해 주세요.';
   if (/^chrome:|^edge:|^about:|^devtools:|^view-source:/i.test(url)) return '브라우저 내부 페이지(chrome:// 등)에서는 녹화할 수 없습니다. 일반 웹페이지를 열고 다시 시작해 주세요.';
   if (/^chrome-extension:/i.test(url)) return '확장 프로그램 페이지에서는 녹화할 수 없습니다.';
   if (/chromewebstore\.google\.com|chrome\.google\.com\/webstore/i.test(url)) return '크롬 웹스토어 페이지는 브라우저 정책상 녹화할 수 없습니다.';
-  if (/^file:/i.test(url)) return '로컬 파일(file://)을 녹화하려면 chrome://extensions 에서 이 확장의 “파일 URL에 대한 액세스 허용”을 켜 주세요.';
+  if (LOCAL_FILE.test(url)) {
+    if (await fileAccessAllowed()) return '';
+    return '로컬 파일(file://)을 녹화하려면 확장 프로그램 관리(chrome://extensions)에서 ClickGuide 의 세부정보를 열고 “파일 URL에 대한 액세스 허용”을 켠 뒤, 이 페이지를 새로고침하고 다시 시작해 주세요.';
+  }
   if (!RECORDABLE.test(url)) return '이 페이지에서는 녹화할 수 없습니다.';
   return '';
 }
@@ -589,7 +607,7 @@ async function repairContentScript(tabId) {
   if (!st.recording || !(st.tabIds || []).includes(tabId)) return;
   let tab = null;
   try { tab = await chrome.tabs.get(tabId); } catch (_) { return; }
-  if (!tab || unrecordableReason(tab)) return;
+  if (!tab || await unrecordableReason(tab)) return;
   try {
     const r = await chrome.tabs.sendMessage(tabId, { type: 'PING' }, { frameId: 0 });
     if (r && r.ok) return;
@@ -599,7 +617,7 @@ async function repairContentScript(tabId) {
 
 async function startRecording(tab) {
   // 녹화할 수 없는 탭이면 가이드를 만들기 전에 돌려보낸다 (빈 가이드가 남지 않도록)
-  const early = tab ? unrecordableReason(tab) : '녹화할 탭을 찾지 못했습니다.';
+  const early = tab ? await unrecordableReason(tab) : '녹화할 탭을 찾지 못했습니다.';
   if (early) return { session: null, attached: false, reason: early, tab };
 
   const cfg = await settings();
@@ -711,7 +729,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!tab) {
           // 서비스 워커에는 '현재 창'이 없으므로 마지막으로 포커스된 창을 기준으로 삼고,
           // 확장/브라우저 내부 페이지는 건너뛴다.
-          const pick = async (q) => (await chrome.tabs.query(q)).find((t) => RECORDABLE.test(t.url || ''));
+          const pick = async (q) => {
+            for (const t of await chrome.tabs.query(q)) if (await isRecordableUrl(t.url)) return t;
+            return null;
+          };
           tab = await pick({ active: true, lastFocusedWindow: true })
              || await pick({ active: true, currentWindow: true })
              || await pick({ active: true });
@@ -1065,6 +1086,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 chrome.runtime.onInstalled.addListener(async () => {
   cachedState = null; cachedSettings = null;
+  await migrateApiKey().catch((e) => console.warn('[ClickGuide] API 키를 옮기지 못했습니다:', e));
   await chrome.storage.local.set({ [STATE_KEY]: { ...EMPTY_STATE } });
   stopTabWatch();
   await unregisterRecorder();
@@ -1077,6 +1099,9 @@ chrome.runtime.onStartup.addListener(async () => {
   stopTabWatch();
   await unregisterRecorder();
 });
+
+// 예전 버전이 storage.local 에 둔 AI API 키를 비밀 보관소(확장 출처의 IndexedDB)로 옮긴다. 옮길 것이 없으면 아무것도 하지 않는다.
+migrateApiKey().catch((e) => console.warn('[ClickGuide] API 키를 옮기지 못했습니다:', e));
 
 // 녹화 중에 서비스 워커가 다시 떴다면 탭 감시를 이어서 붙인다.
 // (cachedState 는 건드리지 않는다 — onStartup 의 초기화와 엇갈려 옛 상태가 남지 않도록)

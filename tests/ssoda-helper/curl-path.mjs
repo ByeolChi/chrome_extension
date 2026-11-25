@@ -21,6 +21,14 @@ const server = http.createServer((req, res) => {
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     seen.push({ url: req.url, headers: req.headers, body });
+    if (req.url === '/sse') {
+      // 끝나지 않는 SSE: 0.2초마다 이벤트 하나
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      let i = 0;
+      const t = setInterval(() => res.write(`data: {"i":${++i}}\n\n`), 200);
+      res.on('close', () => clearInterval(t));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
   });
@@ -97,6 +105,22 @@ const ok = parseCurl(`curl -X POST http://127.0.0.1:${PORT}/ok -H 'X-A: 1' --jso
 r = await run(ok);
 check('정상 요청은 그대로 실행됨', r.status === 200 && seen[0]?.headers['x-a'] === '1' && seen[0]?.body === '{"id":1234567890123456789}',
   `상태 ${r.status ?? r.error}, X-A=${seen[0]?.headers['x-a']}, body=${seen[0]?.body}`);
+
+// 6) SSE 를 받다가 --max-time 에 걸리면(curl 종료 코드 28) 오류가 아니라 받은 데까지 응답으로 (브라우저로 보낼 때와 같게)
+const sseReq = parseCurl(`curl http://127.0.0.1:${PORT}/sse`).request;
+sseReq.settings.timeout = 1500; // --max-time 2
+let s;
+try {
+  const p = prepareRequest(sseReq, { forCurl: true, allowBodyForGet: true });
+  const res = await runCurl(p, curlOptsOf(sseReq), {});
+  s = {
+    status: res.status, end: res.stream && res.stream.end, n: res.stream ? res.stream.events.length : -1, exit: res.terminal && res.terminal.exitCode,
+    warned: (res.warnings || []).some((w) => /curl 이 스트림을 끊었습니다/.test(w)),
+  };
+} catch (e) {
+  s = { error: e.message, code: e.code };
+}
+check('SSE 를 받다가 --max-time 에 걸리면 받은 이벤트까지 응답으로', s.status === 200 && s.end === 'timeout' && s.n >= 3 && s.exit === 28 && s.warned, JSON.stringify(s));
 
 server.close();
 fs.rmSync(tmp, { recursive: true, force: true });
