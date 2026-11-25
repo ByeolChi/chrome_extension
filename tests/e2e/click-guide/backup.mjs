@@ -229,7 +229,16 @@ try {
   const first = after.sessions.find((s) => s.name === '주문 조회');
   const ed = await B.open(`src/editor/editor.html?session=${first.id}`);
   await sleep(800);
-  const view = await ed.ev(`(() => { const imgs = [...document.querySelectorAll('li.step img')]; return { steps: document.querySelectorAll('li.step').length, loaded: imgs.filter((i) => i.complete && i.naturalWidth > 0).length, title: (document.querySelector('#guide-title') || {}).value }; })()`);
+  // 스크린샷은 편집기의 캔버스에 그린다 (내보내기와 같은 코드) — 투명하지 않은 픽셀이 있으면 그려진 것
+  const view = await ed.ev(`(() => {
+    const drawn = [...document.querySelectorAll('li.step .shot-canvas')].filter((c) => {
+      if (c.width < 10) return false;
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      for (let i = 3; i < d.length; i += 4 * 97) if (d[i] > 0) return true;
+      return false;
+    }).length;
+    return { steps: document.querySelectorAll('li.step').length, loaded: drawn, title: (document.querySelector('#guide-title') || {}).value };
+  })()`);
   check('편집기에서 가져온 가이드가 열리고 스크린샷이 보임', view.steps === 3 && view.loaded === 3 && view.title === '주문 조회', JSON.stringify(view));
   await B.close();
 } catch (e) {

@@ -23,7 +23,7 @@ main { max-width: 860px; margin: 0 auto; padding: 22px 16px 120px; }
 .empty h2 { font-size: 17px; margin-bottom: 8px; }
 
 .doc-head { padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
-#guide-title { font-size: 22px; font-weight: 680; border: none; background: none; padding: 2px 0; letter-spacing: -.02em; }
+#guide-title { font-size: 22px; font-weight: 680; border: none; background: none; color: var(--text); padding: 2px 0; letter-spacing: -.02em; }
 #guide-title:focus-visible { outline-offset: 4px; }
 #guide-desc { border: none; background: none; padding: 0; min-height: 40px; color: var(--text-muted); }
 #stats { margin: 0; }
@@ -37,7 +37,7 @@ li.step.is-note { border-left: 3px solid var(--warn); }
   font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
 }
 .num::before { content: counter(st); }
-.s-title { font-size: 15px; font-weight: 600; border: none; background: none; padding: 4px 6px; border-radius: 6px; }
+.s-title { font-size: 15px; font-weight: 600; border: none; background: none; color: var(--text); padding: 4px 6px; border-radius: 6px; }
 .s-title:hover, .s-desc:hover { background: var(--bg-sunken); }
 .tools { display: flex; gap: 2px; margin-left: auto; opacity: .35; transition: opacity .12s; flex: none; }
 li.step:hover .tools, li.step:focus-within .tools { opacity: 1; }
@@ -45,26 +45,38 @@ li.step:hover .tools, li.step:focus-within .tools { opacity: 1; }
 .s-desc { border: none; background: none; padding: 4px 6px; border-radius: 6px; min-height: 0; color: var(--text-muted); }
 
 .shot { position: relative; border-radius: 9px; overflow: hidden; border: 1px solid var(--border); line-height: 0; }
-.shot img { width: 100%; height: auto; display: block; }
-.shot.redacting { cursor: crosshair; }
-.overlay { position: absolute; inset: 0; pointer-events: none; }
-.hl-box { position: absolute; border: 3px solid var(--hl, #ff3b30); border-radius: 6px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--hl, #ff3b30) 22%, transparent); }
-.dim { position: absolute; inset: 0; background: rgba(0,0,0,.3); }
-.dim-hole { position: absolute; background: transparent; box-shadow: 0 0 0 9999px rgba(0,0,0,.3); border-radius: 6px; }
-.rd-box {
-  position: absolute; backdrop-filter: blur(9px); background: rgba(120,120,130,.18);
-  border: 1px dashed rgba(255,255,255,.55); border-radius: 4px; pointer-events: auto;
+.shot-canvas { display: block; width: 100%; touch-action: none; }
+.shot-canvas:focus { outline: none; }
+.shot-canvas.editing { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* 그리기 도구 막대 */
+.draw-bar {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-raised);
+  position: sticky; top: 56px; z-index: 6; box-shadow: var(--shadow);
 }
-.rd-box.solid { backdrop-filter: none; background: #000; border-color: rgba(255,255,255,.35); border-radius: 0; }
-.rd-box button {
-  position: absolute; top: -9px; right: -9px; width: 20px; height: 20px; padding: 0; border-radius: 50%;
-  font-size: 12px; line-height: 1; background: var(--danger); color: #fff; border: none; cursor: pointer;
+.draw-tools { display: flex; gap: 2px; flex-wrap: wrap; }
+.draw-tools button { padding: 4px 7px; }
+.draw-tools button.active { background: var(--accent); color: #fff; }
+.draw-colors { display: flex; gap: 4px; align-items: center; padding: 0 4px; }
+.draw-colors button { width: 18px; height: 18px; min-width: 0; padding: 0; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); }
+.draw-colors button.active { box-shadow: 0 0 0 2px var(--bg-raised), 0 0 0 4px var(--accent); }
+.ann-text-input {
+  position: absolute; z-index: 3; min-width: 180px; max-width: 60%; line-height: 1.4;
+  font: 600 14px/1.4 -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  padding: 6px 8px; border: 2px solid var(--accent); border-radius: 6px; background: var(--bg); color: var(--text);
+  resize: none; box-shadow: var(--shadow);
 }
-.rd-draft { position: absolute; border: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 4px; }
-.redact-hint {
-  position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
-  background: rgba(17,17,20,.86); color: #fff; font-size: 12px; line-height: 1.4;
-  padding: 5px 11px; border-radius: 999px; pointer-events: none;
+
+/* 단계 순서 바꾸기·더 보기 */
+.t-drag { cursor: grab; }
+li.step.dragging { opacity: .45; }
+li.step.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+li.step.drop-after { box-shadow: 0 3px 0 var(--accent); }
+.step-menu .dropdown { min-width: 230px; z-index: 20; }
+.toast .toast-act {
+  margin-left: 12px; padding: 2px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.55); cursor: pointer;
 }
 .s-meta { margin: 0; word-break: break-all; }
 

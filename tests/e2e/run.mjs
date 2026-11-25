@@ -12,6 +12,7 @@ const SUITES = {
     { file: 'click-guide/e2e.mjs' },
     { file: 'click-guide/backup.mjs', label: '전체 백업·ID 고정' },
     { file: 'click-guide/redact.mjs', label: '가리기' },
+    { file: 'click-guide/editor.mjs', label: '편집기 그리기·단계 다루기' },
   ],
   'cleanshot-picker': [
     { file: 'cleanshot-picker/e2e.mjs', env: { DPR: '1' }, label: '화면 배율 1' },
