@@ -69,6 +69,7 @@ const server = http.createServer((req, res) => {
       return res.end('{"data":{"token":"tok-xyz","id":1234567890123456789},"items":[{"name":"kim"},{"name":"lee"}]}');
     }
     if (u.pathname === '/me') return json({ auth: req.headers.authorization || null, id: u.searchParams.get('id') });
+    if (u.pathname === '/fail-me') return json({ error: 'boom' }, 500);
     json({ path: u.pathname });
   });
 });
@@ -591,6 +592,85 @@ await check('Tests 탭 화면: 줄 추가, 대상·비교에 따라 식·기대�
   assert(/Tests\(3\)/.test(r.badge.replace(/\s/g, '')), r.badge);
   assert(/응답을 받지 못해 실행하지 않았습니다/.test(r.skipped || ''), String(r.skipped));
   assert(r.dirty, '고친 요청이 변경됨으로 표시되지 않음');
+});
+
+await check('러너: 데이터 파일(CSV) 행마다 컬렉션을 차례로 실행, 로그인 토큰·데이터 값이 다음 요청에 쓰이고 실패를 모음, 보고서·실패하면 멈춤', async () => {
+  seen.length = 0;
+  // 데이터 파일은 화면의 파일 선택 칸으로 넣는다 (CDP DOM.setFileInputFiles)
+  const csvPath = path.join(PROFILE, 'runner-data.csv');
+  fs.writeFileSync(csvPath, 'uid,memo\r\n1001,"첫, 번째"\r\n1234567890123456789,둘째\r\n');
+  const setup = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const R = (id, name, method, url, tests, headers = []) => ({ id, type: 'request', name, request: { method, url, headers, tests } });
+    app.store.state.collections.push({
+      id: 'col_run', name: '러너 시험', description: '', auth: { type: 'none' }, variables: [{ id: 'cv1', key: 'base', value: base, enabled: true, description: '' }],
+      items: [
+        R('run_login', '로그인', 'POST', '{{base}}/login', { extract: [{ name: 'token', from: 'json', path: '$.data.token', scope: 'env' }], assert: [{ target: 'status', op: 'eq', value: '200' }] }),
+        { id: 'run_fld', type: 'folder', name: '내 정보', items: [
+          R('run_me', '조회', 'GET', '{{base}}/me?id={{uid}}', { extract: [], assert: [{ target: 'json', path: '$.auth', op: 'eq', value: 'Bearer {{token}}' }, { target: 'json', path: '$.id', op: 'eq', value: '{{uid}}' }] },
+            [{ key: 'Authorization', value: 'Bearer {{token}}', enabled: true }]),
+          R('run_fail', '깨진 API', 'GET', '{{base}}/fail-me', { extract: [], assert: [{ target: 'status', op: 'eq', value: '200' }] }),
+        ] },
+      ],
+    });
+    app.store.changed('collections');
+    const env = app.createEnvironment('러너 환경');
+    app.setActiveEnv(env.id);
+    const histBefore = app.store.state.history.length;
+    app.openRunner('col_run');
+    await sleep(300);
+    return { histBefore, tabId: app.activeTab().id, type: app.activeTab().type };
+  }, BASE);
+  assert(setup.type === 'runner', '러너 탭이 열리지 않음: ' + setup.type);
+  const { root } = await send('DOM.getDocument', { depth: -1 }, page.sessionId);
+  const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector: '.runner-side input[type=file]' }, page.sessionId);
+  await send('DOM.setFileInputFiles', { files: [csvPath], nodeId }, page.sessionId);
+  const r = await ev(page, async (tabId, histBefore) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const view = app.views.get(tabId);
+    for (let i = 0; i < 50 && !view.data; i++) await sleep(50);
+    const dataText = view.el.querySelector('.runner-data') ? view.el.querySelector('.runner-data').innerText : '';
+    view.el.querySelector('.runner-go').click();
+    for (let i = 0; i < 200 && (view.running || !view.report); i++) await sleep(50);
+    const m = await import('/js/runner.js');
+    const rep = view.report;
+    const junit = m.toJUnit(rep);
+    const html = m.toHtml(rep);
+    const out = {
+      dataText,
+      runs: rep.runs.map((x) => [x.iteration, x.item.id, x.status, x.failed, x.asserts.map((a) => (a.ok ? '1' : '0')).join('')]),
+      summary: view.el.querySelector('.runner-summary').innerText,
+      failRows: view.el.querySelectorAll('.runner-row.fail').length,
+      groups: [...view.el.querySelectorAll('.runner-group-head')].map((g) => g.innerText),
+      junitHead: junit.split('\n')[1],
+      junitSuites: (junit.match(/<testsuite /g) || []).length,
+      htmlHasSecret: html.includes('tok-xyz') || html.includes('1234567890123456789') || junit.includes('tok-xyz') || junit.includes('1234567890123456789'),
+      junitTemplate: junit.includes('$.auth = Bearer {{token}}') && junit.includes('$.id = {{uid}}'),
+      histAfter: app.store.state.history.length - histBefore,
+    };
+    // 실패하면 멈춤: 첫 반복의 셋째 요청에서 멈춤
+    view.opts.stopOnFailure = true;
+    view.build();
+    view.el.querySelector('.runner-go').click();
+    for (let i = 0; i < 200 && (view.running || !view.report || view.report === rep); i++) await sleep(50);
+    out.stop = { runs: view.report.runs.length, stoppedOnFailure: view.report.stoppedOnFailure, text: view.el.querySelector('.runner-summary').innerText };
+    return out;
+  }, setup.tabId, setup.histBefore);
+  const mePaths = seen.filter((s) => s.path.startsWith('/me')).map((s) => `${s.path} ${s.headers.authorization}`);
+  assert(/runner-data\.csv/.test(r.dataText) && /행 2개/.test(r.dataText) && /\{\{uid\}\}/.test(r.dataText), r.dataText);
+  assert(JSON.stringify(r.runs) === JSON.stringify([[0, 'run_login', 200, false, '1'], [0, 'run_me', 200, false, '11'], [0, 'run_fail', 500, true, '0'], [1, 'run_login', 200, false, '1'], [1, 'run_me', 200, false, '11'], [1, 'run_fail', 500, true, '0']]), JSON.stringify(r.runs));
+  assert(mePaths[0] === '/me?id=1001 Bearer tok-xyz' && mePaths[1] === '/me?id=1234567890123456789 Bearer tok-xyz', JSON.stringify(mePaths));
+  assert(/요청 6/.test(r.summary) && /실패 2/.test(r.summary) && /확인 6\/8 통과/.test(r.summary) && !/null|undefined/.test(r.summary) && r.failRows === 2, r.summary + ' / fail rows ' + r.failRows);
+  assert(r.groups.length === 2 && /반복 1/.test(r.groups[0]) && /uid=1001/.test(r.groups[0]) && /memo=첫, 번째/.test(r.groups[0]), JSON.stringify(r.groups));
+  // testcase: 반복마다 로그인(꺼내기 1·확인 1) + 조회(확인 2) + 깨진 API(확인 1) = 5, 두 번
+  assert(/tests="10" failures="2" errors="0"/.test(r.junitHead) && r.junitSuites === 6, r.junitHead + ' suites=' + r.junitSuites);
+  assert(!r.htmlHasSecret, '보고서에 토큰이나 데이터 값이 들어감');
+  assert(r.junitTemplate, '보고서의 확인 설명에 변수를 바꾸기 전의 식이 없음');
+  assert(r.histAfter === 0, '러너 실행이 히스토리에 남음: ' + r.histAfter);
+  assert(r.stop.runs === 3 && r.stop.stoppedOnFailure && /실패해서 멈춤/.test(r.stop.text), JSON.stringify(r.stop));
+  return `${r.summary.replace(/\s+/g, ' ')} · 실패하면 멈춤: ${r.stop.runs}개에서 멈춤`;
 });
 
 await check('기본 타임아웃 60초: 예전 설정의 0(무제한)은 다시 열 때 한 번 60초로 바꾸고 알림', async () => {

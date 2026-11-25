@@ -9,6 +9,7 @@ import { Sidebar } from './ui/sidebar.js';
 import { RequestView } from './ui/request-view.js';
 import { EnvironmentView } from './ui/env-view.js';
 import { CollectionView } from './ui/collection-view.js';
+import { RunnerView } from './ui/runner-view.js';
 import { CodePanel } from './ui/code-panel.js';
 import { openImport, saveAsDialog, askSaveChanges, openSettings, openCookieManager, openShortcuts, envQuickLook, openSearch, openCurlHelper } from './ui/dialogs.js';
 import { generateCode } from './codegen.js';
@@ -293,6 +294,7 @@ function tabEl(t, active) {
   let lead;
   if (t.type === 'request') lead = h('span.tab-method.' + methodClass(t.draft.method), methodShort(t.draft.method));
   else if (t.type === 'environment') lead = icon(t.refId === 'globals' ? 'globe' : 'layers', 14, 'tab-ic');
+  else if (t.type === 'runner') lead = icon('play', 14, 'tab-ic');
   else lead = icon('collections', 14, 'tab-ic');
   const close = h('button.tab-close', { title: '닫기 (Alt+W)' }, icon('x', 13));
   close.addEventListener('click', (e) => {
@@ -391,6 +393,7 @@ function getView(tab) {
   if (v) return v;
   if (tab.type === 'request') v = new RequestView(tab);
   else if (tab.type === 'environment') v = new EnvironmentView(tab);
+  else if (tab.type === 'runner') v = new RunnerView(tab);
   else v = new CollectionView(tab);
   app.views.set(tab.id, v);
   return v;

@@ -693,6 +693,9 @@ export function runAsserts(rows, ctx, resolve = (s) => s) {
     .filter((x) => x.enabled)
     .map((x) => {
       const base = { id: x.id, target: x.target, path: NO_EXPR.has(x.target) ? '' : resolve(x.path), op: x.op, expected: NO_EXPECTED.has(x.op) ? '' : resolve(x.value) };
+      // 변수를 바꾸기 전의 식·기대값 (내보내는 보고서에는 토큰 같은 변수 값 대신 이것을 쓴다)
+      base.tplPath = NO_EXPR.has(x.target) ? '' : x.path;
+      base.tplExpected = NO_EXPECTED.has(x.op) ? '' : x.value;
       let actual;
       try {
         actual = findValue(x.target, base.path, ctx);

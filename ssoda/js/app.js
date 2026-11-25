@@ -69,6 +69,8 @@ export const app = {
     const env = this.activeEnv();
     const col = tab && tab.type === 'request' ? this.collectionOfTab(tab) : tab && tab.type === 'collection' ? this.findCollection(tab.refId) : null;
     return buildScope([
+      // 러너의 데이터 파일 행 (Postman 처럼 환경보다 앞)
+      ...(tab && tab.dataVars ? [{ name: 'data', vars: tab.dataVars }] : []),
       { name: 'environment', vars: env ? env.variables : [] },
       { name: 'collection', vars: col ? col.variables : [] },
       { name: 'globals', vars: store.state.globals.variables },
@@ -165,6 +167,15 @@ export const app = {
     const existing = this.tabs.find((t) => t.type === 'collection' && t.refId === itemId);
     if (existing) return this.setActive(existing.id);
     return this.addTab({ id: uid('tab'), type: 'collection', refId: itemId, name: it.name, sub: 'overview' });
+  },
+
+  // 컬렉션·폴더의 러너 탭 (ui/runner-view.js)
+  openRunner(refId) {
+    const hit = findInCollections(store.state.collections, refId);
+    if (!hit || hit.item.type === 'request') return;
+    const existing = this.tabs.find((t) => t.type === 'runner' && t.refId === refId);
+    if (existing) return this.setActive(existing.id);
+    return this.addTab({ id: uid('tab'), type: 'runner', refId, name: `러너 · ${hit.item.name}` });
   },
 
   openEnvironment(envId) {
@@ -346,29 +357,56 @@ export const app = {
     const ctrl = new AbortController();
     this.controllers.set(tab.id, ctrl);
     view && view.setLoading(true, engine);
+    let result;
+    try {
+      result = await this.execute(tab, {
+        engine,
+        ssh,
+        env,
+        signal: ctrl.signal,
+        onUnresolved: (names) => this.ui.toast(`정의되지 않은 변수: ${names.map((v) => `{{${v}}}`).join(', ')}`, 'error', 4000),
+        onWait: (host) => this.views.get(tab.id)?.setWaiting?.(host),
+        // SSE 응답은 받는 대로 보여 준다 (멈춤 = 취소 버튼, 그때까지 받은 것이 결과로 남음)
+        onStream: (s) => this.views.get(tab.id)?.showStream?.(s),
+      });
+    } finally {
+      this.controllers.delete(tab.id);
+    }
+    // Tests 탭: 응답값을 변수로 꺼내고 확인한다 (보낸 시점의 요청 기준)
+    if (countTests(sentDraft.tests)) result.checks = this.runChecks(tab, sentDraft.tests, result);
+    this.responses.set(tab.id, result);
+    this.addHistory(tab, result, sentDraft);
+    const v = this.views.get(tab.id);
+    if (v) {
+      v.setLoading(false);
+      v.showResponse(result);
+    }
+    return result;
+  },
+
+  /**
+   * 요청 하나를 보내고 결과를 돌려준다. 화면은 건드리지 않고, 실패도 예외 대신 결과(ok:false)로 돌려준다.
+   * send(요청 탭)와 러너가 같이 쓴다. tab 은 화면의 탭이 아니어도 된다:
+   *   { draft, itemId | contextId (변수·인증 상속 기준), dataVars (러너 데이터 행, 변수 중 가장 앞) }
+   * ssh: sshConfigFor() 로 미리 받은 SSH 터널 설정 (env 가 터널을 쓰면 engine 은 'curl')
+   */
+  async execute(tab, { engine, ssh = null, env = this.activeEnv(), signal, onWait, onStream, onUnresolved } = {}) {
+    engine = engine || this.engineOf(tab);
     let prepared;
     let result;
     let command = '';
     try {
       prepared = await this.buildPrepared(tab, { engine });
-      if (prepared.unresolved.length) {
-        this.ui.toast(`정의되지 않은 변수: ${prepared.unresolved.map((v) => `{{${v}}}`).join(', ')}`, 'error', 4000);
-      }
+      if (prepared.unresolved.length && onUnresolved) onUnresolved(prepared.unresolved);
       if (engine === 'curl') {
         command = this.curlCommandFor(tab, prepared, { shell: 'bash', multiline: true, exact: true });
-        const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal: ctrl.signal, curlPath: this.settings.curlPath || '', command, ssh });
+        const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal, curlPath: this.settings.curlPath || '', command, ssh });
         if (ssh) {
           await this.ensureSshHelper(ssh);
           result = await this.withHostKeyTrust(env, ssh, run);
         } else result = await run();
       } else {
-        result = await sendRequest(prepared, {
-          signal: ctrl.signal,
-          removeOrigin: this.settings.removeOrigin,
-          onWait: (host) => this.views.get(tab.id)?.setWaiting?.(host),
-          // SSE 응답은 받는 대로 보여 준다 (멈춤 = 취소 버튼, 그때까지 받은 것이 결과로 남음)
-          onStream: (s) => this.views.get(tab.id)?.showStream?.(s),
-        });
+        result = await sendRequest(prepared, { signal, removeOrigin: this.settings.removeOrigin, onWait, onStream });
       }
       this.captureCookies(result);
     } catch (err) {
@@ -386,17 +424,6 @@ export const app = {
       };
       // 비밀번호가 틀렸다면 다음 전송 때 다시 묻는다
       if (err.code === 'SSH_AUTH' && env) this.forgetSshSecret(env.id);
-    } finally {
-      this.controllers.delete(tab.id);
-    }
-    // Tests 탭: 응답값을 변수로 꺼내고 확인한다 (보낸 시점의 요청 기준)
-    if (countTests(sentDraft.tests)) result.checks = this.runChecks(tab, sentDraft.tests, result);
-    this.responses.set(tab.id, result);
-    this.addHistory(tab, result, sentDraft);
-    const v = this.views.get(tab.id);
-    if (v) {
-      v.setLoading(false);
-      v.showResponse(result);
     }
     return result;
   },
@@ -671,13 +698,13 @@ export const app = {
     hit.item.name = name;
     // 열린 탭 이름 동기화
     for (const t of this.tabs) {
-      if ((t.type === 'request' && t.itemId === id) || (t.type === 'collection' && t.refId === id)) {
+      if ((t.type === 'request' && t.itemId === id) || ((t.type === 'collection' || t.type === 'runner') && t.refId === id)) {
         if (t.type === 'request') {
           const wasDirty = t.dirty;
           t.name = name;
           t.savedSig = requestSignature(name, hit.item.request);
           t.dirty = wasDirty ? requestSignature(t.name, t.draft) !== t.savedSig : false;
-        } else t.name = name;
+        } else t.name = t.type === 'runner' ? `러너 · ${name}` : name;
         this.ui.refreshView && this.ui.refreshView(t);
       }
     }
@@ -706,7 +733,7 @@ export const app = {
         t.itemId = null;
         t.dirty = true;
         t.savedSig = '';
-      } else if (t.type === 'collection' && ids.has(t.refId)) {
+      } else if ((t.type === 'collection' || t.type === 'runner') && ids.has(t.refId)) {
         this.closeTab(t.id, { force: true });
       }
     }
