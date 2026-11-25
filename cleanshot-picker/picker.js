@@ -41,8 +41,13 @@
     { id: 'resize', key: '3', label: '크기',   cursor: 'crosshair' },
     { id: 'text',   key: '4', label: '텍스트', cursor: 'text' },
     { id: 'mask',   key: '5', label: '가리기', cursor: 'crosshair' },
-    { id: 'crop',   key: '6', label: '영역',   cursor: 'crosshair' }
+    { id: 'crop',   key: '6', label: '영역',   cursor: 'crosshair' },
+    { id: 'box',    key: '7', label: '강조',   cursor: 'crosshair' },
+    { id: 'spot',   key: '8', label: '스포트라이트', cursor: 'crosshair' }
   ];
+
+  // 클릭으로 요소, Shift+드래그(또는 빈 곳 드래그)로 영역을 고르는 도구
+  const AREA_TOOLS = new Set(['mask', 'crop', 'box', 'spot']);
 
   const HANDLE_DIRS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
   const HANDLE_CURSOR = {
@@ -63,6 +68,8 @@
     history: [],             // { kind, el, undo, t }
     masks: [],               // { box, anchor, size, view, last } — "5 가리기" 참고
     crop: null,              // { anchor, size, view, last } — "6 영역" 참고. 있으면 그 부분만 저장·복사
+    notes: [],               // { box, anchor, size, view, last } — "7 강조" 빨간 테두리
+    spot: null,              // { anchor, size, view, last } — "8 스포트라이트" 바깥을 어둡게 (하나만)
     drag: null,
     editing: null,
     editSnapshot: null,
@@ -94,6 +101,13 @@
       /* 마스크 레이어 — 캡처에 남는다 */
       .masks { position: absolute; inset: 0; pointer-events: none; }
       .mask { position: absolute; background: #000; }
+
+      /* 주석 레이어 (7 강조·8 스포트라이트) — 보이는 화면 캡처에 그대로 찍힌다 */
+      .notes { position: absolute; inset: 0; pointer-events: none; }
+      .note-box { position: absolute; border: 3px solid #ff3b30; border-radius: 6px; box-shadow: 0 0 0 1px rgba(255,255,255,0.85); }
+      .note-spot { position: absolute; border-radius: 4px; box-shadow: 0 0 0 200vmax rgba(0,0,0,0.5); display: none; }
+      /* 페이지 전체 캡처에는 아직 넣지 않는다 (장마다 같은 자리에 되풀이되지 않게 숨긴다) */
+      :host(.capturing-full) .notes { display: none; }
 
       /* UI 레이어 — 캡처 직전에 사라진다 */
       .ui { position: absolute; inset: 0; pointer-events: none; cursor: default; }
@@ -217,6 +231,7 @@
     </style>
 
     <div class="masks"></div>
+    <div class="notes"><div class="note-spot"></div></div>
 
     <div class="ui">
       <div class="crop"></div>
@@ -245,6 +260,8 @@
 
   const ui = {
     masks: root.querySelector('.masks'),
+    notes: root.querySelector('.notes'),
+    spot: root.querySelector('.note-spot'),
     layer: root.querySelector('.ui'),
     hl: root.querySelector('.hl'),
     tag: root.querySelector('.tag'),
@@ -1266,9 +1283,72 @@
   function endMarquee(d) {
     ui.marquee.style.display = 'none';
     if (d.moved && d.rect && d.rect.w > 4 && d.rect.h > 4) {
-      if (state.tool === 'crop') setCrop(regionAnchor(d.rect), { w: d.rect.w, h: d.rect.h });
-      else addMask(regionAnchor(d.rect), { w: d.rect.w, h: d.rect.h });
+      const size = { w: d.rect.w, h: d.rect.h };
+      if (state.tool === 'crop') setCrop(regionAnchor(d.rect), size);
+      else if (state.tool === 'box') addNote(regionAnchor(d.rect), size);
+      else if (state.tool === 'spot') setSpot(regionAnchor(d.rect), size);
+      else addMask(regionAnchor(d.rect), size);
     }
+  }
+
+  /* ============================================================ 7 강조 · 8 스포트라이트
+   * 가리기 박스와 같은 기준(요소·영역)으로 붙어 따라가는 주석. 주석 레이어는 캡처 직전에도 남아 화면 그대로 찍힌다.
+   *   강조 — 빨간 테두리. 요소면 요소 바깥으로 3px 띄워 그린다. 여러 개.
+   *   스포트라이트 — 고른 곳 바깥을 어둡게. 하나만 두고 다시 고르면 바뀐다.
+   * 작업 스택에 들어가 Ctrl+Z·전체 복원으로 없앤다. 페이지 전체 캡처에는 아직 넣지 않는다. */
+
+  function addNote(anchor, size) {
+    const box = document.createElement('div');
+    box.className = 'note-box';
+    ui.notes.appendChild(box);
+    const n = { box, anchor, size, view: null, last: null };
+    state.notes.push(n);
+    layoutMasks();
+    push('note', null, () => {
+      const i = state.notes.indexOf(n);
+      if (i >= 0) state.notes.splice(i, 1);
+      n.box.remove();
+    });
+  }
+
+  function setSpot(anchor, size) {
+    const prev = state.spot;
+    state.spot = { anchor, size, view: null, last: null };
+    layoutMasks();
+    push('spot', null, () => { state.spot = prev; layoutMasks(); });
+  }
+
+  function pickTarget(el) {
+    if (!usable(el)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    setCandidate(null);
+    return true;
+  }
+
+  function placeAt(el, r, out) {
+    const s = el.style;
+    if (!r) { s.display = 'none'; return; }
+    s.display = 'block';
+    s.left = (r.x - out) + 'px';
+    s.top = (r.y - out) + 'px';
+    s.width = (r.w + out * 2) + 'px';
+    s.height = (r.h + out * 2) + 'px';
+  }
+
+  function layoutNotes() {
+    for (const n of state.notes) {
+      let r = null;
+      try { r = maskRect(n); } catch (_) { r = n.view; }
+      n.view = r;
+      placeAt(n.box, r, n.size ? 0 : 3);   // 요소를 감쌀 때는 바깥으로 띄워 내용을 가리지 않는다
+    }
+    const sp = state.spot;
+    if (!sp) { ui.spot.style.display = 'none'; return; }
+    let r = null;
+    try { r = maskRect(sp); } catch (_) { r = sp.view; }
+    sp.view = r;
+    placeAt(ui.spot, r, sp.size ? 0 : 4);
   }
 
   /* ============================================================ 6 영역
@@ -1311,6 +1391,7 @@
 
   function layoutMasks() {
     layoutCrop();
+    layoutNotes();
     for (const m of state.masks) {
       let r = null;
       try { r = maskRect(m); } catch (_) { r = m.view; } // 계산이 깨지면 직전 자리를 지킨다
@@ -1376,8 +1457,8 @@
 
     const p = pt(e);
     if (state.tool === 'move') startMove(p);
-    else if ((state.tool === 'mask' || state.tool === 'crop') && e.shiftKey) startMarquee(p);
-    else if ((state.tool === 'mask' || state.tool === 'crop') && !state.candidate) startMarquee(p);
+    else if (AREA_TOOLS.has(state.tool) && e.shiftKey) startMarquee(p);
+    else if (AREA_TOOLS.has(state.tool) && !state.candidate) startMarquee(p);
   }
 
   function onPointerUp(e) {
@@ -1406,6 +1487,12 @@
     else if (state.tool === 'text') startTextEdit(p.x, p.y);
     else if (state.tool === 'mask') maskElement(state.candidate || pickAt(p.x, p.y));
     else if (state.tool === 'crop') cropElement(state.candidate || pickAt(p.x, p.y));
+    else if (state.tool === 'box' || state.tool === 'spot') {
+      const el = state.candidate || pickAt(p.x, p.y);
+      if (!pickTarget(el)) return;
+      if (state.tool === 'box') addNote({ el }, null);
+      else setSpot({ el }, null);
+    }
   }
 
   function onKey(e) {
@@ -1648,7 +1735,8 @@
 
     let res;
     try {
-      toast('페이지 전체를 위에서부터 찍습니다 · Esc 로 멈춤', FULL_HINT_MS + 300);
+      const noNotes = state.notes.length || state.spot ? ' · 강조·스포트라이트는 넣지 않습니다' : '';
+      toast(`페이지 전체를 위에서부터 찍습니다 · Esc 로 멈춤${noNotes}`, FULL_HINT_MS + (noNotes ? 1500 : 300));
       await sleep(FULL_HINT_MS);
       host.classList.add('capturing', 'capturing-full');
       mountHost(); // 그사이 열린 dialog·popover 보다 위로

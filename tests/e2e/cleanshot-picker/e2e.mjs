@@ -156,6 +156,7 @@ const KEYS = {
   1: { code: 'Digit1', vk: 49, text: '1' }, 2: { code: 'Digit2', vk: 50, text: '2' },
   3: { code: 'Digit3', vk: 51, text: '3' }, 4: { code: 'Digit4', vk: 52, text: '4' },
   5: { code: 'Digit5', vk: 53, text: '5' }, 6: { code: 'Digit6', vk: 54, text: '6' },
+  7: { code: 'Digit7', vk: 55, text: '7' }, 8: { code: 'Digit8', vk: 56, text: '8' },
   Enter: { code: 'Enter', vk: 13, text: '\r' }, Escape: { code: 'Escape', vk: 27 },
   Tab: { code: 'Tab', vk: 9 }, ArrowUp: { code: 'ArrowUp', vk: 38 }, ArrowDown: { code: 'ArrowDown', vk: 40 },
   z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' },
@@ -484,7 +485,17 @@ const cases = {
     await move(10, 300);
     await sleep(100);
     await shot('region');
-    check('화면 세 장 저장', true);
+    await key('z', CTRL);
+    // 7 강조·8 스포트라이트
+    await key('7');
+    await click(center(fs2).x, center(fs2).y);
+    await key('8');
+    const ad = await rectMain('#textTarget');
+    await click(center(ad).x, center(ad).y);
+    await move(10, 300);
+    await sleep(100);
+    await shot('notes');
+    check('화면 네 장 저장', true);
   },
 
   /* 여러 요소에 걸친 영역은 예전처럼 문서 좌표에 붙는다 */
@@ -877,6 +888,58 @@ const cases = {
       await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, pageS).catch(() => {});
       await sleep(300);
     }
+  },
+
+  /* 7 강조·8 스포트라이트: 빨간 테두리는 요소 바깥에 찍히고, 스포트라이트는 고른 곳 밖만 어둡게, Ctrl+Z, 영역과 함께 */
+  async notes() {
+    const red = (p) => !!p && p[0] > 200 && p[1] < 110 && p[2] < 110;
+    await freshPage();
+    await activate();
+    await key('7');
+    const r = await rectMain('#flowSecret');
+    await click(center(r).x, center(r).y);
+    const a = await captureAndRead();
+    const edge = a.img ? pixel(a.img, Math.round((r.x - 2) * DPR), Math.round((r.y + r.h / 2) * DPR)) : null;
+    const inside = a.img ? pixel(a.img, Math.round((r.x + 4) * DPR), Math.round((r.y + r.h / 2) * DPR)) : null;
+    const outside = a.img ? pixel(a.img, Math.round((r.x - 12) * DPR), Math.round((r.y + r.h / 2) * DPR)) : null;
+    check('강조(7): 누른 요소 바깥에 빨간 테두리가 찍히고 요소 안과 더 바깥은 그대로', red(edge) && sameRgb(inside, [255, 0, 0]) && sameRgb(outside, [255, 255, 255]),
+      `edge=${edge} inside=${inside} outside=${outside}`);
+    await sleep(900);
+
+    await freshPage();
+    await activate();
+    await key('8');
+    await click(center(r).x, center(r).y);
+    const s = await captureAndRead();
+    const b = await rectMain('#banner');
+    const sIn = s.img ? pixel(s.img, Math.round((r.x + 4) * DPR), Math.round((r.y + r.h / 2) * DPR)) : null;
+    const sOut = s.img ? pixel(s.img, Math.round((b.x + b.w / 2) * DPR), Math.round((b.y + b.h / 2) * DPR)) : null;
+    check('스포트라이트(8): 고른 요소는 그대로, 바깥(배너)은 어둡게 찍힘', sameRgb(sIn, [255, 0, 0]) && !!sOut && sOut[2] > 90 && sOut[2] < 160 && sOut[1] < 90,
+      `in=${sIn} banner=${sOut}`);
+    await sleep(900);
+
+    await freshPage();
+    await activate();
+    await key('8');
+    await click(center(r).x, center(r).y);
+    await key('7');
+    await click(center(r).x, center(r).y);
+    const before = await iso(`[window.__cleanShot.state.notes.length, !!window.__cleanShot.state.spot]`);
+    await key('z', CTRL);
+    await key('z', CTRL);
+    const after = await iso(`[window.__cleanShot.state.notes.length, !!window.__cleanShot.state.spot]`);
+    check('Ctrl+Z 로 강조·스포트라이트를 차례로 없앰', JSON.stringify(before) === '[1,true]' && JSON.stringify(after) === '[0,false]', `${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+
+    // 영역과 함께: 강조 테두리가 잘라 낸 그림 안에 들어감
+    await key('7');
+    await click(center(r).x, center(r).y);
+    await key('6');
+    const M = 16;
+    await drag(r.x - M, r.y - M, r.x + r.w + M, r.y + r.h + M, SHIFT);
+    const c = await captureAndRead();
+    const cEdge = c.img ? pixel(c.img, Math.round((M - 2) * DPR), Math.round((M + r.h / 2) * DPR)) : null;
+    check('영역으로 잘라도 강조 테두리가 함께 들어감', !!c.img && red(cEdge), `${c.img ? `${c.img.width}×${c.img.height}` : 'no file'} edge=${cEdge}`);
+    await sleep(900);
   },
 
   /* 3 저장 실패 시 대체 경로 */
