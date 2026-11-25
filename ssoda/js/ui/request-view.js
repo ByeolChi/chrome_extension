@@ -15,6 +15,7 @@ import { curlOptsOf, parseExtraArgs, describeRemovedArgs, userAuthOpt } from '..
 import { highlight } from '../highlight.js';
 import { copyText } from '../util.js';
 import { formatJson } from '../json-format.js';
+import { CAPTURE_SOURCES, CAPTURE_SCOPES, ASSERT_TARGETS, ASSERT_OPS, NO_EXPR, NO_EXPECTED, VALUE_TYPES, newCapture, newAssert, countTests } from '../checks.js';
 import { app } from '../app.js';
 
 const SUBTABS = [
@@ -23,9 +24,14 @@ const SUBTABS = [
   ['headers', 'Headers'],
   ['body', 'Body'],
   ['cookies', 'Cookies'],
+  ['tests', 'Tests'],
   ['curl', 'cURL'],
   ['settings', 'Settings'],
 ];
+
+// Tests 탭 입력칸 예시
+const CAPTURE_HINT = { json: '$.data.token', header: 'X-Request-Id', cookie: 'SESSION', regex: '"token":"([^"]+)"' };
+const ASSERT_HINT = { json: '$.data.id', header: 'Content-Type', cookie: 'SESSION' };
 
 const RAW_LANGS = [
   ['json', 'JSON'],
@@ -357,6 +363,7 @@ export class RequestView {
       params: n(d.params),
       headers: n(d.headers),
       cookies: n(d.cookies),
+      tests: countTests(d.tests),
       curl: app.engineOf(this.tab) === 'curl',
       body: d.body.mode !== 'none',
       auth: d.auth.type !== 'inherit' && d.auth.type !== 'none',
@@ -394,6 +401,7 @@ export class RequestView {
       headers: () => this.paneHeaders(),
       body: () => this.paneBody(),
       cookies: () => this.paneCookies(),
+      tests: () => this.paneTests(),
       settings: () => this.paneSettings(),
       curl: () => this.paneCurl(),
     }[this.sub];
@@ -802,6 +810,96 @@ export class RequestView {
         h('button.link-btn', { onclick: () => app.ui.openCurlHelper() }, '설치하기'));
       chip.title = st ? st.message || '' : '';
     }
+  }
+
+  /* ---------------- Tests: 응답값 꺼내기(변수로 저장)·확인 ---------------- */
+  paneTests() {
+    const t = this.draft.tests;
+    const getScope = () => app.getScope(this.tab);
+    const select = (opts, value, onChange, label) => {
+      const s = h('select.select.kv-select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: v === value }, l)));
+      s.addEventListener('change', () => onChange(s.value));
+      return s;
+    };
+    const field = (value, placeholder, onInput, { vars = true } = {}) => {
+      if (vars) return varInput({ value, placeholder, getScope, onInput }).el;
+      const i = h('input.kv-input', { value, placeholder, spellcheck: 'false', 'aria-label': placeholder });
+      i.addEventListener('input', () => onInput(i.value));
+      return i;
+    };
+    const none = () => h('span.kv-na', { title: '필요 없음' }, '—');
+    const rowEl = (row, cells, list) => {
+      const r = h('div.kv-row' + (row.enabled ? '' : '.disabled'));
+      const cb = h('input.cb', { type: 'checkbox', checked: row.enabled, 'aria-label': '사용' });
+      cb.addEventListener('change', () => {
+        row.enabled = cb.checked;
+        r.classList.toggle('disabled', !row.enabled);
+        this.changed();
+      });
+      const del = h('button.icon-btn.kv-del', { title: '삭제', onclick: () => { list.splice(list.indexOf(row), 1); this.changed(); this.renderPane(); } }, icon('trash', 14));
+      r.append(h('div.kv-cell.kv-check', cb), ...cells.map((c) => (c.classList && c.classList.contains('kv-cell') ? c : h('div.kv-cell', c))), h('div.kv-cell.kv-act', del));
+      return r;
+    };
+    const head = (cols) => h('div.kv-row.kv-head', h('div.kv-cell'), cols.map((c) => h('div.kv-cell', c)), h('div.kv-cell'));
+
+    // 1) 변수로 꺼내기
+    const caps = t.extract.map((row) => {
+      const exprCell = h('div.kv-cell');
+      const drawExpr = () => {
+        clear(exprCell);
+        exprCell.appendChild(row.from === 'status' ? none() : field(row.path, CAPTURE_HINT[row.from] || '', (v) => { row.path = v; this.changed(); }));
+      };
+      drawExpr();
+      return rowEl(row, [
+        field(row.name, '변수 이름', (v) => { row.name = v; this.changed(); }, { vars: false }),
+        select(CAPTURE_SOURCES, row.from, (v) => { row.from = v; this.changed(); drawExpr(); }, '꺼낼 곳'),
+        exprCell,
+        select(CAPTURE_SCOPES, row.scope, (v) => { row.scope = v; this.changed(); }, '저장할 곳'),
+      ], t.extract);
+    });
+    const defaultScope = () => (app.activeEnv() ? 'env' : app.collectionOfTab(this.tab) ? 'collection' : 'global');
+    const addCap = h('button.link-btn', { onclick: () => { t.extract.push(newCapture({ scope: defaultScope() })); this.changed(); this.renderPane(); } }, icon('plus', 14), '꺼내기 추가');
+
+    // 2) 확인
+    const asts = t.assert.map((row) => {
+      const exprCell = h('div.kv-cell');
+      const valueCell = h('div.kv-cell');
+      const drawExpr = () => {
+        clear(exprCell);
+        exprCell.appendChild(NO_EXPR.has(row.target) ? none() : field(row.path, ASSERT_HINT[row.target] || '', (v) => { row.path = v; this.changed(); }));
+      };
+      const drawValue = () => {
+        clear(valueCell);
+        const ph = row.op === 'type' ? VALUE_TYPES.join(' · ') : row.op === 'matches' ? '^[0-9]+$' : row.target === 'status' ? '200' : row.target === 'time' ? '1000' : '기대값';
+        valueCell.appendChild(NO_EXPECTED.has(row.op) ? none() : field(row.value, ph, (v) => { row.value = v; this.changed(); }));
+      };
+      drawExpr();
+      drawValue();
+      return rowEl(row, [
+        select(ASSERT_TARGETS, row.target, (v) => { row.target = v; this.changed(); drawExpr(); drawValue(); }, '대상'),
+        exprCell,
+        select(ASSERT_OPS, row.op, (v) => { row.op = v; this.changed(); drawValue(); }, '비교'),
+        valueCell,
+      ], t.assert);
+    });
+    const addAst = h('button.link-btn', {
+      onclick: () => {
+        t.assert.push(t.assert.length ? newAssert({ target: 'json', op: 'eq' }) : newAssert({ target: 'status', op: 'eq', value: '200' }));
+        this.changed();
+        this.renderPane();
+      },
+    }, icon('plus', 14), '확인 추가');
+
+    const section = (title, sub, cls, cols, rows, add) => h('div.tests-sec',
+      h('div.kv-toolbar', h('div', h('span.kv-title', title), h('span.tests-sub', sub)), h('div.kv-tools', add)),
+      rows.length ? h('div.kv-table.' + cls, head(cols), rows) : h('div.tests-empty', '아직 없습니다. 오른쪽 위의 추가 버튼으로 만드세요.'));
+    return h('div.pane.tests-pane',
+      section('변수로 꺼내기', '응답에서 값을 꺼내 변수에 저장합니다. 다음 요청에서 {{이름}} 으로 씁니다.', 'cap-table', ['변수 이름', '꺼낼 곳', '식', '저장할 곳'], caps, addCap),
+      section('확인', '응답이 기대와 같은지 봅니다. 결과는 응답의 Tests 탭에 나옵니다.', 'ast-table', ['대상', '식', '비교', '기대값'], asts, addAst),
+      h('div.tests-help',
+        h('div', h('b', 'JSON 경로'), ' $.data.token · $.items[0].id · $.items[-1] · $.items[*].name · $..id · $.items[?(@.name == \'kim\')].id · $.items.length'),
+        h('div', h('b', '정규식'), ' 괄호로 묶은 첫 부분을 꺼냅니다. 예: "token":"([^"]+)"  (/…/i 처럼 쓰면 대소문자 무시)'),
+        h('div', h('b', '기대값'), ' 숫자는 숫자로 비교합니다(19자리 정수도 정확히). 앞뒤 공백까지 비교하려면 "따옴표" 로 감싸세요. 식과 기대값에 {{변수}} 를 쓸 수 있습니다.')));
   }
 
   paneSettings() {

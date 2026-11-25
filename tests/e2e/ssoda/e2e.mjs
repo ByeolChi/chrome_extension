@@ -63,6 +63,12 @@ const server = http.createServer((req, res) => {
     if (/^\/r(30[1-3]|30[78])$/.test(u.pathname)) return redirect(Number(u.pathname.slice(2)), '/method');
     if (u.pathname === '/loop') return redirect(302, '/loop?n=' + (Number(u.searchParams.get('n') || 0) + 1));
     if (u.pathname === '/method') return json({ method: req.method, body, ct: req.headers['content-type'] || null });
+    // Tests 탭 시험: 로그인 응답(토큰·19자리 ID·쿠키·헤더) → 다음 요청에 쓰기
+    if (u.pathname === '/login') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'SESSION=s-1; Path=/', 'X-Request-Id': 'r-7' });
+      return res.end('{"data":{"token":"tok-xyz","id":1234567890123456789},"items":[{"name":"kim"},{"name":"lee"}]}');
+    }
+    if (u.pathname === '/me') return json({ auth: req.headers.authorization || null, id: u.searchParams.get('id') });
     json({ path: u.pathname });
   });
 });
@@ -473,6 +479,118 @@ await check('SSE: 서버가 끝낸 스트림은 Events 보기로 (이름·id·�
   assert(/이벤트 3개/.test(r.summary) && /서버가 스트림을 끝냄/.test(r.summary) && /주석 1줄/.test(r.summary), r.summary);
   assert(/"big": 1234567890123456789/.test(r.pretty), r.pretty);
   return r.summary;
+});
+
+await check('Tests: 로그인 응답의 토큰·19자리 ID 를 변수로 꺼내 다음 요청에 쓰고, 확인 결과를 응답의 Tests 탭에 보여 줌', async () => {
+  seen.length = 0;
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const env = app.createEnvironment('E2E-tests');
+    app.setActiveEnv(env.id);
+    const login = app.newRequestTab({
+      method: 'POST', url: base + '/login',
+      tests: {
+        extract: [
+          { name: 'token', from: 'json', path: '$.data.token', scope: 'env' },
+          { name: 'orderId', from: 'json', path: '$.data.id', scope: 'env' },
+          { name: 'reqId', from: 'header', path: 'x-request-id', scope: 'global' },
+          { name: 'sess', from: 'cookie', path: 'SESSION', scope: 'collection' },
+          { name: 'second', from: 'json', path: "$.items[?(@.name == 'lee')].name", scope: 'env' },
+          { name: 'nothing', from: 'json', path: '$.nope', scope: 'env' },
+        ],
+        assert: [
+          { target: 'status', op: 'eq', value: '200' },
+          { target: 'json', path: '$.data.id', op: 'eq', value: '1234567890123456789' },
+          { target: 'header', path: 'Content-Type', op: 'contains', value: 'json' },
+          { target: 'time', op: 'lt', value: '60000' },
+          { target: 'json', path: '$.data.token', op: 'eq', value: '{{token}}' },
+          { target: 'json', path: '$.data.token', op: 'eq', value: 'wrong' },
+        ],
+      },
+    }, 'login');
+    await sleep(200);
+    const res = await app.send(login, { engine: 'browser' });
+    const view = app.views.get(login.id).response;
+    const tab = [...view.el.querySelectorAll('.subtab')].find((b) => /Tests/.test(b.textContent));
+    const badge = tab ? tab.querySelector('.count').className + ' ' + tab.textContent : '';
+    tab && tab.click();
+    await sleep(100);
+    const text = view.el.innerText;
+    const get = (vars, k) => (vars.find((v) => v.key === k) || {}).value;
+    const envNow = app.store.state.environments.find((e) => e.id === env.id);
+    // 히스토리 목록에도 확인 결과(통과/전체)
+    document.querySelector('.rail-item[data-panel="history"]').click();
+    await sleep(150);
+    const histBadge = [...document.querySelectorAll('.hist-row')].find((x) => /\/login/.test(x.textContent))?.querySelector('.hist-checks');
+    const histText = histBadge ? histBadge.className + ' ' + histBadge.textContent : '';
+    document.querySelector('.rail-item[data-panel="collections"]').click();
+    const me = app.newRequestTab({ url: base + '/me?id={{orderId}}', headers: [{ key: 'Authorization', value: 'Bearer {{token}}', enabled: true }] }, 'me');
+    await sleep(200);
+    const r2 = await app.send(me, { engine: 'browser' });
+    return {
+      checks: { passed: res.checks.passed, failed: res.checks.failed, caps: res.checks.captures.map((c) => [c.name, c.ok, c.value ?? c.error, c.savedTo || '', c.note || '']) },
+      env: { token: get(envNow.variables, 'token'), orderId: get(envNow.variables, 'orderId'), second: get(envNow.variables, 'second') },
+      globals: { reqId: get(app.store.state.globals.variables, 'reqId'), sess: get(app.store.state.globals.variables, 'sess') },
+      badge, text, histText, history: app.store.state.history.find((h) => /\/login$/.test(h.request.url))?.checks,
+      me: JSON.parse(new TextDecoder().decode(r2.body)),
+    };
+  }, BASE);
+  assert(r.checks.passed === 5 && r.checks.failed === 1, JSON.stringify(r.checks));
+  assert(JSON.stringify(r.checks.caps.map((c) => c.slice(0, 3))) === JSON.stringify([['token', true, 'tok-xyz'], ['orderId', true, '1234567890123456789'], ['reqId', true, 'r-7'], ['sess', true, 's-1'], ['second', true, 'lee'], ['nothing', false, '응답에서 값을 찾지 못했습니다']]), JSON.stringify(r.checks.caps));
+  assert(r.checks.caps[0][3] === '환경 "E2E-tests"' && r.checks.caps[2][3] === '글로벌' && /컬렉션에 저장된 요청이 아니어서 글로벌/.test(r.checks.caps[3][4]), JSON.stringify(r.checks.caps));
+  assert(r.env.token === 'tok-xyz' && r.env.orderId === '1234567890123456789' && r.env.second === 'lee' && r.globals.reqId === 'r-7' && r.globals.sess === 's-1', JSON.stringify({ env: r.env, globals: r.globals }));
+  assert(/ck-bad/.test(r.badge) && /\(5\/6\)/.test(r.badge), r.badge);
+  assert(/변수로 꺼낸 값 · 5\/6/.test(r.text) && /token = tok-xyz/.test(r.text) && /확인 · 5\/6 통과/.test(r.text) && /찾은 값: "tok-xyz"/.test(r.text), r.text.slice(0, 400));
+  assert(r.history && r.history.passed === 5 && r.history.failed === 1, JSON.stringify(r.history));
+  assert(/ck-bad/.test(r.histText) && /5\/6/.test(r.histText), '히스토리 목록의 확인 결과: ' + r.histText);
+  assert(r.me.auth === 'Bearer tok-xyz' && r.me.id === '1234567890123456789', JSON.stringify(r.me));
+  const got = seen.find((s) => s.path.startsWith('/me'));
+  assert(got && got.path === '/me?id=1234567890123456789', got && got.path);
+  return `확인 ${r.checks.passed}/${r.checks.passed + r.checks.failed}, 다음 요청 Authorization=${r.me.auth}`;
+});
+
+await check('Tests 탭 화면: 줄 추가, 대상·비교에 따라 식·기대값 칸이 바뀜, 개수 표시, 응답을 못 받으면 실행 안 함', async () => {
+  const r = await ev(page, async () => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const t = app.newRequestTab({ url: 'http://127.0.0.1:1/closed' }, 'tests-ui');
+    await sleep(200);
+    const view = app.views.get(t.id);
+    const root = view.el;
+    root.querySelector('.req-subtabs .subtab[data-sub="tests"]').click();
+    await sleep(50);
+    const buttons = () => [...root.querySelectorAll('.tests-pane .link-btn')];
+    buttons().find((b) => /꺼내기 추가/.test(b.textContent)).click();
+    await sleep(50);
+    const nameIn = root.querySelector('.cap-table .kv-row:not(.kv-head) .kv-input');
+    nameIn.value = 'code';
+    nameIn.dispatchEvent(new Event('input', { bubbles: true }));
+    const capSel = root.querySelector('.cap-table .kv-row:not(.kv-head) select');
+    capSel.value = 'status';
+    capSel.dispatchEvent(new Event('change', { bubbles: true }));
+    const capExprNa = !!root.querySelector('.cap-table .kv-row:not(.kv-head) .kv-na');
+    buttons().find((b) => /확인 추가/.test(b.textContent)).click();
+    await sleep(50);
+    buttons().find((b) => /확인 추가/.test(b.textContent)).click();
+    await sleep(50);
+    const rows = [...root.querySelectorAll('.ast-table .kv-row:not(.kv-head)')];
+    const opSel = rows[1].querySelectorAll('select')[1];
+    opSel.value = 'exists';
+    opSel.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(50);
+    const second = rows[1].querySelectorAll('.kv-na').length;
+    const badge = root.querySelector('.req-subtabs .subtab[data-sub="tests"]').textContent;
+    const res = await app.send(t, { engine: 'browser' });
+    await sleep(200); // 변경 표시는 0.12초 모았다가 한 번에 한다
+    return { tests: JSON.parse(JSON.stringify(t.draft.tests)), capExprNa, second, badge, skipped: res.checks && res.checks.skipped, dirty: t.dirty };
+  });
+  assert(r.tests.extract.length === 1 && r.tests.extract[0].name === 'code' && r.tests.extract[0].from === 'status' && r.capExprNa, JSON.stringify(r.tests.extract));
+  assert(r.tests.assert.length === 2 && r.tests.assert[0].target === 'status' && r.tests.assert[0].value === '200' && r.tests.assert[1].target === 'json' && r.tests.assert[1].op === 'exists', JSON.stringify(r.tests.assert));
+  assert(r.second === 1, '있음 비교인데 기대값 칸이 남음: ' + r.second);
+  assert(/Tests\(3\)/.test(r.badge.replace(/\s/g, '')), r.badge);
+  assert(/응답을 받지 못해 실행하지 않았습니다/.test(r.skipped || ''), String(r.skipped));
+  assert(r.dirty, '고친 요청이 변경됨으로 표시되지 않음');
 });
 
 await check('기본 타임아웃 60초: 예전 설정의 0(무제한)은 다시 열 때 한 번 60초로 바꾸고 알림', async () => {

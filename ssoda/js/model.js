@@ -1,5 +1,6 @@
 // 데이터 모델 & 트리 헬퍼
 import { uid, clone, kvRow } from './util.js';
+import { normalizeTests } from './checks.js';
 
 export function newAuth(type = 'inherit') {
   return {
@@ -42,6 +43,7 @@ export function newRequest(partial = {}) {
     auth: newAuth('inherit'),
     body: newBody(),
     settings: { followRedirects: null, timeout: null, useBrowserCookies: false, useCookieJar: true, engine: null, curl: { ...DEFAULT_CURL_OPTS } },
+    tests: { extract: [], assert: [] }, // 응답값 꺼내기·확인 (checks.js)
     description: '',
   };
   return normalizeRequest(Object.assign(r, partial));
@@ -79,6 +81,7 @@ export function normalizeRequest(r) {
       { followRedirects: null, timeout: null, useBrowserCookies: false, useCookieJar: true, engine: null },
       r.settings || {}
     ),
+    tests: normalizeTests(r.tests),
     description: String(r.description || ''),
   };
   out.settings.curl = { ...DEFAULT_CURL_OPTS, ...((r.settings && r.settings.curl) || {}) };
@@ -287,5 +290,6 @@ function stripIds(req) {
     c.body.urlencoded = s(c.body.urlencoded);
     c.body.formdata = s(c.body.formdata);
   }
+  if (c.tests) c.tests = { extract: s(c.tests.extract), assert: s(c.tests.assert) };
   return c;
 }
