@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>cleanshot full page</title>
+<!-- 전체 페이지 캡처 시험: 100px 띠(띠마다 다른 색), 고정 머리글(안에 가릴 요소)·바닥글, sticky 막대,
+     아래쪽의 가릴 요소, transform 이 걸린 조상 안의 fixed 요소(내용과 함께 움직인다).
+     ?bands=N 으로 띠 개수를 바꾼다(기본 40). -->
+<style>
+  html, body { margin: 0; }
+  body { font: 14px/1.4 sans-serif; position: relative; }
+  .band { height: 100px; }
+  #hdr { position: fixed; top: 0; left: 0; right: 0; height: 50px; background: rgb(20, 40, 60); z-index: 5; }
+  #hdrSecret { position: absolute; left: 400px; top: 10px; width: 120px; height: 30px; background: rgb(255, 0, 0); }
+  #ftr { position: fixed; bottom: 0; left: 0; right: 0; height: 40px; background: rgb(60, 40, 20); z-index: 5; }
+  #stk { position: sticky; top: 50px; height: 30px; background: rgb(0, 200, 0); z-index: 4; }
+  #deep { position: absolute; left: 300px; top: 3300px; width: 200px; height: 60px; background: rgb(255, 0, 0); }
+  #tw { position: absolute; left: 0; top: 0; width: 10px; height: 10px; transform: translateZ(0); }
+  #tfix { position: fixed; left: 700px; width: 100px; height: 40px; background: rgb(0, 0, 255); }
+</style>
+</head>
+<body>
+  <div id="hdr"><div id="hdrSecret"></div></div>
+  <div id="tw"><div id="tfix"></div></div>
+  <div id="bands"></div>
+  <div id="deep"></div>
+  <div id="ftr"></div>
+<script>
+  const n = Number(new URLSearchParams(location.search).get('bands')) || 40;
+  const box = document.getElementById('bands');
+  // 채널마다 100~219 — 머리글·바닥글·sticky·빨강·파랑·검정과 겹치지 않는다
+  window.__bandColor = (i) => [100 + (i * 37) % 120, 100 + (i * 71) % 120, 100 + (i * 13) % 120];
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement('div');
+    d.className = 'band';
+    d.id = 'band' + i;
+    d.style.background = `rgb(${window.__bandColor(i).join(',')})`;
+    box.appendChild(d);
+    if (i === 9) {
+      const s = document.createElement('div');
+      s.id = 'stk';
+      box.appendChild(s);
+    }
+  }
+  // 첫 화면 아래쪽 절반에 둔다 — 화면에 붙은 fixed 로 잘못 보면 마지막 장에만 남아 제자리에서 사라진다
+  document.getElementById('tfix').style.top = Math.round(innerHeight * 0.6) + 'px';
+</script>
+</body>
+</html>

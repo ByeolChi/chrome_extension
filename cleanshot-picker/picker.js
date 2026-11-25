@@ -1,6 +1,6 @@
 /* CleanShot Picker — content script (격리 world)
  *
- * 다섯 도구로 페이지를 정리한 뒤 현재 화면을 PNG 로 저장한다.
+ * 다섯 도구로 페이지를 정리한 뒤 현재 화면(Enter)이나 페이지 전체(Shift+Enter)를 PNG 로 저장한다.
  *   1 지우기 · 2 이동 · 3 크기 · 4 텍스트 · 5 가리기(검정)
  *
  * 원본 DOM 구조는 건드리지 않는다. 모든 변경은 인라인 스타일 한 줄이거나
@@ -64,7 +64,8 @@
     drag: null,
     editing: null,
     editSnapshot: null,
-    justDragged: false
+    justDragged: false,
+    full: null               // 진행 중인 전체 페이지 캡처 — "전체 페이지 캡처" 참고
   };
 
   /* 이동과 크기가 같은 transform 을 나눠 쓴다 */
@@ -95,6 +96,8 @@
       /* UI 레이어 — 캡처 직전에 사라진다 */
       .ui { position: absolute; inset: 0; pointer-events: none; cursor: default; }
       :host(.capturing) .ui { display: none; }
+      /* 전체 페이지 캡처에서는 장마다 잰 자리를 service worker 가 칠하므로 화면의 박스도 숨긴다 */
+      :host(.capturing-full) .masks { display: none; }
 
       .hl {
         position: absolute;
@@ -219,7 +222,8 @@
         <button class="undo" disabled title="Ctrl+Z">되돌리기</button>
         <button class="reset" disabled>전체 복원</button>
         <span class="sep"></span>
-        <button class="shot primary" title="Enter">캡처</button>
+        <button class="shot primary" title="보이는 화면 (Enter)">캡처</button>
+        <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
         <span class="status"></span>
         <button class="flip" title="툴바를 위/아래로 (Tab)">⇅</button>
         <button class="close" title="Esc">닫기</button>
@@ -243,6 +247,7 @@
     undo: root.querySelector('.undo'),
     reset: root.querySelector('.reset'),
     shot: root.querySelector('.shot'),
+    full: root.querySelector('.full'),
     flip: root.querySelector('.flip'),
     close: root.querySelector('.close')
   };
@@ -252,6 +257,7 @@
   ui.undo.addEventListener('click', undo);
   ui.reset.addEventListener('click', () => { restoreAll(); paintBar(); });
   ui.shot.addEventListener('click', () => captureViewport());
+  ui.full.addEventListener('click', () => captureFullPage());
   ui.flip.addEventListener('click', flipBar);
   ui.close.addEventListener('click', deactivate);
   ui.handles.forEach((h) =>
@@ -266,13 +272,14 @@
   const cursorStyle = document.createElement('style');
   cursorStyle.id = '__cleanshot_cursor__';
 
-  function cursorCss() {
+  /* cursor 를 주면 도구 커서 대신 그것을 쓴다 (전체 페이지 캡처 중의 progress) */
+  function cursorCss(cursor) {
     const t = TOOLS.find((x) => x.id === state.tool);
-    return `*:not(#${HOST_ID}):not(#${HOST_ID} *) { cursor: ${t ? t.cursor : 'crosshair'} !important; }`;
+    return `*:not(#${HOST_ID}):not(#${HOST_ID} *) { cursor: ${cursor || (t ? t.cursor : 'crosshair')} !important; }`;
   }
 
-  function paintCursor() {
-    const css = cursorCss();
+  function paintCursor(cursor) {
+    const css = cursorCss(cursor);
     cursorStyle.textContent = css;
     for (const s of frameStyles.values()) s.textContent = css;
   }
@@ -396,6 +403,8 @@
   }
 
   function toggle() {
+    // 전체 페이지 캡처 중에 아이콘·단축키를 누르면 캡처만 멈춘다 (끄면 찍던 페이지를 정리하지 못한다)
+    if (state.full) { state.full.cancel = true; return; }
     state.active ? deactivate() : activate();
   }
 
@@ -1352,6 +1361,7 @@
 
     if (e.key === 'Escape') {
       block(e);
+      if (state.full) { state.full.cancel = true; return; } // 전체 페이지 캡처만 멈춘다
       deactivate();
       return;
     }
@@ -1368,7 +1378,8 @@
 
     if (e.key === 'Enter') {
       block(e);
-      captureViewport();
+      if (e.shiftKey) captureFullPage();
+      else captureViewport();
       return;
     }
 
@@ -1424,7 +1435,8 @@
     });
   }
 
-  async function captureViewport() {
+  /* note: 저장했을 때 알릴 문구 (전체 페이지 캡처가 스크롤할 내용이 없어 이리로 넘어온 경우) */
+  async function captureViewport(note) {
     if (state.busy) return;
     state.busy = true;
     lockBar(true);
@@ -1447,7 +1459,8 @@
       type: 'CLEANSHOT_CAPTURE',
       pageUrl: location.href,
       masks,
-      viewport: { w: window.innerWidth, h: window.innerHeight }
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      dpr: window.devicePixelRatio || 1
     });
 
     host.classList.remove('capturing');
@@ -1455,16 +1468,384 @@
     lockBar(false);
     state.busy = false;
 
-    if (res && res.ok) { finish(`저장했습니다 · ${short(res.filename)}`); return; }
+    afterSave(res, typeof note === 'string' && note ? note : '저장했습니다', '캡처 실패');
+  }
 
-    // downloads API 가 실패하면 페이지에서 직접 내려받는다
+  /* 저장 결과를 알린다. 저장했으면 전체 복원 후 닫는다.
+     downloads API 가 실패했으면 페이지에서 직접 내려받는다. */
+  function afterSave(res, done, failed) {
+    if (res && res.ok) { finish(`${done} · ${short(res.filename)}`); return; }
+
     if (res && res.fallback && res.dataUrl) {
       const err = saveInPage(res.dataUrl, res.filename);
       if (!err) { finish(`브라우저 다운로드로 저장했습니다 · ${short(res.filename)}`); return; }
-      toast(`캡처 실패 · ${res.error} · 대체 저장도 실패: ${err}`, 4200);
+      toast(`${failed} · ${res.error} · 대체 저장도 실패: ${err}`, 4200);
       return;
     }
-    toast(`캡처 실패 · ${(res && res.error) || '알 수 없는 오류'}`, 3200);
+    toast(`${failed} · ${(res && res.error) || '알 수 없는 오류'}`, 3200);
+  }
+
+  /* ============================================================ 전체 페이지 캡처
+   * 스크롤 대상을 위에서부터 한 화면씩 내려가며 찍고, service worker 가 한 장으로 잇는다.
+   *   스크롤 대상 — 문서가 스크롤되면 문서. 문서가 스크롤되지 않으면 화면 넓이의 1/4 이상을 차지하는
+   *                가장 큰 안쪽 스크롤 영역이고, 그때는 그 영역의 내용만 저장한다(머리글·옆 메뉴는 빠진다).
+   *   fixed 요소 — 화면에 붙어 있어 장마다 되풀이될 것은 위쪽에 붙은 것(화면 절반보다 높은 것 포함)은
+   *                첫 장에만, 아래쪽에 붙은 것은 마지막 장에만 남긴다. 그 안의 가리기 박스도 함께 따른다.
+   *                화면을 거의 다 덮는 것(배경·앱 틀)과 스크롤 영역을 품은 것은 그대로 둔다.
+   *   sticky 요소 — 찍는 동안 제자리(position: relative)에 둬서 한 번만 나오게 한다.
+   *   가리기 — 화면의 박스 레이어는 숨기고, 장마다 그때의 박스 자리를 보내 service worker 가 칠한다.
+   * 찍는 동안 휠 스크롤을 막고, Esc 나 아이콘으로 멈출 수 있다. 끝나면(멈춰도) 바꾼 스타일과 스크롤 위치를 돌려놓는다.
+   * 장마다 service worker 가 찍기 직전·직후에 이 탭이 아직 활성 탭인지 본다(다른 탭 화면이 섞이지 않게).
+   */
+
+  const FULL_MIN_SCROLLER = 0.25; // 안쪽 스크롤 영역이 화면 넓이의 이 비율 이상이어야 대상
+  const FULL_BACKDROP = 0.8;      // fixed 요소가 찍는 영역의 이 비율 이상을 덮으면 배경으로 보고 그대로 둔다
+  const FULL_IMG_WAIT_MS = 1200;  // 장마다 화면 안 이미지가 다 받아지기를 기다리는 최대 시간
+  const FULL_HINT_MS = 700;       // 시작 안내를 보여 주는 시간 (이 동안 Esc 로 그만둘 수 있다)
+  const FULL_RETRY = 2;           // 찍는 사이 스크롤이 움직였을 때 같은 장을 다시 찍는 횟수
+  const SCROLLS = /^(auto|scroll|hidden|overlay)$/;
+
+  async function captureFullPage() {
+    if (state.busy) return;
+    const roots = [document, ...RC.shadowRoots(document)];
+    const plan = fullPlan(roots);
+    if (!plan) {
+      captureViewport('더 내려갈 내용이 없어 보이는 화면을 저장했습니다');
+      return;
+    }
+
+    state.busy = true;
+    lockBar(true);
+    endTextEdit();
+    setCandidate(null);
+
+    const run = { plan, roots, cancel: false, id: '', undos: [], fixed: [], total: plan.total, truncated: false };
+    state.full = run;
+    window.addEventListener('wheel', blockWheel, { capture: true, passive: false });
+    paintCursor('progress');
+
+    let res;
+    try {
+      toast('페이지 전체를 위에서부터 찍습니다 · Esc 로 멈춤', FULL_HINT_MS + 300);
+      await sleep(FULL_HINT_MS);
+      host.classList.add('capturing', 'capturing-full');
+      mountHost(); // 그사이 열린 dialog·popover 보다 위로
+      res = run.cancel ? { ok: false, cancelled: true } : await shootFull(run);
+    } catch (err) {
+      res = { ok: false, error: String((err && err.message) || err) };
+    } finally {
+      undoFull(run);
+    }
+
+    if (run.id) {
+      if (res && res.ok && !run.cancel) {
+        setStatus('저장 중…');
+        res = await send({ type: 'CLEANSHOT_FULL_END', id: run.id });
+      } else {
+        send({ type: 'CLEANSHOT_FULL_END', id: run.id, cancel: true }); // 쌓아 둔 이미지를 버린다
+      }
+    }
+    setStatus('');
+    lockBar(false);
+    state.busy = false;
+
+    if (run.cancel) { toast('전체 캡처를 멈췄습니다 · 정리한 것은 그대로입니다', 2600); return; }
+    const what = plan.el ? '스크롤 영역 전체를 저장했습니다' : '페이지 전체를 저장했습니다';
+    const cut = run.truncated ? ` · 너무 길어 위에서 ${Math.round(run.total)}px 까지만` : '';
+    afterSave(res, what + cut, '전체 캡처 실패');
+  }
+
+  /* 무엇을 스크롤하며 찍을지. 스크롤할 것이 없으면 null.
+     clip 은 찍을 영역(화면 CSS px, 스크롤 막대 제외), total 은 내용 전체 높이(CSS px). */
+  function fullPlan(roots) {
+    const vs = viewSize(document);
+    const se = document.scrollingElement || document.documentElement;
+    if (se.scrollHeight - vs.h > 1) {
+      return { el: null, clip: { x: 0, y: 0, w: vs.w, h: vs.h }, total: se.scrollHeight, top0: window.scrollY, left0: window.scrollX };
+    }
+    const s = mainScroller(roots, vs);
+    if (!s) return null;
+    return { el: s.el, clip: s.box, total: s.el.scrollHeight, top0: s.el.scrollTop, left0: s.el.scrollLeft };
+  }
+
+  /* 화면 안에 다 들어 있고 화면 넓이의 1/4 이상인 세로 스크롤 영역 가운데 가장 큰 것 */
+  function mainScroller(roots, vs) {
+    let best = null;
+    const consider = (el) => {
+      if (el === host || el.clientHeight < 40 || el.scrollHeight - el.clientHeight <= 1) return;
+      const oy = styleOf(el).overflowY;
+      if (oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') return;
+      const r = el.getBoundingClientRect();
+      const box = { x: r.left + el.clientLeft, y: r.top + el.clientTop, w: el.clientWidth, h: el.clientHeight };
+      if (box.x < -0.5 || box.y < -0.5 || box.x + box.w > vs.w + 0.5 || box.y + box.h > vs.h + 0.5) return;
+      const area = box.w * box.h;
+      if (area >= vs.w * vs.h * FULL_MIN_SCROLLER && (!best || area > best.area)) best = { el, box, area };
+    };
+    if (document.body) consider(document.body);
+    for (const r of roots) for (const el of r.querySelectorAll('*')) consider(el);
+    return best;
+  }
+
+  async function shootFull(run) {
+    const { plan } = run;
+    const layout = scanLayout(run.roots);
+    prepareFull(run, layout.sticky);
+
+    await scrollFullTo(plan, 0);
+    const begin = await send({
+      type: 'CLEANSHOT_FULL_BEGIN',
+      pageUrl: location.href,
+      clip: plan.clip,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      total: plan.total,
+      dpr: window.devicePixelRatio || 1
+    });
+    if (!begin || !begin.ok) return begin || { ok: false, error: '응답이 없습니다.' };
+    run.id = begin.id;
+    run.total = Math.min(plan.total, begin.total);
+    run.truncated = !!begin.truncated;
+
+    await sortFixed(run, layout.fixed);
+
+    const h = plan.clip.h;
+    // 화면·요소 높이는 정수로 반올림되어 있어 실제로 보이는 높이보다 0.5px 까지 클 수 있다(페이지 확대 등).
+    // 끝이 아닌 장은 아래 한 줄을 믿지 않고 다음 장과 겹치게 해 이음매에 빈 줄이 생기지 않게 한다.
+    const step = Math.max(1, h - 1);
+    const n = run.total <= h + 0.5 ? 1 : Math.ceil((run.total - h) / step - 0.001) + 1;
+    let covered = 0; // 내용 맨 위부터 이어 붙인 높이
+    let retry = 0;
+    const moved = () => ++retry > FULL_RETRY
+      ? { ok: false, error: '찍는 동안 페이지가 스스로 스크롤되어 이어 붙일 수 없습니다.' }
+      : null;
+
+    for (let i = 0; covered < run.total - 0.5;) {
+      if (run.cancel) return { ok: false, cancelled: true };
+      if (i > n + 4) break; // 혹시 끝나지 않으면 이어 붙인 데까지만 저장한다
+
+      // 앞 장이 덮은 줄 바로 아래가 화면 맨 위에 오게 한다. 넘어가면 빈 줄이 생기므로 한 줄 덜 내려 본다.
+      // 남은 내용이 한 화면보다 적으면 끝(total)이 화면 맨 아래에 오게 한다 — 너무 길어 자른 페이지에서도
+      // 바닥글이 저장하는 부분의 맨 아래에 남는다.
+      const target = Math.min(Math.floor(covered), Math.max(0, run.total - h));
+      let a = await scrollFullTo(plan, target);
+      if (a > covered + 0.01) a = await scrollFullTo(plan, target - 1);
+      if (a > covered + 0.01) return { ok: false, error: '요청한 자리로 스크롤되지 않아 이어 붙일 수 없습니다.' };
+      // 맨 끝까지 내려왔으면 브라우저가 내용 끝을 화면 끝에 맞추므로 끝까지 믿는다
+      const last = a + h >= run.total - 0.5;
+      const to = last ? run.total : Math.min(run.total, a + step);
+      if (to <= covered + 0.5) break; // 더 내려가지 않는다 (찍는 동안 페이지가 짧아졌다)
+
+      showFixed(run, i === 0, last);
+      await settle(plan);
+      if (run.cancel) return { ok: false, cancelled: true };
+      if (Math.abs(offsetOf(plan) - a) > 0.01) { const e = moved(); if (e) return e; continue; }
+
+      // 마지막 장은 대개 남은 몇 줄만 새로 붙이는데, 아래쪽 fixed 요소(바닥글)는 그보다 위에 놓인다.
+      // 그 요소가 시작하는 줄부터 마지막 장으로 다시 덮어 온전히 남긴다(첫 장의 위쪽 fixed 요소 자리는 지킨다).
+      if (i === 0) run.topEnd = fixedEdge(run, a, true);
+      const from = last && i > 0
+        ? Math.min(covered, Math.max(fixedEdge(run, a, false), run.topEnd || 0))
+        : covered;
+
+      const masks = frameMasks(run);
+      if (!masks) return { ok: false, error: '가리기 박스 자리를 재지 못해 저장하지 않았습니다.' };
+      const r = await send({ type: 'CLEANSHOT_FULL_FRAME', id: run.id, offset: a, from, to, masks, index: i, count: n });
+      if (!r || !r.ok) return r || { ok: false, error: '응답이 없습니다.' };
+      // 찍는 사이 스크롤이 움직였으면 같은 줄을 다시 찍어 덮어쓴다
+      if (Math.abs(offsetOf(plan) - a) > 0.01) { const e = moved(); if (e) return e; continue; }
+
+      retry = 0;
+      covered = to;
+      i++;
+    }
+    return covered > 0 ? { ok: true } : { ok: false, error: '찍은 화면이 없습니다.' };
+  }
+
+  /* 문서와 그 안 shadow root 의 fixed·sticky 요소 (이 오버레이는 빼고) */
+  function scanLayout(roots) {
+    const fixed = [];
+    const sticky = [];
+    for (const r of roots) {
+      for (const el of r.querySelectorAll('*')) {
+        if (el === host) continue;
+        const pos = styleOf(el).position;
+        if (pos === 'fixed') fixed.push(el);
+        else if (pos === 'sticky') sticky.push(el);
+      }
+    }
+    return { fixed, sticky };
+  }
+
+  /* 찍는 동안만 바꿔 두는 스타일. 되돌릴 함수는 run.undos 에 쌓는다. */
+  function prepareFull(run, sticky) {
+    const { plan } = run;
+    // 스크롤 스냅(요청한 자리 대신 가까운 스냅 지점에 멈춤)과 스크롤 앵커링(위쪽 내용이 바뀌면
+    // 브라우저가 스크롤 위치를 옮김)은 이어 붙일 자리를 어긋나게 하므로 끈다
+    const targets = plan.el ? [plan.el] : [document.documentElement, document.body].filter(Boolean);
+    for (const t of targets) {
+      run.undos.push(snapStyle(t));
+      t.style.setProperty('scroll-snap-type', 'none', 'important');
+      t.style.setProperty('overflow-anchor', 'none', 'important');
+    }
+    // 이 스크롤 대상 안의 sticky 요소는 제자리에 둔다 (위치 값은 비워 relative 로 밀리지 않게)
+    for (const el of sticky) {
+      if (scrollerOf(el) !== plan.el) continue;
+      run.undos.push(snapStyle(el));
+      el.style.setProperty('position', 'relative', 'important');
+      el.style.setProperty('inset', 'auto', 'important');
+    }
+  }
+
+  /* sticky 요소가 붙는 스크롤 영역. 문서(화면)면 null */
+  function scrollerOf(el) {
+    for (let p = parentOf(el), i = 0; p && i < 512; p = parentOf(p), i++) {
+      if (p === document.body || p === document.documentElement) return null;
+      const cs = styleOf(p);
+      if (SCROLLS.test(cs.overflowY) || SCROLLS.test(cs.overflowX)) return p;
+    }
+    return null;
+  }
+
+  /* 찍는 영역에 걸친 fixed 요소 가운데 화면에 붙어 장마다 되풀이될 것을 골라, 첫 장에만 남길지
+     마지막 장에만 남길지 정한다. 문서를 스크롤할 때는 한 번 내려 봐서 정말 화면에 붙어 있는지 확인한다
+     (transform 이 걸린 조상 안의 fixed 요소는 내용과 함께 움직이므로 그대로 둔다). */
+  async function sortFixed(run, list) {
+    const { plan } = run;
+    const c = plan.clip;
+    const area = (r) => {
+      const w = Math.min(r.right, c.x + c.w) - Math.max(r.left, c.x);
+      const h = Math.min(r.bottom, c.y + c.h) - Math.max(r.top, c.y);
+      return w > 0 && h > 0 ? w * h : 0;
+    };
+    let cands = list.filter((el) => {
+      if (!el.isConnected || (plan.el && containsDeep(el, plan.el))) return false; // 스크롤 영역을 품은 앱 틀
+      const a = area(el.getBoundingClientRect());
+      return a > 0 && a < c.w * c.h * FULL_BACKDROP;
+    });
+    if (!cands.length || run.total <= c.h + 0.5) return;
+
+    if (!plan.el) {
+      const before = cands.map((el) => el.getBoundingClientRect().top);
+      await scrollFullTo(plan, Math.min(c.h, run.total - c.h));
+      cands = cands.filter((el, i) => Math.abs(el.getBoundingClientRect().top - before[i]) < 1);
+      await scrollFullTo(plan, 0);
+    }
+    for (const el of cands) {
+      const r = el.getBoundingClientRect();
+      const top = r.height > c.h / 2 || (r.top + r.bottom) / 2 < c.y + c.h / 2;
+      const restore = snapStyle(el);
+      run.undos.push(restore);
+      run.fixed.push({ el, top, restore, hidden: false });
+    }
+  }
+
+  /* 위쪽 fixed 요소는 첫 장에만, 아래쪽 fixed 요소는 마지막 장에만 보인다 */
+  function showFixed(run, first, last) {
+    for (const f of run.fixed) {
+      const show = f.top ? first : last;
+      if (show && f.hidden) {
+        f.restore();
+        f.hidden = false;
+      } else if (!show && !f.hidden) {
+        f.el.style.setProperty('transition', 'none', 'important'); // 서서히 사라지는 도중에 찍히지 않게
+        f.el.style.setProperty('visibility', 'hidden', 'important');
+        f.hidden = true;
+      }
+    }
+  }
+
+  /* 스크롤 위치 a 에서 보이는 fixed 요소가 내용 좌표로 어디까지 덮는지.
+     top 이 true 면 위쪽 요소들의 가장 아래 줄(없으면 0), false 면 아래쪽 요소들의 가장 위 줄(없으면 Infinity). */
+  function fixedEdge(run, a, top) {
+    const c = run.plan.clip;
+    let row = top ? 0 : Infinity;
+    for (const f of run.fixed) {
+      if (f.top !== top || f.hidden) continue;
+      const r = f.el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (top) row = Math.max(row, a + Math.min(c.h, r.bottom - c.y));
+      else row = Math.min(row, a + Math.max(0, r.top - c.y));
+    }
+    return row;
+  }
+
+  /* 이번 장에서 칠할 가리기 사각형(화면 CSS px). 숨긴 fixed 요소 안의 것은 뺀다. 재지 못하면 null. */
+  function frameMasks(run) {
+    const hidden = run.fixed.filter((f) => f.hidden).map((f) => f.el);
+    const out = [];
+    for (const m of state.masks) {
+      const a = m.anchor;
+      if (a && a.el && hidden.some((el) => insideOf(el, a.el))) continue;
+      let r;
+      try { r = maskRect(m); } catch (_) { return null; }
+      m.view = r;
+      if (r) out.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+    }
+    return out;
+  }
+
+  /* anc 가 el 이거나 el 을 품는가 (shadow DOM 과 같은 출처 iframe 을 건너 올라간다) */
+  function insideOf(anc, el) {
+    for (let cur = el, i = 0; cur && i < 512; cur = upOf(cur), i++) {
+      if (cur === anc) return true;
+    }
+    return false;
+  }
+
+  function offsetOf(plan) {
+    return plan.el ? plan.el.scrollTop : window.scrollY;
+  }
+
+  /* 즉시(부드러운 스크롤 없이) 옮기고, 스크롤 이벤트가 돈 뒤의 실제 위치를 돌려준다 */
+  async function scrollFullTo(plan, y) {
+    const opts = { left: plan.left0, top: Math.max(0, y), behavior: 'instant' };
+    if (plan.el) plan.el.scrollTo(opts);
+    else window.scrollTo(opts);
+    await nextPaint();
+    return offsetOf(plan);
+  }
+
+  /* 찍는 영역 안 이미지가 다 받아지기를 잠깐 기다린 뒤, 바뀐 화면이 합성될 때까지 기다린다 */
+  async function settle(plan) {
+    const c = plan.clip;
+    const waits = [];
+    for (const img of document.images) {
+      if (img.complete || waits.length >= 200) continue;
+      const r = img.getBoundingClientRect();
+      if (r.width <= 0 || r.bottom <= c.y || r.top >= c.y + c.h) continue;
+      waits.push(new Promise((ok) => {
+        img.addEventListener('load', ok, { once: true });
+        img.addEventListener('error', ok, { once: true });
+      }));
+    }
+    if (waits.length) await Promise.race([Promise.all(waits), sleep(FULL_IMG_WAIT_MS)]);
+    await uiGone();
+  }
+
+  /* 바꾼 스타일과 스크롤 위치를 돌려놓는다. 다 찍었든 멈췄든 실패했든 부른다. */
+  function undoFull(run) {
+    for (let i = run.undos.length - 1; i >= 0; i--) {
+      try { run.undos[i](); } catch (_) { /* 나머지는 계속 되돌린다 */ }
+    }
+    run.undos = [];
+    run.fixed = [];
+    const p = run.plan;
+    try {
+      const opts = { left: p.left0, top: p.top0, behavior: 'instant' };
+      if (p.el) p.el.scrollTo(opts);
+      else window.scrollTo(opts);
+    } catch (_) { /* 요소가 사라졌을 수 있다 */ }
+    window.removeEventListener('wheel', blockWheel, true);
+    host.classList.remove('capturing', 'capturing-full');
+    paintCursor();
+    state.full = null;
+    reposition();
+  }
+
+  /* 찍는 동안 사용자가 굴린 휠이 페이지를 움직이지 않게 */
+  function blockWheel(e) {
+    if (!state.full) return;
+    e.preventDefault();
+    e.stopPropagation();
   }
 
   /* <a download> 로 내려받는다. 문서에 붙이지 않은 링크라 페이지의 클릭 리스너와
@@ -1489,6 +1870,7 @@
 
   function lockBar(on) {
     ui.shot.disabled = on;
+    ui.full.disabled = on;
   }
 
   function finish(message) {
