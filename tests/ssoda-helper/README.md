@@ -5,7 +5,7 @@ ssoda 의 cURL 실행 도우미(`ssoda/native-host/ssoda-host.ps1`, `ssoda-host.
 | 시험 | 확인하는 것 |
 |---|---|
 | `helper.mjs` | 확장을 거치지 않고 도우미에 위험한 인자를 직접 보내도 막히는지: `--proxy-header @파일`·`-H @파일`·`-F x=@파일`(PC 파일 유출), `file://` 주소, `--next`, `-o` 경로 바꾸기(파일 덮어쓰기), 묶음 옵션 `-sSo`, `--unix-socket`, `--config`. 정상 요청(raw body, form-data)은 그대로 실행되는지. 도우미 버전이 확장이 기대하는 버전과 같은지. 설치 파일에 도우미 스크립트가 깨지지 않고 들어가는지 |
-| `curl-path.mjs` | 확장 모듈(`parseCurl` → `prepareRequest` → `runCurl`)에서 실제 도우미와 curl 까지: 공유받은 요청의 추가 인자나 붙여넣은 cURL 에 `--proxy-header @파일` 이 있어도 파일 내용이 프록시로 나가지 않는지, `file://` 주소와 `@` 로 시작하는 헤더 이름을 거부하는지, 정상 요청은 그대로 가는지 |
+| `curl-path.mjs` | 확장 모듈(`parseCurl` → `prepareRequest` → `runCurl`)에서 실제 도우미와 curl 까지: 공유받은 요청의 추가 인자나 붙여넣은 cURL 에 `--proxy-header @파일` 이 있어도 파일 내용이 프록시로 나가지 않는지, `file://` 주소와 `@` 로 시작하는 헤더 이름을 거부하는지, 정상 요청은 그대로 가는지, SSE 를 받다가 `--max-time` 에 걸리면(종료 코드 28) 오류 대신 받은 이벤트까지 응답으로 남는지 |
 | `ssh.mjs` | 시험용 SSH 서버(`ssh_server.py`, paramiko)에 접속해, 서버 키 파일 경로에 공백이 있어도(macOS 기본 설치 경로, `Hong Gildong` 같은 Windows 사용자 폴더) 저장한 서버 키를 읽고 접속하는지, 터널로 보낸 요청이 서버 너머 주소에 도착하는지 |
 | `machine.mjs` | PC 전체 등록 스크립트(`scripts/install-ssoda-helper-machine.ps1`): 사용자 설치 파일과 같은 도우미 파일 세 개를 만드는지, 인터넷에서 받은 표시(Zone.Identifier)를 설치본에서 지우는지, 만든 도우미를 브라우저와 같은 방식(`cmd.exe` 로 bat 실행)으로 띄웠을 때 응답하는지. Windows 전용이며, 관리자 권한이 필요한 레지스트리 등록은 빼고 임시 폴더에 설치합니다 |
 

@@ -35,6 +35,10 @@ async function boot() {
   applyTheme();
   renderAll();
   handlePendingImport();
+  // 설정 형식이 바뀌며 값이 바뀐 것 알림 (store.migrateSettings)
+  if ((app.store.notes || []).includes('timeout')) {
+    toast(`기본 타임아웃을 60초로 바꿨습니다. 응답을 더 오래 기다려야 하면 설정에서 늘리거나 0(무제한)으로 두세요.`, 'info', 8000);
+  }
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.pendingImport && changes.pendingImport.newValue) handlePendingImport();

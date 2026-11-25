@@ -267,7 +267,7 @@ export function openSettings() {
     row('테마', null, select('theme', [['system', '시스템 설정 따르기'], ['light', '라이트'], ['dark', '다크']], () => app.ui.applyTheme())),
     row('레이아웃', '요청과 응답 패널 배치', select('layout', [['horizontal', '위/아래'], ['vertical', '왼쪽/오른쪽']], () => app.ui.applySplitAll())),
     h('div.set-sec', '요청'),
-    row('기본 타임아웃 (ms)', '0 또는 빈 값 = 무제한', num('timeout', '0')),
+    row('기본 타임아웃 (ms)', '처음 값 60000 (60초) · 0 또는 빈 값 = 무제한', num('timeout', '0')),
     row('리다이렉트 자동으로 따라가기', 'curl의 -L 옵션', toggle('followRedirects')),
     row('Origin 헤더 제거', 'curl처럼 Origin 헤더 없이 전송합니다 (끄면 chrome-extension:// Origin이 전송됨)', toggle('removeOrigin')),
     h('div.set-sec', 'cURL 실행'),

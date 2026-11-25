@@ -5,6 +5,7 @@
 import { STATUS_TEXT } from './util.js';
 import { tokenize, CURL_SHORT_WITH_VALUE, CURL_SHORT_ALIASES, CURL_LONG_WITH_VALUE, CURL_PASSTHROUGH } from './curl-parser.js';
 import { DEFAULT_CURL_OPTS } from './model.js';
+import { isEventStream, parseSse } from './sse.js';
 
 export const HOST_NAME = 'com.ssoda.runner';
 // SSH 터널을 지원하는 최소 도우미 버전 (1.3.0: 서버 키 확인 후 접속, 터널 우회 차단)
@@ -678,7 +679,12 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
     terminal.ssh = { ...sshLabel(ssh), socksPort: meta.ssh.port, connectMs: meta.ssh.connectMs, log: b64ToText(meta.ssh.logB64), path: b64ToText(meta.ssh.pathB64) };
   }
   const warnings = [...(prepared.warnings || []).filter((w) => !/Body가 제외/.test(w)), ...exec.warnings];
-  if (meta.exitCode !== 0 || meta.timedOut) {
+  // SSE(text/event-stream)를 받다가 시간이 다 되어 끊기면(curl 종료 코드 28) 받은 데까지 응답으로 쓴다 (브라우저로 보낼 때와 같게)
+  const blocks0 = parseHeaderBlocks(headersText).filter((b) => !(b.status >= 100 && b.status < 200));
+  const last0 = blocks0[blocks0.length - 1];
+  const ct0 = last0 ? (last0.headers.find((x) => x.name.toLowerCase() === 'content-type') || {}).value || '' : '';
+  const streamCut = (meta.exitCode === 28 || !!meta.timedOut) && !!last0 && last0.status >= 200 && last0.status < 300 && isEventStream(ct0);
+  if ((meta.exitCode !== 0 || meta.timedOut) && !streamCut) {
     // 이 curl 빌드가 지원하지 않는 옵션 (예: Windows 기본 curl 의 --ntlm)
     const unsupported = !meta.timedOut && stderr.match(/curl: option (-{1,2}[\w.-]+): the installed libcurl version does(?: not|n't) support this/);
     if (unsupported) {
@@ -716,6 +722,11 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
   );
   const contentType = (headers.find((x) => x.name.toLowerCase() === 'content-type') || {}).value || '';
   const headersSize = headers.reduce((n, x) => n + x.name.length + x.value.length + 4, last.statusLine.length + 2);
+  // curl 은 끝난 뒤 한꺼번에 받으므로 이벤트별 시각은 없다
+  const stream = isEventStream(contentType) ? { kind: 'sse', end: streamCut ? 'timeout' : 'closed', ...parseSse(new TextDecoder('utf-8').decode(body)) } : null;
+  if (streamCut) {
+    warnings.push(`타임아웃(${prepared.settings?.timeout || 0} ms)이 되어 curl 이 스트림을 끊었습니다. 그때까지 받은 이벤트 ${stream.events.length}개를 보여 줍니다. 더 오래 받으려면 요청의 Settings 탭이나 설정에서 타임아웃을 늘리거나 0(무제한)으로 두세요.`);
+  }
   const ms = (s) => Math.round(s * 1000 * 10) / 10;
   const timing = wo
     ? {
@@ -752,6 +763,7 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
     sentUrl: exec.url,
     method: prepared.method,
     requestBodyPreview: '',
+    stream,
     warnings,
     terminal,
     ts: Date.now(),

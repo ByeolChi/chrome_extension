@@ -145,10 +145,13 @@ export function prepareRequest(draft, ctx = {}) {
   }
 
   const defaults = ctx.defaults || {};
+  const ownTimeout = draft.settings?.timeout;
   const settings = {
     followRedirects: draft.settings?.followRedirects ?? defaults.followRedirects ?? true,
-    timeout: draft.settings?.timeout ?? defaults.timeout ?? 0,
+    timeout: ownTimeout ?? defaults.timeout ?? 0,
   };
+  // 설정의 기본 타임아웃을 쓴 경우. 복사·코드 생성에는 요청에 직접 넣은 타임아웃만 적는다 (codegen.js 의 forCode)
+  if (ownTimeout == null && settings.timeout > 0) settings.timeoutIsDefault = true;
 
   return { method, url, headers, body, settings, warnings, unresolved: [...unresolved], curlUser };
 }

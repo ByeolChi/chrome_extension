@@ -1,34 +1,66 @@
 // 응답 패널
-import { h, clear, formatBytes, formatMs, statusClass, guessLanguage, isTextContentType, copyText, download, escapeHtml } from '../util.js';
+import { h, clear, formatBytes, formatMs, statusClass, guessLanguage, isTextContentType, copyText, download, escapeHtml, STATUS_TEXT } from '../util.js';
 import { codeView } from './code-editor.js';
 import { icon } from './icons.js';
 import { openMenu, popover, toast } from './overlay.js';
 import { parseSetCookie } from '../cookiejar.js';
 import { formatJson } from '../json-format.js';
+import { isEventStream, parseSse } from '../sse.js';
 import { app } from '../app.js';
+
+const LIVE_ROWS = 1000; // 받는 중에 화면에 두는 이벤트 수 (오래된 것부터 뺌. 전체는 끝난 뒤 결과에 남음)
+const MAX_EVENT_ROWS = 5000; // 끝난 응답의 Events 보기에 그리는 최대 수
+const STREAM_END = {
+  closed: '서버가 스트림을 끝냄',
+  stopped: '멈춤',
+  timeout: '타임아웃으로 끊음',
+  limit: '너무 커서 멈춤',
+  error: '연결 끊김',
+};
 
 export class ResponseView {
   constructor() {
     this.sub = 'body';
-    this.mode = 'pretty'; // pretty | raw | preview
+    this.mode = 'pretty'; // pretty | raw | preview (SSE 응답은 Events | Raw)
     this.format = null; // null = auto
     this.el = h('div.resp');
     this.result = null;
     this.loading = false;
+    this.live = null; // 받는 중인 SSE 스트림 (http.js onStream)
     this.blobUrl = null;
     this.render();
   }
 
   destroy() {
     if (this.blobUrl) URL.revokeObjectURL(this.blobUrl);
+    clearTimeout(this._liveTimer);
+    clearInterval(this._liveTick);
   }
 
   setLoading(on, onCancel, engine) {
     this.loading = on;
     this.loadingEngine = engine || 'browser';
     this.waitingHost = null;
+    this.live = null;
+    this._live = null;
+    clearTimeout(this._liveTimer);
+    clearInterval(this._liveTick);
+    this._liveTimer = null;
     if (onCancel) this.onCancel = onCancel;
     this.render();
+  }
+
+  // SSE 응답을 받는 중. 처음에는 받는 화면으로 바꾸고, 그 뒤로는 0.1초에 한 번만 새 이벤트를 붙인다
+  setStream(s) {
+    if (!this.loading || !s) return;
+    const first = !this.live;
+    this.live = s;
+    if (first) return this.render();
+    if (this._liveTimer) return;
+    this._liveTimer = setTimeout(() => {
+      this._liveTimer = null;
+      this.updateLive();
+    }, 100);
   }
 
   setWaiting(host) {
@@ -40,8 +72,14 @@ export class ResponseView {
   show(result) {
     this.result = result;
     this.loading = false;
+    this.live = null;
+    this._live = null;
+    clearTimeout(this._liveTimer);
+    clearInterval(this._liveTick);
+    this._liveTimer = null;
     this.format = null;
     this._decoded = null;
+    this._parsedStream = null;
     if (this.blobUrl) {
       URL.revokeObjectURL(this.blobUrl);
       this.blobUrl = null;
@@ -82,6 +120,10 @@ export class ResponseView {
 
   render() {
     clear(this.el);
+    if (this.loading && this.live) {
+      this.renderLive();
+      return;
+    }
     if (this.loading) {
       this.el.appendChild(
         h('div.resp-empty.loading',
@@ -224,8 +266,103 @@ export class ResponseView {
     return out;
   }
 
+  /* ---------------- SSE (text/event-stream) ---------------- */
+  // 받는 중인 화면: 상태, 이벤트 수·크기·시간, 멈춤 버튼, 이벤트 목록(맨 아래를 보고 있으면 따라 내려감)
+  renderLive() {
+    const s = this.live;
+    const val = (k, v) => h('span.meta-item.static', h('span.meta-k', k), h('span.meta-v.plain', v));
+    const count = val('이벤트', '0');
+    const size = val('Size:', '0 B');
+    const time = val('Time:', '0 ms');
+    const status = h('span.status-pill.' + statusClass(s.status), `${s.status} ${s.statusText || STATUS_TEXT[s.status] || ''}`.trim());
+    const meta = h('div.resp-meta',
+      status,
+      h('span.meta-tag.live-tag', { title: 'text/event-stream 응답을 받는 대로 보여 줍니다' }, h('span.live-dot'), '받는 중'),
+      count, size, time,
+      h('button.btn.btn-sm.sse-stop', { title: '스트림 받기를 멈춥니다. 그때까지 받은 내용이 응답으로 남습니다.', onclick: () => this.onCancel && this.onCancel() }, icon('stop', 13), '멈춤'));
+    const list = h('div.sse-list');
+    const box = h('div.body-content.sse-box', list);
+    this.el.append(
+      h('div.resp-head', h('div.subtabs', h('span.subtab.active', 'Events')), meta),
+      h('div.resp-body', h('div.body-wrap',
+        h('div.body-toolbar.sse-hint', '받는 대로 보여 줍니다. 멈추거나 서버가 끝내면 그때까지 받은 내용이 응답으로 남습니다.'),
+        box)));
+    // 이벤트가 뜸해도 시간은 1초마다 고친다
+    this._live = { list, box, count, size, time, shown: 0, base: performance.now() - (s.elapsed || 0) };
+    clearInterval(this._liveTick);
+    this._liveTick = setInterval(() => {
+      if (!this._live || !this.loading) return clearInterval(this._liveTick);
+      this._live.time.lastChild.textContent = formatMs(performance.now() - this._live.base);
+    }, 1000);
+    this.updateLive();
+  }
+
+  updateLive() {
+    const L = this._live;
+    const s = this.live;
+    if (!L || !s || !this.loading) return;
+    const box = L.box;
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    const evs = s.events || [];
+    const from = Math.max(L.shown, evs.length - LIVE_ROWS);
+    if (from > L.shown) clear(L.list); // 한꺼번에 많이 왔으면 마지막 것만 다시 그림
+    for (let i = from; i < evs.length; i++) L.list.appendChild(sseRow(evs[i]));
+    while (L.list.childElementCount > LIVE_ROWS) L.list.firstElementChild.remove();
+    L.shown = evs.length;
+    L.count.lastChild.textContent = String(evs.length);
+    L.size.lastChild.textContent = formatBytes(s.received || 0);
+    L.time.lastChild.textContent = formatMs(performance.now() - L.base);
+    if (!evs.length && !L.list.firstChild) L.list.appendChild(h('div.sse-empty', '아직 받은 이벤트가 없습니다.'));
+    else if (evs.length) L.list.querySelector('.sse-empty')?.remove();
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+
+  // 끝난 응답의 스트림 정보. curl 로 받은 것 등 stream 이 없으면 본문에서 해석한다
+  streamOf() {
+    const r = this.result;
+    if (!r || !r.ok) return null;
+    if (r.stream) return r.stream;
+    if (!isEventStream(r.contentType)) return null;
+    if (!this._parsedStream) this._parsedStream = { kind: 'sse', end: 'closed', ...parseSse(this.decoded().text) };
+    return this._parsedStream;
+  }
+
+  renderStreamBody(stream) {
+    const r = this.result;
+    const d = this.decoded();
+    const mode = this.mode === 'raw' ? 'raw' : 'events';
+    const toolbar = h('div.body-toolbar',
+      h('div.seg', [['events', 'Events'], ['raw', 'Raw']].map(([id, label]) =>
+        h('button.seg-btn' + (mode === id ? '.active' : ''), { onclick: () => { this.mode = id; this.render(); } }, label))),
+      h('span.sse-summary',
+        `이벤트 ${stream.events.length}개`,
+        stream.duration != null ? ` · ${formatMs(stream.duration)}` : '',
+        STREAM_END[stream.end] ? ` · ${STREAM_END[stream.end]}` : '',
+        stream.comments ? ` · 주석 ${stream.comments}줄` : ''),
+      h('div.flex1'),
+      h('button.icon-btn', { title: '본문 복사', onclick: () => this.copyBody() }, icon('copy', 16)),
+      h('button.icon-btn', { title: '파일로 저장', onclick: () => this.saveToFile() }, icon('download', 16)));
+    const content = h('div.body-content' + (mode === 'events' ? '.sse-box' : ''));
+    if (mode === 'raw') {
+      content.appendChild(codeView(d.text, 'text', { wrap: true, lineNumbers: false }));
+    } else if (!stream.events.length) {
+      content.appendChild(h('div.body-empty', r.body.byteLength ? '이벤트로 끝난 내용이 없습니다. Raw 에서 받은 글을 볼 수 있습니다.' : '받은 내용이 없습니다.'));
+    } else {
+      const list = h('div.sse-list');
+      stream.events.slice(0, MAX_EVENT_ROWS).forEach((ev) => list.appendChild(sseRow(ev)));
+      content.appendChild(list);
+      if (stream.events.length > MAX_EVENT_ROWS) content.appendChild(h('div.body-note', `이벤트가 많아 처음 ${MAX_EVENT_ROWS}개만 표시합니다. 전체는 Raw 나 파일로 저장해서 보세요.`));
+    }
+    if (stream.incomplete) {
+      content.appendChild(h('div.body-note', '마지막 내용은 빈 줄로 끝나지 않아 이벤트로 치지 않았습니다: ' + stream.incomplete.slice(0, 200)));
+    }
+    return h('div.body-wrap', toolbar, content);
+  }
+
   renderBody() {
     const r = this.result;
+    const stream = this.streamOf();
+    if (stream) return this.renderStreamBody(stream);
     const d = this.decoded();
     const wrap = app.settings.wrapResponse;
     const lang = this.format || (d.lang === 'binary' ? 'text' : d.lang);
@@ -441,6 +578,35 @@ export class ResponseView {
     }
     download(name, new Blob([r.body], { type: r.contentType || 'application/octet-stream' }));
   }
+}
+
+// SSE 이벤트 한 줄: 번호, 받은 시각(스트림 시작 기준), event 이름, data, id. JSON 인 data 는 눌러서 펼친다
+function sseRow(ev) {
+  const data = String(ev.data ?? '');
+  const json = /^\s*[[{]/.test(data);
+  const row = h('div.sse-row' + (json ? '.json' : ''),
+    h('span.sse-n', String(ev.n)),
+    h('span.sse-t', ev.t == null ? '' : '+' + formatMs(ev.t)),
+    h('span.sse-type' + (ev.type === 'message' ? '.dim' : ''), ev.type),
+    h('span.sse-data', data.length > 4000 ? data.slice(0, 4000) + '…' : data),
+    ev.id ? h('span.sse-id', { title: 'id' }, ev.id) : h('span.sse-id'));
+  if (json) {
+    row.title = '눌러서 JSON 펼치기';
+    row.addEventListener('click', () => {
+      if (String(window.getSelection ? window.getSelection() : '')) return; // 글자를 고르는 중이면 펼치지 않음
+      const open = row.classList.toggle('open');
+      row.querySelector('.sse-json')?.remove();
+      if (!open) return;
+      let pretty = data;
+      try {
+        pretty = formatJson(data, 2);
+      } catch (e) {
+        /* JSON 이 아니면 그대로 */
+      }
+      row.appendChild(h('pre.sse-json', pretty));
+    });
+  }
+  return row;
 }
 
 function looksTextual(bytes) {

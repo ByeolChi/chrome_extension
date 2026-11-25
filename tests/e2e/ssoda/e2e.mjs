@@ -43,11 +43,26 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
       res.write('data: start\n\n');
       const t = setInterval(() => res.write('data: tick\n\n'), 300);
-      req.on('close', () => clearInterval(t));
+      // req 의 'close' 는 요청 본문을 다 읽으면 바로 오므로(Node 16+) 응답 쪽 'close'(연결 끊김)만 본다
       res.on('close', () => clearInterval(t));
       hanging.add(res);
       return;
     }
+    // 서버가 끝내는 스트림: 주석 1줄, 이벤트 3개(가운데는 이름·id·큰 정수 JSON)
+    if (u.pathname === '/sse-done') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+      res.write(': hello\n\ndata: first\n\n');
+      setTimeout(() => res.write('event: update\nid: 42\ndata: {"n":2,"big":1234567890123456789}\n\n'), 100);
+      setTimeout(() => res.end('data: last\n\n'), 200);
+      return;
+    }
+    const redirect = (code, to) => {
+      res.writeHead(code, { Location: to });
+      res.end();
+    };
+    if (/^\/r(30[1-3]|30[78])$/.test(u.pathname)) return redirect(Number(u.pathname.slice(2)), '/method');
+    if (u.pathname === '/loop') return redirect(302, '/loop?n=' + (Number(u.searchParams.get('n') || 0) + 1));
+    if (u.pathname === '/method') return json({ method: req.method, body, ct: req.headers['content-type'] || null });
     json({ path: u.pathname });
   });
 });
@@ -302,8 +317,9 @@ await check('도우미가 구버전(v1.3.1)이면 도우미 창에 새 버전 �
   assert(/새 버전\(v1\.3\.2\)/.test(r.text), r.text.slice(0, 200));
 });
 
-await check('다른 서버로 리다이렉트될 때 그 서버로 가는 다른 요청이 진행 중이면 헤더가 섞일 수 있다고 경고', async () => {
+await check('다른 서버로 리다이렉트되면 그 서버 차례를 기다렸다 보내고, 그 서버로 가는 다른 요청의 헤더가 섞이지 않음', async () => {
   // 두 번째 서버(다른 host:port)
+  const seen1 = [];
   const seen2 = [];
   const holds = new Set();
   const s2 = http.createServer((req, res) => {
@@ -315,6 +331,7 @@ await check('다른 서버로 리다이렉트될 때 그 서버로 가는 다른
   await new Promise((r) => s2.listen(0, '127.0.0.1', r));
   const P2 = s2.address().port;
   const redirSrv = http.createServer((req, res) => {
+    seen1.push({ path: req.url, headers: req.headers });
     res.writeHead(302, { Location: `http://127.0.0.1:${P2}/landing` });
     res.end();
   });
@@ -322,25 +339,168 @@ await check('다른 서버로 리다이렉트될 때 그 서버로 가는 다른
   const P1 = redirSrv.address().port;
   const r = await ev(page, async (p1, p2) => {
     const app = window.csApp;
-    const b = app.newRequestTab({ url: `http://127.0.0.1:${p2}/hang`, cookies: [{ key: 'b', value: 'secret-of-B', enabled: true }] }, 'B');
-    await new Promise((r) => setTimeout(r, 200));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const b = app.newRequestTab({ url: `http://127.0.0.1:${p2}/hang`, headers: [{ key: 'User-Agent', value: 'ua-B', enabled: true }], cookies: [{ key: 'b', value: 'secret-of-B', enabled: true }] }, 'B');
+    await sleep(200);
     const pb = app.send(b, { engine: 'browser' });
-    await new Promise((r) => setTimeout(r, 500));
-    const a = app.newRequestTab({ url: `http://127.0.0.1:${p1}/start` }, 'A');
-    await new Promise((r) => setTimeout(r, 200));
-    const ra = await app.send(a, { engine: 'browser' });
+    await sleep(500);
+    const a = app.newRequestTab({
+      url: `http://127.0.0.1:${p1}/start`,
+      headers: [{ key: 'Authorization', value: 'Bearer tok-A', enabled: true }, { key: 'X-Trace', value: 'from-A', enabled: true }, { key: 'User-Agent', value: 'ua-A', enabled: true }],
+      cookies: [{ key: 'a', value: 'cookie-of-A', enabled: true }],
+    }, 'A');
+    await sleep(200);
+    const pa = app.send(a, { engine: 'browser' });
+    await sleep(800);
+    const waitingText = app.views.get(a.id).response.el.innerText;
     app.cancel(b);
     await pb;
-    return { status: ra.status, warnings: ra.warnings || [] };
+    const ra = await Promise.race([pa, sleep(6000).then(() => ({ stuck: true }))]);
+    if (ra.stuck) app.cancel(a);
+    return { waitingText, ok: ra.ok, status: ra.status, hops: (ra.hops || []).length, warnings: ra.warnings || [], stuck: !!ra.stuck };
   }, P1, P2);
+  const start = seen1.find((s) => s.path === '/start');
   const landed = seen2.find((s) => s.path === '/landing');
   for (const h of holds) h.destroy();
   s2.close();
   redirSrv.close();
-  const mixed = !!(landed && /secret-of-B/.test(landed.headers.cookie || ''));
-  const warned = r.warnings.some((w) => /섞였을 수 있습니다/.test(w));
-  assert(warned, JSON.stringify({ r, mixed }));
-  return `실제로 B 의 쿠키가 섞임=${mixed}, 경고 표시=${warned}`;
+  assert(/같은 서버로 보낸 이전 요청을 기다리는 중/.test(r.waitingText), 'A 가 B 차례를 기다리지 않음: ' + r.waitingText.slice(0, 120));
+  assert(r.ok && r.status === 200 && r.hops === 2 && !r.stuck, JSON.stringify(r));
+  assert(start && start.headers.authorization === 'Bearer tok-A' && /cookie-of-A/.test(start.headers.cookie || '') && start.headers['user-agent'] === 'ua-A' && !start.headers.origin, JSON.stringify(start && start.headers));
+  const h2 = (landed && landed.headers) || {};
+  // B 의 쿠키·User-Agent 가 섞이지 않고, A 의 인증 정보(Authorization·Cookie)는 다른 서버로 가지 않으며, 나머지 헤더는 curl 처럼 이어짐
+  assert(landed && !h2.cookie && !h2.authorization && h2['x-trace'] === 'from-A' && h2['user-agent'] === 'ua-A' && !h2.origin, JSON.stringify(h2));
+  assert(!r.warnings.some((w) => /섞/.test(w)), r.warnings.join(' / '));
+  return `A→B 리다이렉트: B 의 쿠키 없음, User-Agent=${h2['user-agent']}, X-Trace=${h2['x-trace']}`;
+});
+
+await check('리다이렉트: 303 은 GET 으로 바꾸고 본문을 빼며, 307 은 메서드·본문 그대로, 302 는 POST 만 GET', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const go = async (method, path) => {
+      const t = app.newRequestTab({ method, url: base + path, body: { mode: 'raw', rawLanguage: 'json', raw: '{"a":1}' } }, path);
+      await new Promise((r) => setTimeout(r, 100));
+      const res = await app.send(t, { engine: 'browser' });
+      const got = res.ok ? JSON.parse(new TextDecoder().decode(res.body)) : res.error;
+      return { ...got, hops: (res.hops || []).map((h) => h.method + ' ' + new URL(h.url).pathname + ' ' + (h.statusCode || '')) };
+    };
+    return { r303: await go('POST', '/r303'), r307: await go('POST', '/r307'), r308: await go('PUT', '/r308'), r302: await go('POST', '/r302'), r302put: await go('PUT', '/r302') };
+  }, BASE);
+  assert(r.r303.method === 'GET' && r.r303.body === '' && r.r303.ct === null, JSON.stringify(r.r303));
+  assert(r.r307.method === 'POST' && r.r307.body === '{"a":1}' && r.r307.ct === 'application/json', JSON.stringify(r.r307));
+  assert(r.r308.method === 'PUT' && r.r308.body === '{"a":1}', JSON.stringify(r.r308));
+  assert(r.r302.method === 'GET' && r.r302.body === '', JSON.stringify(r.r302));
+  assert(r.r302put.method === 'PUT' && r.r302put.body === '{"a":1}', JSON.stringify(r.r302put));
+  assert(r.r303.hops.join(',') === 'POST /r303 303,GET /method 200', r.r303.hops.join(','));
+  return r.r303.hops.join(' → ');
+});
+
+await check('리다이렉트: 따라가기를 끄면 3xx 를 그대로, 20번을 넘으면 오류', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const t1 = app.newRequestTab({ url: base + '/r303', settings: { followRedirects: false } }, 'no-follow');
+    await new Promise((r) => setTimeout(r, 100));
+    const a = await app.send(t1, { engine: 'browser' });
+    const t2 = app.newRequestTab({ url: base + '/loop' }, 'loop');
+    await new Promise((r) => setTimeout(r, 100));
+    const b = await app.send(t2, { engine: 'browser' });
+    return {
+      a: { ok: a.ok, status: a.status, opaque: a.opaqueRedirect, loc: (a.headers || []).find((x) => x.name.toLowerCase() === 'location')?.value },
+      b: { ok: b.ok, code: b.error && b.error.code, msg: b.error && b.error.message, hops: (b.hops || []).length },
+    };
+  }, BASE);
+  assert(r.a.ok && r.a.status === 303 && r.a.opaque && r.a.loc === '/method', JSON.stringify(r.a));
+  assert(!r.b.ok && r.b.code === 'net::ERR_TOO_MANY_REDIRECTS' && r.b.hops === 21, JSON.stringify(r.b));
+  return `${r.b.msg} (요청 ${r.b.hops}번)`;
+});
+
+await check('SSE: 받는 대로 이벤트를 보여 주고, 멈춤을 누르면 그때까지 받은 내용이 응답으로 남음', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const t = app.newRequestTab({ url: base + '/sse' }, 'sse-live');
+    await sleep(200);
+    const p = app.send(t, { engine: 'browser' });
+    await sleep(1200);
+    const view = app.views.get(t.id).response;
+    const live = { text: view.el.innerText, rows: view.el.querySelectorAll('.sse-row').length };
+    view.el.querySelector('.sse-stop').click();
+    const res = await p;
+    await sleep(100);
+    return {
+      live, ok: res.ok, status: res.status, end: res.stream && res.stream.end, n: res.stream ? res.stream.events.length : -1,
+      rows: view.el.querySelectorAll('.sse-row').length, text: view.el.innerText, loading: app.controllers.has(t.id),
+    };
+  }, BASE);
+  assert(/받는 중/.test(r.live.text) && /멈춤/.test(r.live.text) && r.live.rows >= 3, JSON.stringify(r.live).slice(0, 300));
+  assert(r.ok && r.status === 200 && r.end === 'stopped' && r.n >= 4 && r.rows === r.n && !r.loading, JSON.stringify({ ok: r.ok, end: r.end, n: r.n, rows: r.rows }));
+  assert(new RegExp(`이벤트 ${r.n}개 · .* · 멈춤`).test(r.text), r.text.slice(0, 300));
+  return `받는 중 ${r.live.rows}개 → 멈춘 뒤 응답에 ${r.n}개`;
+});
+
+await check('SSE: 타임아웃이 되면 끊고 그때까지 받은 이벤트를 응답으로 (오류 아님)', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const t = app.newRequestTab({ url: base + '/sse', settings: { timeout: 1000 } }, 'sse-timeout');
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = performance.now();
+    const res = await app.send(t, { engine: 'browser' });
+    return { ms: Math.round(performance.now() - t0), ok: res.ok, end: res.stream && res.stream.end, n: res.stream ? res.stream.events.length : -1, warnings: res.warnings || [] };
+  }, BASE);
+  assert(r.ok && r.end === 'timeout' && r.n >= 3 && r.ms < 3000, JSON.stringify(r));
+  assert(r.warnings.some((w) => /타임아웃\(1000 ms\)이 되어 스트림을 끊었습니다/.test(w)), r.warnings.join(' / '));
+  return `${r.ms} ms 에 끊음, 이벤트 ${r.n}개`;
+});
+
+await check('SSE: 서버가 끝낸 스트림은 Events 보기로 (이름·id·주석 수, JSON 이벤트는 눌러서 펼치면 큰 정수 그대로)', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const t = app.newRequestTab({ url: base + '/sse-done' }, 'sse-done');
+    await new Promise((r) => setTimeout(r, 200));
+    const res = await app.send(t, { engine: 'browser' });
+    await new Promise((r) => setTimeout(r, 100));
+    const view = app.views.get(t.id).response;
+    const rows = [...view.el.querySelectorAll('.sse-row')];
+    rows[1] && rows[1].click();
+    const pretty = (view.el.querySelector('.sse-json') || {}).textContent || '';
+    return {
+      ok: res.ok, end: res.stream && res.stream.end, events: res.stream ? res.stream.events.map((e) => [e.type, e.id, e.data]) : [], comments: res.stream && res.stream.comments,
+      rows: rows.length, summary: (view.el.querySelector('.sse-summary') || {}).textContent || '', pretty,
+    };
+  }, BASE);
+  assert(r.ok && r.end === 'closed' && r.rows === 3 && r.comments === 1, JSON.stringify(r).slice(0, 300));
+  assert(JSON.stringify(r.events) === JSON.stringify([['message', '', 'first'], ['update', '42', '{"n":2,"big":1234567890123456789}'], ['message', '42', 'last']]), JSON.stringify(r.events));
+  assert(/이벤트 3개/.test(r.summary) && /서버가 스트림을 끝냄/.test(r.summary) && /주석 1줄/.test(r.summary), r.summary);
+  assert(/"big": 1234567890123456789/.test(r.pretty), r.pretty);
+  return r.summary;
+});
+
+await check('기본 타임아웃 60초: 예전 설정의 0(무제한)은 다시 열 때 한 번 60초로 바꾸고 알림', async () => {
+  const fresh = await ev(page, () => ({ timeout: window.csApp.settings.timeout, rev: window.csApp.settings.settingsRev }));
+  // 예전 판 설정(판 번호 없음, 0)을 넣고 이 탭이 덮어쓰지 않게 멈춘 뒤 다시 연다
+  await ev(page, async () => {
+    const s = { ...window.csApp.settings, timeout: 0 };
+    delete s.settingsRev;
+    window.csApp.store.suspended = true;
+    await chrome.storage.local.set({ settings: s });
+    setTimeout(() => location.reload(), 50);
+  });
+  await sleep(600);
+  await waitApp(page);
+  await sleep(300);
+  const first = await ev(page, async () => ({
+    timeout: window.csApp.settings.timeout,
+    stored: (await chrome.storage.local.get('settings')).settings,
+    toast: /기본 타임아웃을 60초로 바꿨습니다/.test(document.body.innerText),
+  }));
+  await ev(page, () => setTimeout(() => location.reload(), 50));
+  await sleep(600);
+  await waitApp(page);
+  await sleep(300);
+  const second = await ev(page, () => ({ timeout: window.csApp.settings.timeout, toast: /기본 타임아웃을 60초로 바꿨습니다/.test(document.body.innerText) }));
+  assert(fresh.timeout === 60000 && fresh.rev === 2, JSON.stringify(fresh));
+  assert(first.timeout === 60000 && first.stored.timeout === 60000 && first.stored.settingsRev === 2 && first.toast, JSON.stringify({ ...first, stored: { timeout: first.stored.timeout, rev: first.stored.settingsRev } }));
+  assert(second.timeout === 60000 && !second.toast, JSON.stringify(second));
 });
 
 await check('앱 탭을 하나 더 열면 먼저 열린 탭은 저장을 멈추고 안내를 띄움', async () => {

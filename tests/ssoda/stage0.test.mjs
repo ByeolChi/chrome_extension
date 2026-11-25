@@ -9,9 +9,10 @@ const { parseCurl } = await mod('curl-parser.js');
 const { parseExtraArgs, describeRemovedArgs, buildCurlExec, CurlRunError } = await mod('curl-runner.js');
 const { formatJson, hasLossyNumbers, isLossyNumber } = await mod('json-format.js');
 const { generateCode } = await mod('codegen.js');
-const { buildDnrRules } = await mod('http.js');
+const { buildDnrRules, redirectStep, hopHeaders, MAX_REDIRECTS } = await mod('http.js');
 const { sanitizeBackupData, curlSettingsSummary } = await mod('backup-check.js');
 const { prepareRequest } = await mod('prepare.js');
+const { DEFAULT_SETTINGS, migrateSettings } = await mod('store.js');
 
 /* ---------------- curl 허용 목록 ---------------- */
 test('추가 인자: @파일 값은 제외(file)', () => {
@@ -146,23 +147,88 @@ test('코드 생성: 평범한 JSON 은 예전처럼 객체 리터럴', () => {
 });
 
 /* ---------------- 리다이렉트 헤더 규칙 ---------------- */
-test('DNR 규칙: http↔https 같은 호스트 리다이렉트에 Cookie 를 뺀 헤더 규칙 추가', () => {
+test('DNR 규칙: 이 주소에만 건다 (서버 리다이렉트는 단계마다 새로), http 는 Chrome 의 https 전환(HSTS)용 규칙 하나 더', () => {
   const hdrs = [{ header: 'user-agent', operation: 'set', value: 'UA/1' }, { header: 'cookie', operation: 'set', value: 'a=1' }, { header: 'origin', operation: 'remove' }];
   const rules = buildDnrRules('http://api.example.com/v1/x?q=1', hdrs, { tabId: 7, extId: 'ext' });
-  const byFilter = Object.fromEntries(rules.map((r) => [r.condition.urlFilter, r]));
-  assert.ok(byFilter['|http://api.example.com/v1/x?q=1|']);
-  assert.deepEqual(byFilter['|http://api.example.com/'].action.requestHeaders, hdrs);
-  const cross = byFilter['|https://api.example.com/'];
-  assert.ok(cross, Object.keys(byFilter).join(', '));
-  assert.deepEqual(cross.action.requestHeaders.map((x) => x.header), ['user-agent', 'origin']);
-  assert.deepEqual(cross.condition.tabIds, [7]);
-  assert.deepEqual(cross.condition.initiatorDomains, ['ext']);
-  // https → http 반대 방향도
-  const r2 = buildDnrRules('https://h.test:8443/a', [{ header: 'referer', operation: 'set', value: 'r' }], {});
-  assert.ok(r2.some((r) => r.condition.urlFilter === '|http://h.test:8443/'));
-  // cookie 만 있으면 교차 스킴 규칙은 만들지 않음
-  const r3 = buildDnrRules('http://h.test/', [{ header: 'cookie', operation: 'set', value: 'a=1' }], {});
-  assert.ok(!r3.some((r) => r.condition.urlFilter === '|https://h.test/'));
+  assert.deepEqual(rules.map((r) => [r.priority, r.condition.urlFilter]), [[2, '|http://api.example.com/v1/x?q=1|'], [1, '|https://api.example.com/']]);
+  for (const r of rules) {
+    assert.deepEqual(r.action.requestHeaders, hdrs); // 같은 요청이므로 Cookie 도
+    assert.deepEqual(r.condition.tabIds, [7]);
+    assert.deepEqual(r.condition.initiatorDomains, ['ext']);
+    assert.deepEqual(r.condition.resourceTypes, ['xmlhttprequest']);
+  }
+  assert.equal(buildDnrRules('https://h.test:8443/a', hdrs, {}).length, 1);
+  // urlFilter 특수 문자(* ^ |)가 든 주소는 정확히 고를 수 없어 같은 서버 전체 (같은 서버 요청은 하나씩 보내므로 안전)
+  assert.equal(buildDnrRules('https://h.test:8443/a?q=a|b*', hdrs, {})[0].condition.urlFilter, '|https://h.test:8443/');
+  assert.deepEqual(buildDnrRules('http://h.test/', [], {}), []);
+});
+
+test('리다이렉트 단계: 메서드·본문은 Fetch 표준, 인증 정보는 다른 출처로 보내지 않음', () => {
+  const o = 'http://a.test:8080';
+  const step = (status, method, to) => redirectStep({ status, method, to, origin: o });
+  assert.deepEqual(step(302, 'POST', 'http://a.test:8080/x'), { method: 'GET', dropBody: true, crossOrigin: false });
+  assert.deepEqual(step(301, 'POST', 'http://a.test:8080/x'), { method: 'GET', dropBody: true, crossOrigin: false });
+  assert.deepEqual(step(302, 'PUT', 'http://a.test:8080/x'), { method: 'PUT', dropBody: false, crossOrigin: false });
+  assert.deepEqual(step(303, 'PUT', 'http://b.test/x'), { method: 'GET', dropBody: true, crossOrigin: true });
+  assert.deepEqual(step(303, 'HEAD', 'http://a.test:8080/'), { method: 'HEAD', dropBody: false, crossOrigin: false });
+  assert.deepEqual(step(307, 'POST', 'https://a.test:8080/x'), { method: 'POST', dropBody: false, crossOrigin: true }); // 스킴이 바뀌어도 다른 출처
+  assert.equal(step(308, 'POST', 'http://a.test:9090/').crossOrigin, true); // 포트가 바뀌어도
+
+  const pairs = [['Authorization', 'Bearer t'], ['Content-Type', 'application/json'], ['X-Trace', '1']];
+  const dnr = [{ header: 'cookie', operation: 'set', value: 'a=1' }, { header: 'user-agent', operation: 'set', value: 'UA' }, { header: 'origin', operation: 'remove' }];
+  const same = hopHeaders(pairs, dnr, {});
+  assert.equal(same.pairs.length, 3);
+  assert.equal(same.dnr.length, 3);
+  const cross = hopHeaders(pairs, dnr, { crossOrigin: true });
+  assert.deepEqual(cross.pairs.map(([k]) => k), ['Content-Type', 'X-Trace']);
+  assert.deepEqual(cross.dnr.map((x) => x.header), ['user-agent', 'origin']);
+  const toGet = hopHeaders(pairs, dnr, { bodyDropped: true });
+  assert.deepEqual(toGet.pairs.map(([k]) => k), ['Authorization', 'X-Trace']);
+  assert.equal(MAX_REDIRECTS, 20);
+});
+
+/* ---------------- 기본 타임아웃 60초 ---------------- */
+test('설정 형식 2판: 예전 설정의 타임아웃 0(무제한)은 한 번 60초로, 직접 넣은 값은 그대로', () => {
+  assert.equal(DEFAULT_SETTINGS.timeout, 60000);
+  const old = migrateSettings({ theme: 'dark', timeout: 0, historyLimit: 50 });
+  assert.equal(old.settings.timeout, 60000);
+  assert.deepEqual(old.notes, ['timeout']);
+  assert.equal(old.changed, true);
+  assert.equal(old.settings.settingsRev, 2);
+  assert.equal(old.settings.theme, 'dark');
+  assert.equal(old.settings.historyLimit, 50);
+  const kept = migrateSettings({ timeout: 30000 });
+  assert.equal(kept.settings.timeout, 30000);
+  assert.deepEqual(kept.notes, []);
+  assert.equal(kept.changed, true); // 판 번호만 올려 저장
+  // 2판에서 0 을 고른 사용자는 그대로 무제한
+  const now = migrateSettings({ timeout: 0, settingsRev: 2 });
+  assert.equal(now.settings.timeout, 0);
+  assert.deepEqual(now.notes, []);
+  assert.equal(now.changed, false);
+  // 저장된 설정이 없으면(새로 설치) 기본값
+  assert.equal(migrateSettings(undefined).settings.timeout, 60000);
+  assert.equal(migrateSettings([]).settings.timeout, 60000);
+});
+
+test('기본 타임아웃은 보낼 때만 쓰고, 복사·코드 생성에는 요청에 직접 넣은 값만 적음', () => {
+  const draft = (timeout) => ({ method: 'GET', url: 'https://api.example.com/a', headers: [], params: [], cookies: [], body: { mode: 'none' }, auth: { type: 'none' }, settings: { timeout } });
+  const viaDefault = prepareRequest(draft(null), { defaults: { timeout: 60000 } });
+  assert.equal(viaDefault.settings.timeout, 60000);
+  assert.equal(viaDefault.settings.timeoutIsDefault, true);
+  const ex = buildCurlExec(viaDefault, {});
+  assert.deepEqual(ex.argv.slice(ex.argv.indexOf('--max-time'), ex.argv.indexOf('--max-time') + 2), ['--max-time', '60']);
+  for (const lang of ['curl', 'curl-cmd', 'fetch', 'axios', 'python', 'httpie', 'powershell', 'go']) {
+    assert.doesNotMatch(generateCode(lang, viaDefault), /max-time|timeout|Timeout/, lang);
+  }
+  assert.match(generateCode('curl', viaDefault, { exact: true }), /--max-time 60/); // 실제로 실행한 명령(Terminal)
+  const own = prepareRequest(draft(5000), { defaults: { timeout: 60000 } });
+  assert.equal(own.settings.timeoutIsDefault, undefined);
+  assert.match(generateCode('curl', own), /--max-time 5/);
+  assert.match(generateCode('python', own), /timeout=5/);
+  const none = prepareRequest(draft(0), { defaults: { timeout: 60000 } });
+  assert.equal(none.settings.timeout, 0);
+  assert.doesNotMatch(generateCode('curl', none, { exact: true }), /max-time/);
 });
 
 /* ---------------- 백업 복원 검사 ---------------- */
