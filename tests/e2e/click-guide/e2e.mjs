@@ -77,6 +77,8 @@ async function navigate(page, url) {
 }
 
 const pageEval = (page, expr) => evaluate(cdp, page.sessionId, expr);
+// ms 안에 끝나지 않으면 오류로 본다 (평가가 멈춘 페이지를 30초씩 기다리지 않게)
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${ms}ms 안에 끝나지 않음`)), ms))]);
 
 /* 확장 페이지(옵션)에서 메시지 보내기·DB 읽기. 확장이 다시 시작되면(파일 URL 접근을 바꿀 때) 새로 연다 */
 let ext = await openPage(`chrome-extension://${extId}/src/options/options.html`);
@@ -226,8 +228,14 @@ try {
 
     await activate(tabA);
     await click(tabA, 80, 40);   // '저장' 버튼
-    const s1 = await waitSteps((s) => s.steps.length >= 1);
-    st = await state();
+    // 서비스 워커는 단계를 저장한 뒤에 가이드와 녹화 상태의 단계 수를 차례로 고친다 → 셋 다 반영될 때까지 기다린다
+    let s1 = null;
+    for (let t0 = Date.now(); Date.now() - t0 < 5000;) {
+      s1 = await waitSteps((s) => s.steps.length >= 1 && s.stepCount >= 1);
+      st = await state();
+      if (s1 && s1.stepCount >= 1 && st.state && st.state.stepCount >= 1) break;
+      await sleep(150);
+    }
     const idx = s1 && s1.steps[0] ? s1.steps[0].index : null;
     check('1-5 대상 탭의 첫 클릭이 0번 단계, 단계 수 1', s1 && s1.steps.length === 1 && idx === 0 && st.state.stepCount === 1,
       `steps=${s1 && s1.steps.length} index=${idx} stepCount=${st.state && st.state.stepCount} sessionCount=${s1 && s1.stepCount}`);
@@ -732,8 +740,24 @@ try {
       try { await cdp.send('Target.closeTarget', { targetId: page.targetId }); } catch (_) { /* 이미 닫힘 */ }
       if (!sw) throw new Error('파일 URL 접근을 바꾼 뒤 확장이 다시 시작되지 않았습니다');
       if (beforeReopen) await beforeReopen(sw);
-      ext = await openPage(`chrome-extension://${extId}/src/options/options.html`);
-      await sleep(300);
+      // 확장이 막 다시 시작된 때 연 페이지는 확장 API 일부(chrome.storage)가 빠진 채 뜨거나, load 가 오지 않거나, 평가가 멈출 때가 있다.
+      // 그래서 확장 API 가 다 갖춰진 설정 화면을 얻을 때까지 다시 연다 (다시 열었으면 이유를 남긴다)
+      ext = null;
+      for (let i = 0; i < 6 && !ext; i++) {
+        await sleep(300);
+        let page = null;
+        let why = '';
+        try {
+          page = await openPage(`chrome-extension://${extId}/src/options/options.html`);
+          if (await withTimeout(pageEval(page, `typeof chrome.storage === 'object' && !!chrome.storage.local`), 5000)) ext = page;
+          else why = 'chrome.storage 없음';
+        } catch (e) { why = e.message.slice(0, 60); }
+        if (!ext) {
+          console.log(`  (확장이 다시 시작된 뒤 설정 화면을 다시 엶: ${why})`);
+          if (page) { try { await cdp.send('Target.closeTarget', { targetId: page.targetId }); } catch (_) { /* 이미 닫힘 */ } }
+        }
+      }
+      if (!ext) throw new Error('확장이 다시 시작된 뒤 설정 화면을 열지 못했습니다');
     };
 
     // 1) 꺼져 있으면 녹화를 시작하지 않고, 켜는 곳을 알려 준다
