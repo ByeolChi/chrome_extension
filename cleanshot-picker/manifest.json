@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CleanShot Picker",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmQqClK0uWuWNixA9fPgG2IFlm9KnIDz6lYdrFib/l/OZtq6MGWD+6vl+q3FjRJk6a8tRK+HwxuUvktAKNYbF/tJ6fBWSgeCx6TvP3CUnLFH8HV5g9VxKtqflHaJwWzLN1YNQ0St7VELIK4TXWZUoaTRyUN6/LpzbNBv+un8E5Vk1L+D6I+BnjwhqHE259RW/L/k4a1Yq/katSH0/CBSDezlAzBZPB0CNih9F2UbbaaC2BBHJaoD5U1sedehIokEpDFC+n9JGzIRVMivFJRXKM1/qH2QI7R/caXYRSHokYjl3iYYAq6BbfEhajdtpSf9tLof/4bCFJjOTShUaP5qgaQIDAQAB",
   "description": "웹페이지의 임시 요소를 클릭으로 지우고 현재 화면이나 페이지 전체를 PNG로 캡처합니다.",
   "permissions": ["activeTab", "scripting", "downloads", "storage", "alarms"],
