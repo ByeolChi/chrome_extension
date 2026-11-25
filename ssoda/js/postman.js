@@ -1,13 +1,18 @@
 // Postman Collection v2.0 / v2.1, Postman Environment 가져오기·내보내기
-import { newCollection, newFolder, newRequestItem, newRequest, newAuth, newEnvironment, parseQueryToParams } from './model.js';
+import { newCollection, newFolder, newRequestItem, newRequest, newAuth, newEnvironment, parseQueryToParams, syncPathVars } from './model.js';
 import { kvRow, uuidv4 } from './util.js';
 import { looksLikeCurl, parseCurl } from './curl-parser.js';
+import { parseJson } from './checks.js';
+import { parseYaml } from './yaml.js';
+import { isOpenApi, importOpenApi } from './openapi.js';
+import { isHar, importHar } from './har.js';
 
 export const SCHEMA_V21 = 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json';
 
 /* ---------------- 입력 형식 감지 ---------------- */
-export function detectImport(text) {
-  const t = String(text || '').trim();
+// opts.sourceUrl: 주소에서 받은 문서면 그 주소 (OpenAPI 의 상대 서버 주소 기준)
+export function detectImport(text, { sourceUrl = '' } = {}) {
+  const t = String(text || '').replace(/^﻿/, '').trim();
   if (!t) throw new Error('가져올 내용이 비어 있습니다.');
   if (looksLikeCurl(t)) return { kind: 'curl', ...parseCurl(t) };
   let obj = null;
@@ -26,14 +31,28 @@ export function detectImport(text) {
     if (Array.isArray(obj.values) && ('name' in obj || obj._postman_variable_scope)) {
       return { kind: 'environment', environment: importPostmanEnvironment(obj) };
     }
+    // OpenAPI 는 예시의 19자리 숫자가 바뀌지 않게 숫자를 원문 그대로 다시 읽는다
+    if (isOpenApi(obj)) return { kind: 'collection', source: 'openapi', ...importOpenApi(parseJson(t), { sourceUrl }) };
+    if (isHar(obj)) return { kind: 'collection', source: 'har', ...importHar(obj) };
     if (obj.requests && obj.order) throw new Error('Postman Collection v1 형식은 지원하지 않습니다. Postman에서 v2.1로 다시 내보내 주세요.');
-    throw new Error('지원하지 않는 JSON 형식입니다. (Postman Collection v2.x / Environment / Ssoda 백업만 지원)');
+    throw new Error('지원하지 않는 JSON 형식입니다. (Postman Collection v2.x · Environment, OpenAPI 3 · Swagger 2, HAR, Ssoda 백업을 지원)');
+  }
+  // YAML 로 쓴 OpenAPI·Swagger
+  if (/^\s*["']?(openapi|swagger)["']?\s*:/m.test(t)) {
+    let doc;
+    try {
+      doc = parseYaml(t);
+    } catch (e) {
+      throw new Error('YAML 을 읽을 수 없습니다: ' + e.message);
+    }
+    if (isOpenApi(doc)) return { kind: 'collection', source: 'openapi', ...importOpenApi(doc, { sourceUrl }) };
+    throw new Error('OpenAPI 문서에 paths 가 없습니다.');
   }
   if (/^(https?:\/\/|www\.|localhost[:/])/i.test(t) && !/\s/.test(t)) {
     const req = newRequest({ url: t });
     return { kind: 'url', request: req, warnings: [], name: t };
   }
-  throw new Error('인식할 수 없는 형식입니다. cURL 명령, Postman Collection(JSON) 또는 URL을 붙여넣어 주세요.');
+  throw new Error('인식할 수 없는 형식입니다. cURL 명령, Postman Collection(JSON), OpenAPI(JSON·YAML), HAR 또는 URL을 붙여넣어 주세요.');
 }
 
 /* ---------------- Collection 가져오기 ---------------- */
@@ -91,13 +110,10 @@ function convertRequestIn(pr, warnings) {
     req.params = query.length
       ? query.map((q) => kvRow(String(q.key ?? ''), q.value == null ? '' : String(q.value), q.disabled !== true, { description: descText(q.description) }))
       : parseQueryToParams(req.url);
-    // 경로 변수 :id → 값으로 치환
+    // 경로 변수 :id → Params 탭의 Path Variables 표 (주소의 :id 는 그대로 두고 값은 표에)
     if (Array.isArray(u.variable) && u.variable.length) {
-      for (const v of u.variable) {
-        if (v && v.key && v.value != null && v.value !== '') {
-          req.url = req.url.replace(new RegExp(':' + escapeRe(v.key) + '(?=/|$|\\?)', 'g'), String(v.value));
-        }
-      }
+      const vars = u.variable.filter((v) => v && v.key).map((v) => kvRow(String(v.key), valueToString(v.value), v.disabled !== true, { description: descText(v.description) }));
+      req.pathVars = syncPathVars(req.url, vars);
     }
   }
   // Headers
@@ -248,10 +264,6 @@ function descText(d) {
   return '';
 }
 
-function escapeRe(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function dedupe(arr) {
   return [...new Set(arr)];
 }
@@ -313,6 +325,9 @@ export function exportRequest(r) {
     out.body = { mode: 'file', file: { src: b.binary?.name || '' } };
   }
   out.url = urlToObject(r.url, r.params);
+  // Path Variables → Postman 의 url.variable
+  const pv = (r.pathVars || []).filter((v) => v.key);
+  if (pv.length) out.url.variable = pv.map((v) => ({ key: v.key, value: v.value, ...(v.description ? { description: v.description } : {}) }));
   if (r.description) out.description = r.description;
   return out;
 }

@@ -166,7 +166,7 @@ cURL 명령을 붙여넣어 바로 호출하고, **헤더 · 쿠키 · 파라미
 ### 요청 편집
 | 탭 | 내용 |
 |---|---|
-| Params | 쿼리 파라미터 표 (URL과 양방향 동기화, 체크박스로 끄고 켜기, Bulk Edit) |
+| Params | 쿼리 파라미터 표 (URL과 양방향 동기화, 체크박스로 끄고 켜기, Bulk Edit), **Path Variables**: 주소의 `/:이름` 칸(예: `{{baseUrl}}/users/:id`)에 넣을 값 표. 보낼 때 그 칸을 값으로 바꿉니다(`{{변수}}` 사용 가능). 포트(`:8080`)처럼 칸 처음이 `:` 가 아니면 경로 변수가 아닙니다 |
 | Authorization | Inherit(상위 상속) / No Auth / Bearer Token / Basic Auth / API Key (헤더 또는 쿼리) |
 | Headers | 헤더 표, 헤더 이름·값 자동완성, Bulk Edit, **자동 헤더 보기**(인증/Body/쿠키로 추가되는 헤더) |
 | Body | none / form-data(파일 업로드) / x-www-form-urlencoded / raw(JSON·Text·JavaScript·HTML·XML, 강조·Beautify) / binary. JSON Beautify 는 들여쓰기만 바꾸고 숫자·문자열은 원문 그대로 둡니다 (19자리 ID 같은 큰 정수가 바뀌지 않음) |
@@ -257,7 +257,18 @@ cURL 명령을 붙여넣어 바로 호출하고, **헤더 · 쿠키 · 파라미
 JavaScript·Python 코드는 JSON Body 를 객체로 바꿔 보여 줍니다. 다만 19자리 ID 처럼 그 언어의 숫자로 바꾸면 값이 달라지는 숫자가 있으면 Body 원문 문자열을 그대로 씁니다.
 
 ### 컬렉션 가져오기 · 내보내기
-- **가져오기**: Postman Collection v2.0 / v2.1, Postman Environment, Globals (JSON 붙여넣기 또는 파일 드래그)
+- **가져오기**: Postman Collection v2.0 / v2.1, Postman Environment, Globals, **OpenAPI 3.x · Swagger 2.0**(JSON·YAML), **HAR** (붙여넣기, 파일 드래그, 또는 주소)
+  - **주소에서 가져오기**: 가져오기 창 위쪽 칸에 문서 주소(예: Spring 의 `http://localhost:8080/v3/api-docs`)를 넣습니다. `{{baseUrl}}/v3/api-docs` 처럼 지금 환경의 변수를 쓸 수 있고, SSH 터널을 쓰는 환경이면 터널을 거쳐 받습니다.
+  - Postman 의 경로 변수(`url.variable`)는 Params 탭의 Path Variables 로 가져오고, 내보낼 때 다시 `url.variable` 로 냅니다.
+- **OpenAPI · Swagger** 를 가져오면 컬렉션 하나가 생깁니다.
+  - 서버 주소는 컬렉션 변수 `{{baseUrl}}` 이 됩니다. 상대 주소(`/api`)면 문서를 받은 주소를 기준으로 채웁니다.
+  - 태그마다 폴더를 만들고, 요청 이름은 summary → operationId → `METHOD 경로` 순으로 정합니다.
+  - 경로의 `{id}` 는 Path Variables(`/:id`), 쿼리·헤더·쿠키 매개변수는 각 표로 옮기고 필수인 것만 켭니다. 값은 문서의 예시·기본값을 씁니다.
+  - 본문은 JSON 이면 예시(없으면 스키마로 만든 예시)를, 폼이면 필드를 넣습니다. 예시의 19자리 숫자도 바뀌지 않습니다.
+  - 인증(securitySchemes)은 컬렉션 인증으로 옮깁니다: Bearer → `{{token}}`, Basic → `{{username}}`·`{{password}}`, API Key → `{{apiKey}}`. 값은 컬렉션 변수에 직접 넣으세요. 요청마다 인증이 다르면 그 요청에 따로 넣습니다.
+  - `$ref` 는 같은 문서 안(`#/...`)만 따라갑니다. 다른 파일을 가리키는 `$ref`, 콜백, 웹훅은 가져오지 않고 알립니다.
+  - YAML 은 직접 만든 해석기로 읽습니다. 복잡한 키(`? `)는 지원하지 않고, 틀린 곳은 줄 번호와 함께 알려 줍니다.
+- **HAR**(브라우저 개발자 도구 Network 탭 → Save all as HAR): XHR·fetch 요청만 가져오고(문서·스크립트·이미지는 뺌), 호스트가 여럿이면 호스트마다 폴더를 만듭니다. 브라우저가 정하는 헤더(Host, Content-Length, `sec-*` 등)는 빼고, Cookie·Authorization 은 그대로 가져오니 공유하기 전에 지우세요.
 - **내보내기**: 컬렉션 → Postman Collection v2.1, 환경 → Postman Environment
 - 설정 → **전체 백업 내보내기 / 백업에서 복원** (컬렉션, 환경, 히스토리, 쿠키, 설정 전체)
 

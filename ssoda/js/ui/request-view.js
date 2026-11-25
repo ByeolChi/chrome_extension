@@ -1,6 +1,6 @@
 // 요청 탭 화면 (URL 바, Params/Auth/Headers/Body/Cookies/Settings, 응답)
 import { h, clear, debounce, METHODS, methodClass, readFileAsDataURL, formatBytes, kvRow } from '../util.js';
-import { buildUrlFromParams, syncParamsFromUrl } from '../model.js';
+import { buildUrlFromParams, syncParamsFromUrl, syncPathVars, pathVarNames } from '../model.js';
 import { varInput } from './varinput.js';
 import { KVTable, headerValueList } from './kvtable.js';
 import { CodeEditor } from './code-editor.js';
@@ -221,7 +221,13 @@ export class RequestView {
       onInput: (v) => {
         d.url = v;
         d.params = syncParamsFromUrl(v, d.params);
-        if (this.sub === 'params' && this.paramsTable) this.paramsTable.render();
+        // 주소의 /:이름 칸에 맞춰 Path Variables 표도 고친다 (이름이 바뀌면 표를 다시 그림)
+        const names = d.pathVars.map((x) => x.key).join(',');
+        d.pathVars = syncPathVars(v, d.pathVars);
+        if (this.sub === 'params') {
+          if (names !== d.pathVars.map((x) => x.key).join(',')) this.renderPane();
+          else if (this.paramsTable) this.paramsTable.render();
+        }
         this.changed();
       },
       onKeyDown: (e) => {
@@ -360,7 +366,7 @@ export class RequestView {
     const d = this.draft;
     const n = (list) => (list || []).filter((x) => x.enabled && (x.key || x.value)).length;
     return {
-      params: n(d.params),
+      params: n(d.params) + pathVarNames(d.url).length,
       headers: n(d.headers),
       cookies: n(d.cookies),
       tests: countTests(d.tests),
@@ -420,7 +426,34 @@ export class RequestView {
         this.changed();
       },
     });
-    return h('div.pane', this.paramsTable.el);
+    const pane = h('div.pane', this.paramsTable.el);
+    if (pathVarNames(d.url).length) pane.appendChild(this.pathVarsTable());
+    return pane;
+  }
+
+  // 경로 변수 표: 이름은 주소의 /:이름 에서 오고(여기서 못 바꿈), 값·설명만 적는다.
+  // 예전에 저장한 요청처럼 표가 비어 있으면 이름만 보여 주고, 값을 적을 때 요청에 넣는다 (열기만 해서는 바뀌지 않게)
+  pathVarsTable() {
+    const d = this.draft;
+    const getScope = () => app.getScope(this.tab);
+    const rowOf = (k) => d.pathVars.find((v) => v.key === k);
+    const ensure = (k) => {
+      if (!rowOf(k)) d.pathVars = syncPathVars(d.url, [...d.pathVars, kvRow(k, '')]);
+      return rowOf(k);
+    };
+    const rows = pathVarNames(d.url).map((k) => {
+      const v = rowOf(k) || { value: '', description: '' };
+      const val = varInput({ value: v.value, placeholder: '값', ariaLabel: `:${k} 값`, getScope, onInput: (x) => { ensure(k).value = x; this.changed(); } });
+      const desc = h('input.kv-input', { value: v.description || '', placeholder: '설명', spellcheck: 'false', 'aria-label': `:${k} 설명` });
+      desc.addEventListener('input', () => {
+        ensure(k).description = desc.value;
+        this.changed();
+      });
+      return h('div.kv-row', h('div.kv-cell.pv-key', ':' + k), h('div.kv-cell', val.el), h('div.kv-cell', desc));
+    });
+    return h('div.pv-sec',
+      h('div.kv-toolbar', h('div', h('span.kv-title', 'Path Variables'), h('span.tests-sub', '주소의 /:이름 칸에 넣을 값. 이름은 주소에서 바꿉니다'))),
+      h('div.kv-table.pv-table', h('div.kv-row.kv-head', h('div.kv-cell', 'Key'), h('div.kv-cell', 'Value'), h('div.kv-cell', 'Description')), rows));
   }
 
   paneAuth() {
