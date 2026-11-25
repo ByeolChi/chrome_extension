@@ -101,6 +101,36 @@
   </section>
 
   <section class="card">
+    <h2>문서 양식 <span class="pill">Word·PowerPoint</span></h2>
+    <div class="grid2">
+      <div class="field">
+        <label for="docHeader">머리글</label>
+        <input type="text" id="docHeader" maxlength="120" placeholder="비우면 가이드 제목">
+      </div>
+      <div class="field">
+        <label for="docAuthor">작성자</label>
+        <input type="text" id="docAuthor" maxlength="60" placeholder="예) 홍길동">
+      </div>
+    </div>
+    <p class="faint">머리글은 Word 에서는 쪽마다 위쪽에, PowerPoint 에서는 슬라이드 아래쪽에 들어갑니다. 작성자는 Word 개정 이력의 첫 줄과 문서 속성에 들어가고, 비워 두면 넣지 않습니다.</p>
+    <div class="field">
+      <label>로고</label>
+      <div class="logo-row">
+        <img id="docLogoPreview" class="logo-preview" alt="로고 미리보기" hidden>
+        <button id="docLogoPick" class="sm">이미지 고르기</button>
+        <button id="docLogoClear" class="sm ghost" hidden>지우기</button>
+        <input type="file" id="docLogoFile" accept="image/png,image/jpeg" hidden>
+      </div>
+      <p id="docLogoError" class="faint logo-error" hidden></p>
+      <p class="faint">PNG·JPEG. 가로 600px·세로 200px 안으로 줄여서 저장합니다. Word 머리글 왼쪽, PowerPoint 표지와 슬라이드 오른쪽 위에 들어갑니다.</p>
+    </div>
+    <div class="checks">
+      <label class="check"><input type="checkbox" id="docToc"> Word 에 목차 넣기 (처음 열 때 필드를 업데이트하면 쪽 번호가 붙습니다)</label>
+      <label class="check"><input type="checkbox" id="docRevisions"> Word 에 개정 이력 표 넣기 (편집기의 "개정 이력"에 적은 줄, 없으면 한 줄)</label>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>AI 문장 다듬기 <span class="pill">선택</span></h2>
     <p class="faint warn-box">켜면 단계 제목·설명, 동작 종류, 요소 이름과 종류(버튼·입력란 등)가 아래 주소로 전송됩니다. 설명 문장에 입력값이 들어 있으면 그 값도 함께 갑니다. 페이지 주소와 제목은 보내지 않습니다. 사내 정보가 담긴 화면이라면 연동 전에 보안 정책을 확인하세요. 스크린샷은 따로 켜지 않는 한 전송하지 않고, 켜면 편집기에서 가린 부분을 적용한 이미지를 보냅니다.</p>
     <div class="field">

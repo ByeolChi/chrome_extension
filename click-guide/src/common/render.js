@@ -2,6 +2,7 @@
  * 그림은 편집기 미리보기와 같은 코드(annotate.js)로 그린다. */
 import { escapeHtml, formatDate, placeName, shareableUrl, localPageTitle } from './util.js';
 import { paintStep, cropPixels } from './annotate.js';
+import { exportStrings } from './ooxml.js';
 
 /* ---------------- 이미지 굽기 ---------------- */
 
@@ -18,6 +19,7 @@ export function loadImage(src) {
  * 스크린샷 Blob 에 가림·하이라이트·주석을 그리고 자르기까지 해서 dataURL 로 돌려준다.
  * step.nrect / redactions / annotations / crop 은 0~1 정규화 좌표. 녹화 중 가린 곳은 저장할 때 이미 칠해져 있다.
  * opts.highlight: 하이라이트를 그릴지 (없으면 설정을 따름. AI 로 보내는 그림은 false)
+ * opts.maxWidth: 내보낼 이미지 가로 최대(px). 0·없음이면 저장된 크기 그대로 (자른 뒤에 줄인다)
  */
 export async function bakeStepImage(blob, step, settings, opts = {}) {
   if (!blob) return null;
@@ -32,11 +34,16 @@ export async function bakeStepImage(blob, step, settings, opts = {}) {
     const showHl = !!((opts.highlight !== undefined ? opts.highlight : settings.highlight) && step.highlight !== false && step.nrect);
     paintStep(ctx, img, step, settings, { width: w, height: h, highlight: showHl });
     let out = canvas;
-    const c = cropPixels(step.crop, w, h);
-    if (c) {
+    const c = cropPixels(step.crop, w, h) || { x: 0, y: 0, w, h };
+    const max = Number(opts.maxWidth) || 0;
+    const scale = max > 0 && c.w > max ? max / c.w : 1;
+    if (c.w !== w || c.h !== h || scale !== 1) {
       out = document.createElement('canvas');
-      out.width = c.w; out.height = c.h;
-      out.getContext('2d').drawImage(canvas, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
+      out.width = Math.max(1, Math.round(c.w * scale));
+      out.height = Math.max(1, Math.round(c.h * scale));
+      const octx = out.getContext('2d');
+      octx.imageSmoothingQuality = 'high';
+      octx.drawImage(canvas, c.x, c.y, c.w, c.h, 0, 0, out.width, out.height);
     }
     return {
       dataUrl: out.toDataURL('image/jpeg', opts.quality || 0.85),
@@ -73,7 +80,7 @@ li.step{counter-increment:s;background:#fff;border:1px solid #e3e5ea;border-radi
 .num::before{content:counter(s)}
 .ttl{font-size:16px;font-weight:650;margin:0;letter-spacing:-.01em}
 .body{margin:6px 0 0 38px}
-.body p{margin:0;color:#3d424d}
+.body p{margin:0;color:#3d424d;white-space:pre-wrap}
 .meta{margin:8px 0 0;font-size:12px;color:#8a909c;word-break:break-all}
 figure{margin:14px 0 0 38px}
 figure img{width:100%;height:auto;display:block;border:1px solid #e3e5ea;border-radius:8px}
@@ -90,18 +97,20 @@ footer.doc{margin-top:28px;color:#8a909c;font-size:12px;text-align:center}
 
 /**
  * 완전 독립 실행 HTML 문자열을 만든다 (이미지 base64 내장, 스크립트 없음).
- * images: Map<stepId, dataUrl>
+ * images: Map<stepId, dataUrl>. 고정 문구는 가이드 언어(없으면 opts.lang)로 쓰고, 설명의 줄바꿈은 그대로 보인다.
  */
 export function buildGuideHtml(session, steps, images, opts = {}) {
-  const title = session.name || '사용 가이드';
+  const lang = session.lang || opts.lang || 'ko';
+  const t = exportStrings(lang);
+  const title = session.name || t.defaultTitle;
   const parts = [];
   parts.push('<!doctype html>');
-  parts.push(`<html lang="${session.lang === 'en' ? 'en' : 'ko'}"><head><meta charset="utf-8">`);
+  parts.push(`<html lang="${lang === 'en' ? 'en' : 'ko'}"><head><meta charset="utf-8">`);
   parts.push('<meta name="viewport" content="width=device-width,initial-scale=1">');
   parts.push(`<title>${escapeHtml(title)}</title><style>${DOC_CSS}</style></head><body><div class="page">`);
   parts.push('<header class="doc">');
   parts.push(`<h1>${escapeHtml(title)}</h1>`);
-  parts.push(`<p class="sub">${steps.length}단계 · ${formatDate(session.createdAt)}${hostOf(session.startUrl) ? ' · ' + escapeHtml(hostOf(session.startUrl)) : ''}</p>`);
+  parts.push(`<p class="sub">${escapeHtml(t.steps(steps.length))} · ${formatDate(session.createdAt)}${hostOf(session.startUrl) ? ' · ' + escapeHtml(hostOf(session.startUrl)) : ''}</p>`);
   if (session.description) parts.push(`<p class="desc">${escapeHtml(session.description)}</p>`);
   parts.push('</header><ol class="steps">');
 
@@ -114,12 +123,12 @@ export function buildGuideHtml(session, steps, images, opts = {}) {
     if (s.description) parts.push(`<p>${escapeHtml(s.description)}</p>`);
     if (opts.showUrls && s.url) parts.push(`<p class="meta">${escapeHtml(shareableUrl(s.url))}</p>`);
     parts.push('</div>');
-    if (img) parts.push(`<figure><img src="${img}" alt="${escapeHtml(s.title || '단계 이미지')}"></figure>`);
+    if (img) parts.push(`<figure><img src="${img}" alt="${escapeHtml(s.title || t.stepImage)}"></figure>`);
     parts.push('</li>');
   }
 
   parts.push('</ol>');
-  parts.push('<footer class="doc">ClickGuide로 만든 가이드</footer>');
+  parts.push(`<footer class="doc">${escapeHtml(t.madeWith)}</footer>`);
   parts.push('</div></body></html>');
   return parts.join('\n');
 }
@@ -149,10 +158,11 @@ export function mdBlock(s) {
 }
 
 export function buildMarkdown(session, steps, imageNames, opts = {}) {
+  const t = exportStrings(session.lang || opts.lang || 'ko');
   const out = [];
-  out.push(`# ${mdInline(session.name || '사용 가이드')}`);
+  out.push(`# ${mdInline(session.name || t.defaultTitle)}`);
   out.push('');
-  out.push(`_${steps.length}단계 · ${formatDate(session.createdAt)}${hostOf(session.startUrl) ? ' · ' + mdInline(hostOf(session.startUrl)) : ''}_`);
+  out.push(`_${mdInline(t.steps(steps.length))} · ${formatDate(session.createdAt)}${hostOf(session.startUrl) ? ' · ' + mdInline(hostOf(session.startUrl)) : ''}_`);
   if (session.description) { out.push(''); out.push(mdBlock(session.description)); }
   out.push('');
   steps.forEach((s, i) => {
@@ -161,11 +171,11 @@ export function buildMarkdown(session, steps, imageNames, opts = {}) {
     if (s.description) { out.push(mdBlock(s.description)); out.push(''); }
     if (opts.showUrls && s.url) { out.push(mdInline(shareableUrl(s.url))); out.push(''); }
     const name = imageNames ? imageNames.get(s.id) : null;
-    if (name) { out.push(`![${mdInline((s.title || '단계').replace(/[\[\]]/g, ''))}](${name})`); out.push(''); }
+    if (name) { out.push(`![${mdInline((s.title || t.stepImage).replace(/[\[\]]/g, ''))}](${name})`); out.push(''); }
   });
   out.push('---');
   out.push('');
-  out.push('_ClickGuide로 만든 가이드_');
+  out.push(`_${mdInline(t.madeWith)}_`);
   return out.join('\n');
 }
 

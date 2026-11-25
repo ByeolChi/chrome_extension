@@ -28,6 +28,23 @@ main { max-width: 860px; margin: 0 auto; padding: 22px 16px 120px; }
 #guide-desc { border: none; background: none; padding: 0; min-height: 40px; color: var(--text-muted); }
 #stats { margin: 0; }
 
+/* 개정 이력 (Word) */
+.rev-box { border-top: 1px solid var(--border); padding-top: 8px; }
+.rev-box summary { cursor: pointer; font-weight: 600; font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+.rev-box summary .faint { font-weight: 400; }
+.rev-table { width: 100%; border-collapse: collapse; margin: 10px 0 8px; font-size: 13px; }
+.rev-table th { text-align: left; font-weight: 600; color: var(--text-muted); padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.rev-table td { padding: 3px 4px; vertical-align: top; }
+.rev-table td:nth-child(1) { width: 70px; }
+.rev-table td:nth-child(2) { width: 118px; }
+.rev-table td:nth-child(3) { width: 110px; }
+.rev-table td:last-child { width: 34px; text-align: right; }
+.rev-table input { padding: 4px 6px; font-size: 13px; }
+
+/* 내보내기 메뉴의 이미지 크기 */
+.export-size { display: flex; align-items: center; gap: 8px; justify-content: space-between; white-space: nowrap; padding: 8px 10px 4px; margin-top: 4px; border-top: 1px solid var(--border); font-size: 12px; font-weight: 500; color: var(--text-muted); }
+.export-size select { width: auto; padding: 3px 6px; font-size: 12px; }
+
 #steps { list-style: none; margin: 0; padding: 0; counter-reset: st; }
 li.step { counter-increment: st; padding: 14px 16px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; }
 li.step.is-note { border-left: 3px solid var(--warn); }

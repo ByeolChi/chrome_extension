@@ -18,10 +18,19 @@
   <div class="menu">
     <button id="btn-export" class="primary sm">내보내기 ▾</button>
     <div id="export-menu" class="dropdown" hidden>
+      <button data-export="docx">Word 문서 (.docx)</button>
+      <button data-export="pptx">PowerPoint (.pptx)</button>
       <button data-export="html">HTML 파일 (이미지 포함)</button>
       <button data-export="pdf">PDF로 인쇄</button>
       <button data-export="md">Markdown + 이미지 ZIP</button>
       <button data-export="json">JSON (원본 데이터)</button>
+      <label class="export-size">이미지 크기
+        <select id="export-width" title="내보낼 때 스크린샷 가로 크기. 줄이면 파일이 작아집니다">
+          <option value="0">원래 크기</option>
+          <option value="1280">가로 1280px</option>
+          <option value="960">가로 960px</option>
+        </select>
+      </label>
     </div>
   </div>
   <button id="btn-options" class="ghost sm" title="설정">설정</button>
@@ -40,6 +49,17 @@
       <input id="guide-title" placeholder="가이드 제목" aria-label="가이드 제목">
       <textarea id="guide-desc" placeholder="이 가이드는 무엇을 하는 방법인가요? (선택)" aria-label="가이드 설명"></textarea>
       <p id="stats" class="faint"></p>
+      <details id="rev-box" class="rev-box">
+        <summary>개정 이력 <span class="faint">Word 문서 앞쪽 표에 들어갑니다</span></summary>
+        <table class="rev-table">
+          <thead><tr><th>버전</th><th>날짜</th><th>작성자</th><th>내용</th><th></th></tr></thead>
+          <tbody id="rev-rows"></tbody>
+        </table>
+        <div class="row">
+          <button id="rev-add" class="sm">줄 추가</button>
+          <span class="faint" id="rev-hint">비워 두면 "1.0 · 만든 날 · 설정의 작성자 · 최초 작성" 한 줄이 들어갑니다.</span>
+        </div>
+      </details>
     </div>
 
     <ol id="steps"></ol>

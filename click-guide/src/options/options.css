@@ -21,6 +21,9 @@ code { background: var(--bg-sunken); padding: 1px 5px; border-radius: 4px; font-
 }
 #ai-fields { display: flex; flex-direction: column; gap: 14px; }
 #saved { background: color-mix(in srgb, #1a9e5c 16%, transparent); color: #1a9e5c; }
+.logo-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.logo-preview { max-height: 44px; max-width: 200px; padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.logo-error { color: var(--danger); }
 @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
 
 .row-input { display: flex; gap: 6px; align-items: center; }
