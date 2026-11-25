@@ -61,6 +61,7 @@ export class CollectionView {
         h('div.field-label', '설명'),
         desc,
         h('div.cv-actions',
+          h('button.btn.btn-primary', { onclick: () => app.openRunner(item.id), title: '안의 요청을 차례로 보내고 Tests 탭의 확인 결과를 모아 봅니다' }, icon('play', 14), '러너로 실행'),
           h('button.btn', { onclick: () => app.addRequestTo(item.id) }, icon('filePlus', 14), '요청 추가'),
           h('button.btn', { onclick: () => { app.addFolderTo(item.id); app.ui.renderSidebar(); } }, icon('folderPlus', 14), '폴더 추가'),
           isCollection ? h('button.btn', { onclick: () => app.exportCollection(item.id) }, icon('download', 14), 'Postman 형식으로 내보내기') : null)

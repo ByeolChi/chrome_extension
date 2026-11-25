@@ -262,6 +262,7 @@ export class Sidebar {
         },
       });
       items.push({ label: isCollection ? '컬렉션 설정 (인증/변수)' : '폴더 설정 (인증)', icon: 'settings', onClick: () => app.openItem(it.id) });
+      items.push({ label: '러너로 실행', icon: 'play', onClick: () => app.openRunner(it.id) });
       items.push({ divider: true });
     }
     items.push({ label: '이름 변경', icon: 'edit', hint: 'F2', onClick: () => { this.renaming = it.id; this.renderBody(); } });
