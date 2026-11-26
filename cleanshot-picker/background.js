@@ -1,10 +1,13 @@
 /* CleanShot Picker — service worker
- * 역할: 피커 주입, 화면 캡처, 전체 페이지 잇기, 파일 저장. DOM 은 건드리지 않는다.
+ * 역할: 피커 주입, 화면 캡처, 전체 페이지 잇기, 저장 설정(형식·크기·파일 이름·주소와 시각 띠)대로 만들어 파일 저장.
+ * DOM 은 건드리지 않는다.
  */
 
-/* 공용 가리기 코어(사본은 node scripts/sync-shared.mjs 로 만든다). 피커도 같은 파일을 먼저 싣는다. */
-importScripts('shared/redact-core.js');
+/* 공용 가리기 코어(사본은 node scripts/sync-shared.mjs 로 만든다). 피커도 같은 파일을 먼저 싣는다.
+   저장 설정(settings.js)은 설정 화면(options.html)과 함께 쓴다. */
+importScripts('shared/redact-core.js', 'settings.js');
 const RC = globalThis.RedactCore;
+const CS = globalThis.CleanShotSettings;
 
 const INJECT_FILES = ['shared/redact-core.js', 'picker.js'];
 const INJECTABLE = /^(https?|file):/i;
@@ -93,38 +96,76 @@ const HANDLERS = {
   CLEANSHOT_PING: async () => ({ ok: true }),
 
   /* 현재 화면을 찍어 바로 저장한다. msg.copy 면 저장하지 않고 (가리기를 칠한) PNG 를 돌려준다 — 피커가 클립보드에 넣는다.
-     msg.crop(화면 CSS px)이 있으면 가리기를 칠한 뒤 그 부분만 잘라 낸다 (6 영역, 파일 이름 끝에 -area) */
+     msg.crop(화면 CSS px)이 있으면 가리기를 칠한 뒤 그 부분만 잘라 낸다 (6 영역, 파일 이름 끝에 -area).
+     그다음 저장 설정대로 크기를 바꾸고 주소·시각 띠를 붙여 그 형식으로 만든다 (복사는 늘 PNG). */
   CLEANSHOT_CAPTURE: async (msg, sender) => {
-    const shot = await grab(sender);
+    const [out, shot] = await Promise.all([readOutput(), grab(sender)]); // 설정 읽기가 찍기를 늦추지 않게
     if (!shot.ok) return shot;
-
-    // 가리기 박스를 PNG 에 직접 칠한다. 화면의 박스가 다른 요소 아래에 깔렸어도
-    // 저장되는 이미지에는 반드시 남게 하려는 것이다. 칠하지 못하면 저장하지 않는다.
-    let dataUrl = shot.dataUrl;
+    const at = new Date();
+    const pageUrl = msg.pageUrl || sender.tab.url;
     const masks = cleanMasks(msg.masks);
-    if (masks.length) {
-      try {
-        dataUrl = await burnMasks(dataUrl, masks, msg.viewport, msg.dpr);
-      } catch (err) {
-        return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 ${msg.copy ? '복사' : '저장'}하지 않았습니다 (${describe(err)})` };
-      }
-    }
     const crop = cleanMasks(msg.crop ? [msg.crop] : [])[0] || null;
-    if (crop) {
+    const fmt = msg.copy ? 'png' : out.outFormat; // 클립보드는 PNG 만 받는다
+    const dpr = Number(msg.dpr) > 0 ? Number(msg.dpr) : 1;
+
+    let made;
+    if (!masks.length && !crop && fmt === 'png' && !out.stamp && Math.abs(CS.outFactor(out.outScale, dpr) - dpr) < 0.01) {
+      made = { dataUrl: shot.dataUrl, ext: 'png' }; // 손볼 것이 없으면 찍은 PNG 그대로 (가장 빠른 길)
+    } else {
+      let canvas;
       try {
-        dataUrl = await cropPng(dataUrl, crop, msg.viewport, msg.dpr);
+        canvas = await loadCanvas(shot.dataUrl);
       } catch (err) {
-        return { ok: false, error: `고른 영역을 잘라 내지 못했습니다 (${describe(err)})` };
+        return { ok: false, error: `찍은 화면을 읽지 못했습니다 (${describe(err)})` };
+      }
+      try {
+        const vw = msg.viewport && msg.viewport.w > 0 ? msg.viewport.w : canvas.width;
+        const vh = msg.viewport && msg.viewport.h > 0 ? msg.viewport.h : canvas.height;
+        const sx = scaleOf(canvas.width, vw, msg.dpr);
+        const sy = scaleOf(canvas.height, vh, msg.dpr);
+        // 가리기 박스를 이미지에 직접 칠한다. 화면의 박스가 다른 요소 아래에 깔렸어도
+        // 저장되는 이미지에는 반드시 남게 하려는 것이다. 칠하지 못하면 저장하지 않는다.
+        if (masks.length) {
+          try {
+            paintMasks(canvas, masks, sx, sy);
+          } catch (err) {
+            return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 ${msg.copy ? '복사' : '저장'}하지 않았습니다 (${describe(err)})` };
+          }
+        }
+        if (crop) {
+          try {
+            const cut = cropCanvas(canvas, crop, sx, sy);
+            freeCanvas(canvas);
+            canvas = cut;
+          } catch (err) {
+            return { ok: false, error: `고른 영역을 잘라 내지 못했습니다 (${describe(err)})` };
+          }
+        }
+        try {
+          made = await finishImage(canvas, sx, sy, out, fmt, { url: pageUrl, at });
+        } catch (err) {
+          return { ok: false, error: `저장할 그림을 만들지 못했습니다 (${describe(err)})` };
+        }
+      } finally {
+        freeCanvas(canvas);
       }
     }
-    if (msg.copy) return { ok: true, dataUrl };
-    return save(dataUrl, msg.pageUrl || sender.tab.url, crop ? '-area' : '');
+    if (msg.copy) return { ok: true, dataUrl: made.dataUrl, note: made.note || '' };
+    const filename = CS.fileName(out.nameTemplate, { url: pageUrl, title: msg.pageTitle, at, suffix: crop ? '-area' : '', ext: made.ext });
+    const res = await save(made.dataUrl, filename, out.askWhere);
+    return made.note ? { ...res, note: made.note } : res;
   },
 
   /* 전체 페이지 캡처 — 아래 "전체 페이지" 참고 */
   CLEANSHOT_FULL_BEGIN: (msg, sender) => fullBegin(msg, sender),
   CLEANSHOT_FULL_FRAME: (msg, sender) => fullFrame(msg, sender),
-  CLEANSHOT_FULL_END: (msg, sender) => fullEnd(msg, sender)
+  CLEANSHOT_FULL_END: (msg, sender) => fullEnd(msg, sender),
+
+  /* 툴바의 "설정" — 콘텐츠 스크립트는 설정 화면을 직접 열 수 없다 */
+  CLEANSHOT_OPEN_OPTIONS: async () => {
+    await chrome.runtime.openOptionsPage();
+    return { ok: true };
+  }
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -154,17 +195,69 @@ async function grab(sender) {
   }
 }
 
-async function save(dataUrl, pageUrl, suffix) {
+/* 파일로 저장한다. 1순위는 downloads API, 실패하면 content script 가 <a download> 로 대신 받는다(fallback).
+   askWhere 면 저장 위치 창을 띄운다. download() 는 창이 뜨기 전에 바로 돌아오므로(Chromium 131 에서 확인)
+   사용자가 위치를 고를 때까지 기다린다. 창을 닫으면 저장하지 않았다고 알린다(declined) — 이때는 대신 받지 않는다. */
+async function save(dataUrl, filename, askWhere) {
   if (!dataUrl) return { ok: false, error: '저장할 이미지가 없습니다.' };
-  const filename = makeFilename(pageUrl, suffix);
-
-  // 1순위: downloads API. 실패하면 content script 가 <a download> 로 대신 받는다.
+  let id;
   try {
-    await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
-    return { ok: true, filename };
+    id = await chrome.downloads.download({ url: dataUrl, filename, saveAs: !!askWhere });
   } catch (err) {
     console.warn('[CleanShot] downloads 실패, 폴백 사용:', err);
     return { ok: false, fallback: true, filename, dataUrl, error: describe(err) };
+  }
+  if (!askWhere) return { ok: true, filename };
+  const d = await downloadDecision(id);
+  if (d.declined) return { ok: false, declined: true, error: '저장 위치 창을 닫아 저장하지 않았습니다.' };
+  if (d.error) return { ok: false, error: d.error };
+  return { ok: true, filename: d.filename || filename, pending: !!d.pending };
+}
+
+/* 저장 위치 창의 결과. 파일 위치가 정해지면 { filename }, 창을 닫으면 { declined }, 다른 이유로 멈추면 { error }.
+   오래(10분) 열려 있으면 기다리지 않는다 { pending } — 그 뒤에 고르면 그대로 저장된다. */
+const DECISION_WAIT_MS = 10 * 60 * 1000;
+function downloadDecision(id, timeoutMs = DECISION_WAIT_MS) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      resolve(r);
+    };
+    const judge = (item) => {
+      if (!item || done) return;
+      if (item.error === 'USER_CANCELED') finish({ declined: true });
+      else if (item.state === 'interrupted' || item.error) finish({ error: downloadError(item.error) });
+      else if (item.filename) finish({ filename: item.filename });
+    };
+    const look = () => chrome.downloads.search({ id }).then((items) => judge(items[0])).catch(() => {});
+    const onChanged = (delta) => { if (delta.id === id) look(); };
+    const timer = setTimeout(() => finish({ pending: true }), timeoutMs);
+    chrome.downloads.onChanged.addListener(onChanged);
+    look(); // 리스너를 걸기 전에 이미 정해졌을 수 있다
+  });
+}
+
+function downloadError(code) {
+  const known = {
+    FILE_ACCESS_DENIED: '그 폴더에 저장할 권한이 없습니다',
+    FILE_NO_SPACE: '디스크 공간이 부족합니다',
+    FILE_NAME_TOO_LONG: '파일 이름이나 경로가 너무 깁니다',
+    FILE_TOO_LARGE: '파일이 너무 큽니다',
+    FILE_BLOCKED: '이 PC 의 정책이 파일 저장을 막았습니다'
+  };
+  return `저장하지 못했습니다 (${known[code] || code || '알 수 없는 이유'})`;
+}
+
+/* 저장 설정. 읽지 못하면 기본값 */
+async function readOutput() {
+  try {
+    return CS.normalize(await chrome.storage.sync.get(CS.DEFAULTS));
+  } catch (_) {
+    return CS.normalize(null);
   }
 }
 
@@ -176,55 +269,140 @@ function cleanMasks(list) {
   );
 }
 
-/* 찍은 PNG 위에 검정 사각형을 칠해 다시 PNG 로 만든다.
-   배율은 scaleOf 로 정한다. 경계는 바깥쪽으로 반올림해 반 픽셀도 덜 가리지 않는다. */
-async function burnMasks(dataUrl, masks, viewport, dpr) {
+/* 찍은 PNG 를 캔버스로. 색 공간·알파를 바꾸지 않아 픽셀 값이 그대로다 */
+async function loadCanvas(dataUrl) {
   const blob = await (await fetch(dataUrl)).blob();
   const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
   try {
-    const vw = viewport && viewport.w > 0 ? viewport.w : bmp.width;
-    const vh = viewport && viewport.h > 0 ? viewport.h : bmp.height;
-
     const canvas = new OffscreenCanvas(bmp.width, bmp.height);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(bmp, 0, 0);
-    const px = RC.toPixelRects(masks, scaleOf(bmp.width, vw, dpr), scaleOf(bmp.height, vh, dpr), bmp.width, bmp.height);
-    RC.paintRedactions(ctx, px, { style: 'box' });
-    const out = await canvas.convertToBlob({ type: 'image/png' });
-    return blobToDataUrl(out);
+    canvas.getContext('2d').drawImage(bmp, 0, 0);
+    return canvas;
   } finally {
     bmp.close();
   }
 }
 
-/* 찍은 PNG 에서 crop(화면 CSS px) 부분만 잘라 다시 PNG 로 만든다. 경계는 바깥쪽으로 반올림하고 이미지 안으로 자른다 */
-async function cropPng(dataUrl, crop, viewport, dpr) {
-  const blob = await (await fetch(dataUrl)).blob();
-  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-  try {
-    const vw = viewport && viewport.w > 0 ? viewport.w : bmp.width;
-    const vh = viewport && viewport.h > 0 ? viewport.h : bmp.height;
-    const sx = scaleOf(bmp.width, vw, dpr);
-    const sy = scaleOf(bmp.height, vh, dpr);
-    const x0 = Math.max(0, Math.floor(crop.x * sx));
-    const y0 = Math.max(0, Math.floor(crop.y * sy));
-    const x1 = Math.min(bmp.width, Math.ceil((crop.x + crop.w) * sx));
-    const y1 = Math.min(bmp.height, Math.ceil((crop.y + crop.h) * sy));
-    if (x1 - x0 < 1 || y1 - y0 < 1) throw new Error('영역이 화면 밖입니다');
-    const canvas = new OffscreenCanvas(x1 - x0, y1 - y0);
-    canvas.getContext('2d').drawImage(bmp, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
-    const out = await canvas.convertToBlob({ type: 'image/png' });
-    return blobToDataUrl(out);
-  } finally {
-    bmp.close();
+/* 검정 사각형(화면 CSS px)을 칠한다. 경계는 바깥쪽으로 반올림해 반 픽셀도 덜 가리지 않는다 */
+function paintMasks(canvas, masks, sx, sy) {
+  const px = RC.toPixelRects(masks, sx, sy, canvas.width, canvas.height);
+  RC.paintRedactions(canvas.getContext('2d'), px, { style: 'box' });
+}
+
+/* crop(화면 CSS px) 부분만 잘라 새 캔버스로. 경계는 바깥쪽으로 반올림하고 이미지 안으로 자른다 */
+function cropCanvas(canvas, crop, sx, sy) {
+  const x0 = Math.max(0, Math.floor(crop.x * sx));
+  const y0 = Math.max(0, Math.floor(crop.y * sy));
+  const x1 = Math.min(canvas.width, Math.ceil((crop.x + crop.w) * sx));
+  const y1 = Math.min(canvas.height, Math.ceil((crop.y + crop.h) * sy));
+  if (x1 - x0 < 1 || y1 - y0 < 1) throw new Error('영역이 화면 밖입니다');
+  const cut = new OffscreenCanvas(x1 - x0, y1 - y0);
+  cut.getContext('2d').drawImage(canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+  return cut;
+}
+
+/* ---------------------------------------------------------------- 저장할 그림 만들기
+ * 가리기를 칠하고 잘라 낸 캔버스(배율 sx·sy = 이미지 픽셀 ÷ CSS px)를 저장 설정대로 마무리한다.
+ *   크기   — 화면 그대로 / CSS 픽셀의 1배 / 2배. 한도(한 변 32,767px, 넓이 2^26px)를 넘으면 들어가게 줄이고 알린다.
+ *   띠     — 그림 아래에 주소(? 뒤·# 뒤 뺌)와 찍은 시각. 그림을 가리지 않게 밑에 덧붙인다.
+ *   형식   — PNG·JPEG·WebP (품질 0.92). 브라우저가 그 형식을 못 만들면 PNG 로 만들고 알린다.
+ * 넘겨받은 canvas 는 건드리지 않는다(부르는 쪽이 놓는다).
+ */
+const STAMP_CSS_H = 26;   // 띠 높이(CSS px). 출력 배율만큼 커진다
+const STAMP_FONT = '"Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
+
+async function finishImage(canvas, sx, sy, out, fmt, info) {
+  const notes = [];
+  // 크기: want 는 바라는 출력 배율. 한도를 넘으면 fit 만큼 줄인다 (띠는 한 변 한도에만 넣는다 — 두 줄일 수도 있어 두 줄로 잡는다)
+  const want = CS.outFactor(out.outScale, sx);
+  const w0 = Math.max(1, Math.round((canvas.width * want) / sx));
+  const h0 = Math.max(1, Math.round((canvas.height * want) / sy));
+  const stamp0 = out.stamp ? Math.round(STAMP_CSS_H * want) * 2 : 0;
+  const fit = Math.min(1, FULL_LIMITS.side / w0, FULL_LIMITS.side / (h0 + stamp0), Math.sqrt(FULL_LIMITS.area / (w0 * h0)));
+  const w = fit < 1 ? Math.max(1, Math.floor(w0 * fit)) : w0;
+  const h = fit < 1 ? Math.max(1, Math.floor(h0 * fit)) : h0;
+  if (fit < 1) notes.push(`너무 커서 ${(want * fit).toFixed(2).replace(/\.?0+$/, '')}배로 줄여 저장했습니다`);
+  const f = want * fit; // 실제 출력 배율
+  let img = canvas;
+  if (w !== canvas.width || h !== canvas.height) {
+    img = new OffscreenCanvas(w, h);
+    const ctx = img.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(canvas, 0, 0, w, h);
   }
+  try {
+    if (out.stamp) {
+      const stamped = addStamp(img, f, CS.stampText(info.url, info.at));
+      if (img !== canvas) freeCanvas(img);
+      img = stamped;
+    }
+    // 형식
+    const spec = CS.FORMATS[fmt] || CS.FORMATS.png;
+    let blob = await img.convertToBlob(spec.mime === 'image/png' ? { type: spec.mime } : { type: spec.mime, quality: CS.QUALITY });
+    let ext = spec.ext;
+    if (blob.type !== spec.mime) {
+      blob = await img.convertToBlob({ type: 'image/png' });
+      ext = 'png';
+      notes.push(`${fmt.toUpperCase()} 로 만들 수 없어 PNG 로 저장했습니다`);
+    }
+    return { dataUrl: await blobToDataUrl(blob), ext, w: img.width, h: img.height, note: notes.join(' · ') };
+  } finally {
+    if (img !== canvas) freeCanvas(img);
+  }
+}
+
+/* 그림 아래에 주소와 시각을 적은 띠를 붙인 새 캔버스. f 는 출력 배율(글자 크기·여백에 곱한다).
+   그림이 좁아 한 줄에 다 들어가지 않으면 두 줄로 쓴다. */
+function addStamp(canvas, f, text) {
+  const lineH = STAMP_CSS_H * f;
+  const pad = Math.round(10 * f);
+  const font = `500 ${Math.max(9, Math.round(12 * f))}px ${STAMP_FONT}`;
+  const probe = new OffscreenCanvas(1, 1).getContext('2d');
+  probe.font = font;
+  const whenW = probe.measureText(text.when).width;
+  const urlW = probe.measureText(text.url).width;
+  const oneLine = pad * 3 + whenW + Math.min(urlW, 160 * f) <= canvas.width;
+  const h = Math.round(lineH * (oneLine ? 1 : 2));
+  const out = new OffscreenCanvas(canvas.width, canvas.height + h);
+  const ctx = out.getContext('2d');
+  ctx.drawImage(canvas, 0, 0);
+  ctx.fillStyle = '#1c1c1f';
+  ctx.fillRect(0, canvas.height, out.width, h);
+  ctx.font = font;
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#f2f2f3';
+  if (oneLine) {
+    const y = canvas.height + h / 2;
+    ctx.textAlign = 'right';
+    ctx.fillText(text.when, out.width - pad, y);
+    ctx.textAlign = 'left';
+    ctx.fillText(ellipsize(ctx, text.url, out.width - pad * 3 - whenW), pad, y);
+  } else {
+    ctx.textAlign = 'left';
+    ctx.fillText(ellipsize(ctx, text.url, out.width - pad * 2), pad, canvas.height + lineH / 2);
+    ctx.fillText(ellipsize(ctx, text.when, out.width - pad * 2), pad, canvas.height + lineH * 1.5);
+  }
+  return out;
+}
+
+/* 너비 안에 들어가게 뒤를 줄이고 … 를 붙인다 */
+function ellipsize(ctx, s, width) {
+  if (ctx.measureText(s).width <= width) return s;
+  let lo = 0;
+  let hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(s.slice(0, mid) + '…').width <= width) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? s.slice(0, lo) + '…' : '';
 }
 
 /* ---------------------------------------------------------------- 전체 페이지
  * 피커가 스크롤 대상을 위에서부터 한 화면씩 내리며 장마다 CLEANSHOT_FULL_FRAME 을 보낸다.
  * 여기서는 그 화면을 찍어 스크롤 대상의 보이는 부분(clip)에서 아직 채우지 않은 줄만 큰 캔버스의
  * 제자리(내용 좌표)에 붙이고, 그 장에서 잰 가리기 박스를 같은 줄 범위 안에 칠한다.
- * CLEANSHOT_FULL_END 에서 PNG 로 만들어 저장한다.
+ * CLEANSHOT_FULL_END 에서 저장 설정(시작할 때 읽어 둔 것)대로 크기·띠·형식을 마무리해 저장한다.
  *
  * 좌표: clip·masks 는 화면 CSS px, offset·from·to 는 스크롤 대상의 내용 CSS px(맨 위가 0).
  * 배율은 첫 장으로 정한다(scaleOf — 고해상도 화면과 페이지 확대가 모두 들어 있다).
@@ -255,12 +433,16 @@ async function fullBegin(msg, sender) {
   if (!clip || !vp || !(total > 0)) return { ok: false, error: '전체 캡처 정보가 올바르지 않습니다.' };
 
   dropRun(tab.id);
+  const out = await readOutput(); // 찍는 도중에 설정을 바꿔도 이번 캡처는 시작할 때의 설정으로
   const limit = Math.max(1, Math.floor(maxRows(Math.round(clip.w * dpr)) / dpr)); // 내용 CSS px
   const run = {
     id: crypto.randomUUID(),
     tabId: tab.id,
     windowId: tab.windowId,
     pageUrl: msg.pageUrl || tab.url,
+    pageTitle: msg.pageTitle || tab.title || '',
+    at: new Date(),
+    out,
     clip,
     viewport: { w: vp.w, h: vp.h },
     dpr,
@@ -314,7 +496,8 @@ async function fullEnd(msg, sender) {
 
   let canvas = run.canvas;
   try {
-    if (msg.cancel || !canvas || run.rows <= 0) return { ok: false, cancelled: true };
+    if (msg.cancel) return { ok: false, cancelled: true };
+    if (!canvas || run.rows <= 0) return { ok: false, error: '찍은 화면이 없습니다.' };
     // 페이지가 찍는 동안 짧아져 끝까지 채우지 못했으면 채운 데까지만 남긴다
     if (run.rows < canvas.height) {
       const cut = new OffscreenCanvas(canvas.width, run.rows);
@@ -322,12 +505,18 @@ async function fullEnd(msg, sender) {
       freeCanvas(canvas);
       canvas = cut;
     }
-    const size = { w: canvas.width, h: canvas.height };
-    const out = await canvas.convertToBlob({ type: 'image/png' });
+    // 저장 설정대로 크기·띠·형식 (이어 붙인 캔버스의 배율은 첫 장으로 정한 sx·sy)
+    let made;
+    try {
+      made = await finishImage(canvas, run.sx, run.sy, run.out, run.out.outFormat, { url: run.pageUrl, at: run.at });
+    } catch (err) {
+      return { ok: false, error: `저장할 그림을 만들지 못했습니다 (${describe(err)})` };
+    }
     freeCanvas(canvas);
     canvas = null;
-    const res = await save(await blobToDataUrl(out), run.pageUrl, '-full');
-    return { ...res, size, truncated: run.truncated };
+    const filename = CS.fileName(run.out.nameTemplate, { url: run.pageUrl, title: run.pageTitle, at: run.at, suffix: '-full', ext: made.ext });
+    const res = await save(made.dataUrl, filename, run.out.askWhere);
+    return { ...res, size: { w: made.w, h: made.h }, truncated: run.truncated, note: made.note || '' };
   } finally {
     if (canvas) freeCanvas(canvas);
     run.canvas = null;
@@ -468,24 +657,6 @@ async function blobToDataUrl(blob) {
 }
 
 /* ---------------------------------------------------------------- 유틸 */
-
-function makeFilename(url, suffix) {
-  let host = 'page';
-  try {
-    host = new URL(url).hostname.replace(/^www\./, '') || 'page';
-  } catch (_) {
-    /* file:// 등 */
-  }
-  host = host.replace(/[^a-z0-9.-]+/gi, '-').slice(0, 40);
-
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  const stamp =
-    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
-    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-
-  return `cleanshot/${host}-${stamp}${suffix || ''}.png`;
-}
 
 function describe(err) {
   return String((err && err.message) || err || '알 수 없는 오류');

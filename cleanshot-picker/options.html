@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CleanShot Picker 설정</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f7; --card: #fff; --text: #1a1a1c; --muted: #5d5d66; --line: #e2e2e6;
+    --accent: #2f6fed; --warn: #a15c00; --ok: #1d7a3a; --input: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161618; --card: #202024; --text: #ededf0; --muted: #a2a2ad; --line: #33333a;
+      --accent: #6d9bff; --warn: #f0b35a; --ok: #6fd08f; --input: #18181b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+  }
+  main { max-width: 680px; margin: 32px auto 48px; padding: 0 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  label.choice { display: flex; gap: 10px; align-items: baseline; padding: 4px 0; cursor: pointer; }
+  label.choice input { margin: 0; transform: translateY(1px); }
+  .desc { color: var(--muted); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  .row { display: flex; gap: 8px; }
+  input[type="text"] {
+    flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--input); color: var(--text); font: 13px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+    color: var(--text); font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Consolas, monospace; background: color-mix(in srgb, var(--line) 55%, transparent); padding: 1px 5px; border-radius: 5px; }
+  .preview { margin-top: 10px; font-size: 13px; overflow-wrap: anywhere; }
+  .preview div + div { margin-top: 2px; }
+  .preview code { font-size: 12.5px; }
+  .warn { color: var(--warn); font-size: 13px; margin-top: 6px; }
+  .saved { position: fixed; right: 20px; bottom: 20px; background: var(--card); border: 1px solid var(--line); color: var(--ok);
+    padding: 6px 12px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; }
+  .saved.on { opacity: 1; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>CleanShot Picker 설정</h1>
+  <p class="lead">바꾸면 바로 저장되고 다음 캡처부터 쓰입니다. 같은 Chrome 계정으로 동기화됩니다.</p>
+
+  <section aria-labelledby="h-format">
+    <h2 id="h-format">저장 형식</h2>
+    <label class="choice"><input type="radio" name="outFormat" value="png"><span>PNG <span class="desc">— 손실 없음 (기본). 글자가 가장 또렷합니다</span></span></label>
+    <label class="choice"><input type="radio" name="outFormat" value="jpeg"><span>JPEG <span class="desc">— 파일이 작습니다. 글자 가장자리가 조금 번질 수 있습니다</span></span></label>
+    <label class="choice"><input type="radio" name="outFormat" value="webp"><span>WebP <span class="desc">— 파일이 더 작습니다. 오래된 프로그램은 열지 못할 수 있습니다</span></span></label>
+    <p class="hint">클립보드 복사(<code>C</code>)는 형식과 상관없이 PNG 입니다. 크기와 주소·시각 띠는 복사에도 적용됩니다.</p>
+  </section>
+
+  <section aria-labelledby="h-scale">
+    <h2 id="h-scale">크기</h2>
+    <label class="choice"><input type="radio" name="outScale" value="device"><span>화면 그대로 <span class="desc">— 장치 픽셀 (기본)<span id="dprNote"></span></span></span></label>
+    <label class="choice"><input type="radio" name="outScale" value="1"><span>1배 <span class="desc">— 웹페이지의 CSS 픽셀 크기. 고해상도 화면에서는 줄여서 저장합니다</span></span></label>
+    <label class="choice"><input type="radio" name="outScale" value="2"><span>2배 <span class="desc">— CSS 픽셀의 두 배. 화면이 1배율이면 늘려서 저장하므로 더 또렷해지지는 않습니다</span></span></label>
+  </section>
+
+  <section aria-labelledby="h-name">
+    <h2 id="h-name">파일 이름</h2>
+    <div class="row">
+      <input type="text" id="nameTemplate" spellcheck="false" autocomplete="off" aria-describedby="nameHelp namePreview">
+      <button type="button" id="nameReset">기본값</button>
+    </div>
+    <p class="hint" id="nameHelp">
+      칸: <code>{host}</code> 도메인 · <code>{title}</code> 페이지 제목 · <code>{date}</code> 날짜(20261126) · <code>{time}</code> 시각(101530).
+      <code>/</code> 로 폴더를 나눕니다(다운로드 폴더 안). 끝에 전체 페이지는 <code>-full</code>, 영역은 <code>-area</code> 와 확장자가 붙습니다.
+      파일 이름에 쓸 수 없는 글자는 <code>_</code> 로 바뀝니다.
+    </p>
+    <div class="preview" id="namePreview"></div>
+    <div class="warn" id="nameWarn" hidden></div>
+  </section>
+
+  <section aria-labelledby="h-save">
+    <h2 id="h-save">저장할 때</h2>
+    <label class="choice"><input type="checkbox" id="askWhere"><span>저장할 때마다 위치와 이름 묻기 <span class="desc">— 창을 닫으면 저장하지 않고, 정리한 상태는 그대로 둡니다</span></span></label>
+    <label class="choice"><input type="checkbox" id="stamp"><span>그림 아래에 페이지 주소와 찍은 시각 붙이기 <span class="desc">— 보고·감사용. 주소의 <code>?</code> 뒤(검색어)와 <code>#</code> 뒤는 넣지 않고, 로컬 파일은 파일 이름만 적습니다</span></span></label>
+  </section>
+</main>
+<div class="saved" id="saved" role="status" aria-live="polite">저장했습니다</div>
+<script src="settings.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

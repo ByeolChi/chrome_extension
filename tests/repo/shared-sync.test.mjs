@@ -15,7 +15,7 @@ test('확장 폴더의 공용 코드 사본이 원본과 같음', () => {
 
 test('CleanShot: 피커보다 공용 코어를 먼저 주입하고, 워커도 불러옴', () => {
   const bg = read('cleanshot-picker/background.js');
-  assert.match(bg, /importScripts\('shared\/redact-core\.js'\)/);
+  assert.match(bg, /importScripts\('shared\/redact-core\.js'(,\s*'[^']+')*\)/); // 공용 코어를 맨 먼저 (뒤에 다른 파일이 더 있어도 됨)
   assert.match(bg, /INJECT_FILES\s*=\s*\['shared\/redact-core\.js',\s*'picker\.js'\]/);
 });
 

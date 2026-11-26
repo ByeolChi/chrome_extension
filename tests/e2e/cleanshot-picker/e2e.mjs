@@ -39,7 +39,9 @@ function syncExt() {
   fs.rmSync(EXT, { recursive: true, force: true });
   fs.mkdirSync(path.join(EXT, 'icons'), { recursive: true });
   fs.mkdirSync(path.join(EXT, 'shared'), { recursive: true });
-  for (const f of ['picker.js', 'background.js', 'shared/redact-core.js']) fs.copyFileSync(path.join(SRC, f), path.join(EXT, f));
+  for (const f of ['picker.js', 'background.js', 'settings.js', 'options.html', 'options.js', 'shared/redact-core.js']) {
+    if (fs.existsSync(path.join(SRC, f))) fs.copyFileSync(path.join(SRC, f), path.join(EXT, f)); // 예전 버전(CLEANSHOT_EXT)에는 없는 파일도 있다
+  }
   for (const f of fs.readdirSync(path.join(SRC, 'icons'))) fs.copyFileSync(path.join(SRC, 'icons', f), path.join(EXT, 'icons', f));
   const man = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'));
   man.host_permissions = ['<all_urls>'];
@@ -187,9 +189,10 @@ async function freshPage(url = `http://127.0.0.1:${WEB}/main.html`) {
   mainFrameId = tree.frameTree.frame.id;
 }
 
+const OUT_KEYS = ['outFormat', 'outScale', 'nameTemplate', 'askWhere', 'stamp'];
 async function activate() {
-  // 앞 시험이 저장한 설정(빈자리 제거·툴바 위치)이 다음 시험에 새지 않게 되돌린다
-  const r = await sw(`(async () => { await chrome.storage.sync.set({ forceRemove: false, barTop: false }); const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await togglePicker(tab); return tab.id; })()`);
+  // 앞 시험이 저장한 설정(빈자리 제거·툴바 위치·저장 설정)이 다음 시험에 새지 않게 되돌린다
+  const r = await sw(`(async () => { await chrome.storage.sync.set({ forceRemove: false, barTop: false }); await chrome.storage.sync.remove(${JSON.stringify(OUT_KEYS)}); const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await togglePicker(tab); return tab.id; })()`);
   for (let i = 0; i < 50 && !isoId(); i++) await sleep(50);
   if (!isoId()) throw new Error('isolated world not found');
   for (let i = 0; i < 50; i++) {
@@ -222,6 +225,43 @@ async function waitNewPng(before, timeout = 10000) {
     await sleep(80);
   }
   return null;
+}
+
+/* 새로 저장된 그림 파일 (확장자 re). 다 받아질 때까지 기다린다 */
+async function waitNewFile(before, re = /\.(png|jpg|webp)$/, timeout = 10000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    const files = listFiles().filter((f) => !before.has(f));
+    const done = files.filter((f) => re.test(f));
+    if (done.length && !files.some((f) => f.endsWith('.crdownload'))) {
+      await sleep(150);
+      return done[0];
+    }
+    await sleep(80);
+  }
+  return null;
+}
+
+/* JPEG·WebP 는 Node 에서 풀 수 없어 페이지에서 그림으로 읽는다. probes(이미지 픽셀 사각형)마다 어두운 비율·평균색 */
+async function imageInfo(file, probes = []) {
+  const mime = file.endsWith('.jpg') ? 'image/jpeg' : file.endsWith('.webp') ? 'image/webp' : 'image/png';
+  const b64 = fs.readFileSync(file).toString('base64');
+  return main(`(async () => {
+    const img = new Image();
+    img.src = 'data:${mime};base64,${b64}';
+    await img.decode();
+    const c = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
+    const x = c.getContext('2d');
+    x.drawImage(img, 0, 0);
+    const probes = ${JSON.stringify(probes)}.map((r) => {
+      const d = x.getImageData(Math.round(r.x), Math.round(r.y), Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h))).data;
+      let dark = 0; const sum = [0, 0, 0];
+      for (let i = 0; i < d.length; i += 4) { if (d[i] < 24 && d[i + 1] < 24 && d[i + 2] < 24) dark++; sum[0] += d[i]; sum[1] += d[i + 1]; sum[2] += d[i + 2]; }
+      const n = d.length / 4;
+      return { dark: dark / n, avg: sum.map((s) => Math.round(s / n)) };
+    });
+    return { w: img.naturalWidth, h: img.naturalHeight, probes };
+  })()`);
 }
 
 /* 캡처하고 PNG 를 읽는다. 캡처 직전의 가리기 사각형도 돌려준다. */
@@ -538,7 +578,40 @@ const cases = {
     await move(10, 330);
     await sleep(100);
     await shot('annotate');
-    check('화면 다섯 장 저장', true);
+    await key('Escape');
+    await key('Escape');
+    // 주소·시각 띠를 붙여 저장한 그림 (띠 모양 확인용)
+    await activate();
+    await sw(`chrome.storage.sync.set({ stamp: true }).then(() => true)`);
+    const before = new Set(listFiles());
+    await key('Enter');
+    const stamped = await waitNewFile(before, /\.png$/);
+    if (stamped) {
+      const out = path.join(os.tmpdir(), `cleanshot-screen-stamp-dpr${DPR}.png`);
+      fs.copyFileSync(stamped, out);
+      console.log('   화면 저장: ' + out);
+    }
+    await sleep(900);
+    // 설정 화면 (밝게·어둡게)
+    const extId = await sw('chrome.runtime.id');
+    const { targetId } = await cdp.send('Target.createTarget', { url: `chrome-extension://${extId}/options.html` });
+    const optS = (await cdp.send('Target.attachToTarget', { targetId, flatten: true })).sessionId;
+    try {
+      await cdp.send('Page.enable', {}, optS);
+      await sleep(800);
+      for (const scheme of ['light', 'dark']) {
+        await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] }, optS);
+        await sleep(200);
+        const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, optS);
+        const out = path.join(os.tmpdir(), `cleanshot-screen-options-${scheme}-dpr${DPR}.png`);
+        fs.writeFileSync(out, Buffer.from(data, 'base64'));
+        console.log('   화면 저장: ' + out);
+      }
+    } finally {
+      await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
+      await cdp.send('Target.activateTarget', { targetId: pageTargetId }).catch(() => {});
+    }
+    check('화면 저장 (기본·dialog·영역·주석·글상자 등·띠·설정 화면)', true);
   },
 
   /* 여러 요소에 걸친 영역은 예전처럼 문서 좌표에 붙는다 */
@@ -917,7 +990,13 @@ const cases = {
       await key('6');
       await click(center(b).x, center(b).y);
       await key('c');
-      await sleep(900);
+      // 고정 시간 대신 복사가 끝났다는 알림을 기다린다 (바쁠 때는 900ms 를 넘길 수 있다)
+      let t = '';
+      for (let i = 0; i < 200 && !/복사했습니다|복사하지 못했습니다|복사 실패/.test(t); i++) {
+        t = await iso(`(() => { const h = document.getElementById('__cleanshot_host__'); return h ? chrome.dom.openOrClosedShadowRoot(h).querySelector('.toast').textContent : ''; })()`).catch(() => '');
+        await sleep(25);
+      }
+      await sleep(200);
       const clip = await main(`(async () => {
         const items = await navigator.clipboard.read();
         const it = items.find((x) => x.types.includes('image/png'));
@@ -925,7 +1004,8 @@ const cases = {
         const bmp = await createImageBitmap(await it.getType('image/png'));
         return { w: bmp.width, h: bmp.height };
       })()`);
-      check('C 로 복사해도 고른 요소 부분만', !!clip && near(clip.w, b.w * DPR, 2 * DPR) && near(clip.h, b.h * DPR, 2 * DPR), JSON.stringify(clip));
+      const last = await sw('self.__lastCapture || null').catch(() => null);
+      check('C 로 복사해도 고른 요소 부분만', !!clip && near(clip.w, b.w * DPR, 2 * DPR) && near(clip.h, b.h * DPR, 2 * DPR), `${JSON.stringify(clip)} ${t} ${JSON.stringify(last)}`);
     } finally {
       await cdp.send('Browser.resetPermissions', {}).catch(() => {});
       await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, pageS).catch(() => {});
@@ -1272,6 +1352,231 @@ const cases = {
       sameRgb(in5, L2.bands[5].c) && half(out1, L2.bands[1].c) && half(out25, L2.bands[25].c),
       { in5, c5: L2.bands[5].c, out1, c1: L2.bands[1].c, out25, c25: L2.bands[25].c });
     await sleep(900);
+  },
+
+  /* 저장 설정: JPEG·WebP(가리기는 그대로), 크기 1배·2배, 파일 이름 양식, 주소·시각 띠(? 뒤 뺌), 저장 위치 묻기, 복사는 늘 PNG */
+  async output() {
+    const setOut = (v) => sw(`chrome.storage.sync.set(${JSON.stringify(v)}).then(() => true)`);
+    const T = DPR === 1 ? 2 : 1; // 화면 배율과 다른 크기
+    const waitToast = async (re) => {
+      let t = '';
+      for (let i = 0; i < 200 && !re.test(t); i++) { t = await toastText().catch(() => ''); await sleep(25); }
+      return t;
+    };
+
+    // 1) JPEG: 가리기는 그대로 검정, 가리지 않은 빨강은 빨강
+    await freshPage();
+    const vw = await main('innerWidth');
+    const vh = await main('innerHeight');
+    await activate();
+    await setOut({ outFormat: 'jpeg' });
+    await key('5');
+    const r = await rectMain('#fixedSecret');
+    await click(center(r).x, center(r).y);
+    const rc = await rectShadow('#closedHost', 'closedInner', true);
+    let before = new Set(listFiles());
+    await key('Enter');
+    let file = await waitNewFile(before);
+    const jpg = !!file && /\.jpg$/.test(file) && fs.readFileSync(file).subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+    const ji = jpg ? await imageInfo(file, [scaled(r, 2 * DPR), scaled({ x: rc.x + 4, y: rc.y + 24, w: 40, h: 12 }, 0)]) : null;
+    check('JPEG: .jpg 파일, 크기는 화면 그대로, 가린 자리는 검정·가리지 않은 빨강은 그대로',
+      jpg && ji.w === Math.round(vw * DPR) && ji.probes[0].dark > 0.98 && ji.probes[1].avg[0] > 200 && ji.probes[1].avg[1] < 60,
+      file ? `${path.basename(file)} ${ji ? `${ji.w}x${ji.h} ${JSON.stringify(ji.probes)}` : ''}` : 'no file');
+    await sleep(900);
+
+    // 2) WebP
+    await freshPage();
+    await activate();
+    await setOut({ outFormat: 'webp' });
+    before = new Set(listFiles());
+    await key('Enter');
+    file = await waitNewFile(before);
+    const head = file ? fs.readFileSync(file).subarray(0, 12) : null;
+    const webp = !!file && /\.webp$/.test(file) && head.subarray(0, 4).toString() === 'RIFF' && head.subarray(8, 12).toString() === 'WEBP';
+    const wi = webp ? await imageInfo(file) : null;
+    check('WebP: .webp 파일(RIFF·WEBP), 크기는 화면 그대로', webp && wi.w === Math.round(vw * DPR), file ? `${path.basename(file)} ${wi ? `${wi.w}x${wi.h}` : ''}` : 'no file');
+    await sleep(900);
+
+    // 3) 크기: 화면 배율과 다른 배율로. 가리기도 그 배율 자리에 검정
+    await freshPage();
+    await activate();
+    await setOut({ outScale: String(T) });
+    await key('5');
+    await click(center(r).x, center(r).y);
+    before = new Set(listFiles());
+    await key('Enter');
+    file = await waitNewFile(before, /\.png$/);
+    const si = file ? decodePng(fs.readFileSync(file)) : null;
+    const sb = si ? blackRatio(si, r.x * T + 2, r.y * T + 2, r.w * T - 4, r.h * T - 4) : 0;
+    check(`크기 ${T}배: PNG = 화면 CSS 크기 × ${T}, 가리기도 그 자리에 검정`,
+      !!si && si.width === Math.round(vw * T) && Math.abs(si.height - vh * T) <= 1 && sb > 0.99,
+      si ? `${si.width}x${si.height} (CSS ${vw}x${vh}) black=${sb.toFixed(4)}` : 'no file');
+    await sleep(900);
+
+    // 4) 파일 이름 양식: 폴더·날짜·제목 칸, 제목의 쓸 수 없는 글자와 / 는 _ 로
+    await freshPage();
+    await activate();
+    await setOut({ nameTemplate: 'shots/{date}/{title}-{time}' });
+    await main(`document.title = ${JSON.stringify('a<b>:c?"d|e*/f')}; true`);
+    before = new Set(listFiles());
+    await key('Enter');
+    file = await waitNewFile(before);
+    const rel = file ? path.relative(DL, file) : '';
+    check('파일 이름 양식: shots/날짜/제목-시각, 제목의 쓸 수 없는 글자·/ 는 _ 로', /^shots[\\/]\d{8}[\\/]a_b__c__d_e__f-\d{6}\.png$/.test(rel), rel || 'no file');
+    await sleep(900);
+
+    // 5) 주소·시각 띠: 그림 아래에 덧붙이고(화면은 가리지 않음), 주소에 ? 뒤·# 뒤가 없음
+    await freshPage(`http://127.0.0.1:${WEB}/main.html?token=SECRET#frag`);
+    await activate();
+    await setOut({ stamp: true });
+    await sw(`(() => { if (!self.__origAddStamp) self.__origAddStamp = addStamp; self.__stamps = []; addStamp = (c, f, t) => { self.__stamps.push(t); return self.__origAddStamp(c, f, t); }; return true; })()`);
+    try {
+      before = new Set(listFiles());
+      await key('Enter');
+      file = await waitNewFile(before, /\.png$/);
+      const img = file ? decodePng(fs.readFileSync(file)) : null;
+      const stripH = Math.round(26 * DPR);
+      const st = await sw('self.__stamps');
+      let light = 0;
+      let total = 0;
+      if (img) {
+        for (let y = img.height - stripH; y < img.height; y++) {
+          for (let x = 0; x < img.width; x += 2) { const p = pixel(img, x, y); total++; if (p[0] > 180 && p[1] > 180 && p[2] > 180) light++; }
+        }
+      }
+      check('주소·시각 띠: 그림 아래에 덧붙임(높이 = 화면 + 26px × 배율), 화면 부분은 그대로, 띠에 글자가 있음',
+        !!img && img.height === Math.round(vh * DPR) + stripH && sameRgb(pixel(img, 2, img.height - 2), [28, 28, 31]) &&
+          sameRgb(pixel(img, Math.round(5 * DPR), Math.round(5 * DPR)), [200, 200, 200]) && light / total > 0.005,
+        img ? `${img.width}x${img.height} 글자 픽셀 ${(100 * light / total).toFixed(2)}%` : 'no file');
+      check('주소·시각 띠의 주소에 ? 뒤(토큰)와 # 뒤가 없고, 시각에 시간대가 있음',
+        Array.isArray(st) && st.length === 1 && st[0].url === `http://127.0.0.1:${WEB}/main.html` && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \(UTC[+-]\d\d:\d\d\)$/.test(st[0].when),
+        JSON.stringify(st));
+    } finally {
+      await sw(`(() => { if (self.__origAddStamp) addStamp = self.__origAddStamp; return true; })()`);
+    }
+    await sleep(900);
+
+    // 6) 저장 위치 묻기: 헤드리스는 저장 위치 창을 바로 닫는다(USER_CANCELED) → 저장하지 않고 알림, 정리한 상태는 그대로
+    await freshPage();
+    await activate();
+    await setOut({ askWhere: true });
+    await key('5');
+    await click(center(r).x, center(r).y);
+    before = new Set(listFiles());
+    await key('Enter');
+    const t6 = await waitToast(/저장하지 않았습니다|저장했습니다|실패/);
+    await sleep(700);
+    const got = listFiles().filter((f) => !before.has(f));
+    const keep = await iso('!!(window.__cleanShot.state.active && !window.__cleanShot.state.busy && window.__cleanShot.state.masks.length === 1)');
+    check('저장 위치 묻기: 창을 닫으면 저장하지 않고(대신 받기도 안 함) 알림, 정리한 상태는 그대로',
+      /저장 위치 창을 닫아 저장하지 않았습니다/.test(t6) && got.length === 0 && keep, `${t6} files=${got.length} keep=${keep}`);
+    await key('Escape');
+    const decided = await sw(`(async () => { const id = await chrome.downloads.download({ url: 'data:text/plain,hi', filename: 'cleanshot/decide.txt', saveAs: false }); return downloadDecision(id, 5000); })()`);
+    check('저장 위치가 정해지면 그 경로를 받음 (같은 기다리기, 창 없이)', !!decided && /decide\.txt$/.test(decided.filename || ''), JSON.stringify(decided));
+    await sleep(600);
+
+    // 7) 복사: 형식(JPEG)과 상관없이 PNG, 크기 설정은 따름
+    const ORIGIN = `http://127.0.0.1:${WEB}`;
+    await freshPage();
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, pageS);
+    await cdp.send('Browser.grantPermissions', { origin: ORIGIN, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    try {
+      await activate();
+      await setOut({ outFormat: 'jpeg', outScale: String(T) });
+      before = new Set(listFiles());
+      await key('c');
+      await waitToast(/클립보드에 복사했습니다|복사하지 못했습니다|복사 실패/);
+      await sleep(300);
+      const clip = await main(`(async () => {
+        const items = await navigator.clipboard.read();
+        const it = items.find((x) => x.types.includes('image/png'));
+        if (!it) return { types: items.map((x) => x.types) };
+        const bmp = await createImageBitmap(await it.getType('image/png'));
+        return { w: bmp.width, h: bmp.height };
+      })()`);
+      check(`복사: 형식(JPEG)과 상관없이 PNG, 크기 설정(${T}배)은 따름, 파일은 만들지 않음`,
+        !!clip && clip.w === Math.round(vw * T) && listFiles().filter((f) => !before.has(f)).length === 0, JSON.stringify(clip));
+    } finally {
+      await cdp.send('Browser.resetPermissions', {}).catch(() => {});
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, pageS).catch(() => {});
+      await sleep(300);
+    }
+  },
+
+  /* 전체 페이지도 저장 설정의 크기를 따른다 (이어 붙인 뒤 한 번에 바꾼다) */
+  async outputFull() {
+    await freshPage(FULL_URL());
+    const L = await fullLayout();
+    const T = DPR === 1 ? 2 : 1;
+    await activate();
+    await sw(`chrome.storage.sync.set({ outScale: '${T}' }).then(() => true)`);
+    const shot = await fullShot(() => key('Enter', SHIFT));
+    if (!shot.img) { check(`전체 페이지 크기 ${T}배: PNG 저장`, false, `파일 없음 ${JSON.stringify(shot.toasts)}`); return; }
+    const img = shot.img;
+    check(`전체 페이지 크기 ${T}배: PNG = 문서 CSS 크기 × ${T}`, Math.abs(img.width - L.W * T) <= 1 && Math.abs(img.height - L.H * T) <= 1,
+      `${img.width}x${img.height} 기대 ${L.W * T}x${L.H * T}`);
+    const close = (p, c) => !!p && c.every((v, k) => Math.abs(p[k] - v) <= 2);
+    const at = (x, y) => pixel(img, Math.round(x * T), Math.round(y * T));
+    // 띠 가운데에서 보되, 고정 머리글(위 50px)·바닥글(아래 40px) 자리와 그 경계는 피한다
+    const mid = (b) => Math.min(Math.max(b.y + b.h / 2, 60), L.H - 50);
+    const bad = L.bands.filter((b) => !close(at(1000, mid(b)), b.c)).map((b) => ({ y: mid(b), want: b.c, got: at(1000, mid(b)) }));
+    check(`전체 페이지 크기 ${T}배: 띠마다 제자리 색, 머리글·바닥글은 맨 위·맨 아래`, bad.length === 0 && close(at(1000, 25), HDR) && close(at(1000, L.H - 20), FTR),
+      bad.length ? bad.slice(0, 3) : `띠 ${L.bands.length}개`);
+    await sleep(900);
+  },
+
+  /* 설정 화면: 툴바 "설정" 단추로 열림, 기본값·미리 보기, 고르면 바로 저장, 모르는 칸 경고, 기본값 단추 */
+  async optionsPage() {
+    const extId = await sw('chrome.runtime.id');
+    await freshPage();
+    await activate();
+    const ob = await uiRect('.opts');
+    await click(center(ob).x, center(ob).y);
+    let opt = null;
+    for (let i = 0; i < 50 && !opt; i++) {
+      const { targetInfos } = await cdp.send('Target.getTargets');
+      opt = targetInfos.find((t) => t.type === 'page' && t.url.startsWith(`chrome-extension://${extId}/options.html`));
+      if (!opt) await sleep(100);
+    }
+    check('툴바의 "설정" 단추로 설정 화면이 열리고 피커는 켜진 채', !!opt && (await iso('window.__cleanShot.state.active')), opt ? opt.url : 'no options page');
+    if (!opt) return;
+    const s = (await cdp.send('Target.attachToTarget', { targetId: opt.targetId, flatten: true })).sessionId;
+    try {
+      await cdp.send('Runtime.enable', {}, s);
+      const page = (expr) => evalIn(s, expr);
+      for (let i = 0; i < 50; i++) {
+        if (await page(`document.readyState === 'complete' && !!document.querySelector('input[name=outFormat]:checked')`).catch(() => false)) break;
+        await sleep(100);
+      }
+      const init = await page(`({ f: document.querySelector('input[name=outFormat]:checked').value, s: document.querySelector('input[name=outScale]:checked').value,
+        n: document.getElementById('nameTemplate').value, preview: document.getElementById('namePreview').textContent })`);
+      check('설정 화면: 기본값(PNG·화면 그대로·기본 양식)과 파일 이름 미리 보기',
+        init.f === 'png' && init.s === 'device' && init.n === 'cleanshot/{host}-{date}-{time}' && /cleanshot\/example\.com-\d{8}-\d{6}\.png/.test(init.preview), JSON.stringify(init));
+      await page(`(() => {
+        document.querySelector('input[name=outFormat][value=webp]').click();
+        document.querySelector('input[name=outScale][value="1"]').click();
+        document.getElementById('stamp').click();
+        const n = document.getElementById('nameTemplate');
+        n.value = 'x/{nope}';
+        n.dispatchEvent(new Event('change'));
+        return true;
+      })()`);
+      await sleep(400);
+      const stored = await sw(`chrome.storage.sync.get(${JSON.stringify(OUT_KEYS)})`);
+      const view = await page(`({ preview: document.getElementById('namePreview').textContent, warn: document.getElementById('nameWarn').hidden ? '' : document.getElementById('nameWarn').textContent })`);
+      check('설정 화면: 고르면 바로 저장되고, 미리 보기는 그 형식의 확장자', stored.outFormat === 'webp' && stored.outScale === '1' && stored.stamp === true && stored.nameTemplate === 'x/{nope}' &&
+        /x\/\{nope\}\.webp/.test(view.preview), JSON.stringify({ stored, preview: view.preview }));
+      check('설정 화면: 모르는 칸과 이름이 겹치기 쉬운 양식을 알려 줌', /\{nope\}/.test(view.warn) && /겹치기 쉽습니다/.test(view.warn), view.warn);
+      await page(`document.getElementById('nameReset').click(); true`);
+      await sleep(300);
+      const reset = await sw(`chrome.storage.sync.get('nameTemplate')`);
+      check('설정 화면: "기본값" 단추로 파일 이름 양식을 되돌림', reset.nameTemplate === 'cleanshot/{host}-{date}-{time}', JSON.stringify(reset));
+    } finally {
+      await cdp.send('Target.closeTarget', { targetId: opt.targetId }).catch(() => {});
+      await cdp.send('Target.activateTarget', { targetId: pageTargetId }).catch(() => {});
+      await sleep(300);
+    }
+    if (await iso('window.__cleanShot.state.active').catch(() => false)) await key('Escape');
   },
 
   /* 3 저장 실패 시 대체 경로 */
