@@ -341,6 +341,7 @@
           <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
           <button class="copy" title="보이는 화면을 클립보드에 복사 (C)">복사</button>
           <span class="status"></span>
+          <button class="opts" title="저장 형식·크기·파일 이름·저장 위치·주소와 시각 표시">설정</button>
           <button class="flip" title="툴바를 위/아래로 (Tab)">⇅</button>
           <button class="close" title="Esc">닫기</button>
         </div>
@@ -372,6 +373,7 @@
     shot: root.querySelector('.shot'),
     full: root.querySelector('.full'),
     copy: root.querySelector('.copy'),
+    opts: root.querySelector('.opts'),
     flip: root.querySelector('.flip'),
     close: root.querySelector('.close')
   };
@@ -387,6 +389,12 @@
   ui.shot.addEventListener('click', () => captureViewport());
   ui.full.addEventListener('click', () => captureFullPage());
   ui.copy.addEventListener('click', () => captureViewport('', { copy: true }));
+  // 설정 화면은 서비스 워커가 연다 (콘텐츠 스크립트에는 openOptionsPage 가 없다). 정리한 것은 그대로 둔다
+  ui.opts.addEventListener('click', () => {
+    send({ type: 'CLEANSHOT_OPEN_OPTIONS' }).then((res) => {
+      if (!res || !res.ok) toast(`설정 화면을 열지 못했습니다 · ${(res && res.error) || '알 수 없는 오류'}`, 3200);
+    });
+  });
   ui.flip.addEventListener('click', flipBar);
   ui.close.addEventListener('click', deactivate);
   /* 8방향 핸들: 고른 그림이 있으면 그 크기를, 아니면 3 크기 도구에서 고른 요소의 크기를 바꾼다 */
@@ -2336,6 +2344,7 @@
       type: 'CLEANSHOT_CAPTURE',
       copy: !!opts.copy,
       pageUrl: location.href,
+      pageTitle: document.title,
       masks,
       crop,
       viewport: { w: window.innerWidth, h: window.innerHeight },
@@ -2360,16 +2369,18 @@
       return;
     }
     const err = await copyPng(res.dataUrl);
-    if (!err) { finish('클립보드에 복사했습니다' + note); return; }
+    if (!err) { finish('클립보드에 복사했습니다' + note + (res.note ? ` · ${res.note}` : '')); return; }
     toast(`클립보드에 복사하지 못했습니다 · ${err} · Enter 로 파일 저장은 됩니다`, 4200);
   }
 
-  function pngBlob(dataUrl) {
+  /* data URL 을 Blob 으로 (PNG·JPEG·WebP — 형식은 data URL 머리에서) */
+  function dataBlob(dataUrl) {
     const comma = dataUrl.indexOf(',');
+    const m = /^data:([^;,]+)/.exec(dataUrl);
     const bin = atob(dataUrl.slice(comma + 1));
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new Blob([bytes], { type: 'image/png' });
+    return new Blob([bytes], { type: m ? m[1] : 'image/png' });
   }
 
   /** PNG 를 클립보드에 넣는다. 되면 빈 문자열, 안 되면 이유 */
@@ -2378,7 +2389,7 @@
       return '이 페이지(https 가 아닌 주소)에서는 브라우저가 클립보드 쓰기를 막습니다';
     }
     try {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob(dataUrl) })]);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': dataBlob(dataUrl) })]);
       return '';
     } catch (err) {
       const m = String((err && err.message) || err);
@@ -2389,13 +2400,23 @@
   }
 
   /* 저장 결과를 알린다. 저장했으면 전체 복원 후 닫는다.
-     downloads API 가 실패했으면 페이지에서 직접 내려받는다. */
+     downloads API 가 실패했으면 페이지에서 직접 내려받는다.
+     저장 위치 창을 닫았으면(declined) 저장하지 않은 것이므로 정리한 상태를 그대로 둔다. */
   function afterSave(res, done, failed) {
-    if (res && res.ok) { finish(`${done} · ${short(res.filename)}`); return; }
+    const note = res && res.note ? ` · ${res.note}` : '';
+    if (res && res.ok) {
+      const name = res.pending ? '저장 위치 창이 아직 열려 있습니다' : short(res.filename);
+      finish(`${done} · ${name}${note}`);
+      return;
+    }
+    if (res && res.declined) {
+      toast('저장 위치 창을 닫아 저장하지 않았습니다 · 정리한 것은 그대로입니다', 3200);
+      return;
+    }
 
     if (res && res.fallback && res.dataUrl) {
       const err = saveInPage(res.dataUrl, res.filename);
-      if (!err) { finish(`브라우저 다운로드로 저장했습니다 · ${short(res.filename)}`); return; }
+      if (!err) { finish(`브라우저 다운로드로 저장했습니다 · ${short(res.filename)}${note}`); return; }
       toast(`${failed} · ${res.error} · 대체 저장도 실패: ${err}`, 4200);
       return;
     }
@@ -2515,6 +2536,7 @@
     const begin = await send({
       type: 'CLEANSHOT_FULL_BEGIN',
       pageUrl: location.href,
+      pageTitle: document.title,
       clip: plan.clip,
       viewport: { w: window.innerWidth, h: window.innerHeight },
       total: plan.total,
@@ -2775,7 +2797,7 @@
      선택 모드의 클릭 차단을 거치지 않는다. 폴더는 지정할 수 없어 파일 이름만 쓴다. */
   function saveInPage(dataUrl, filename) {
     try {
-      const url = URL.createObjectURL(pngBlob(dataUrl));
+      const url = URL.createObjectURL(dataBlob(dataUrl));
       const a = document.createElement('a');
       a.href = url;
       a.download = short(filename) || 'cleanshot.png';
@@ -2809,8 +2831,9 @@
     toastTimer = setTimeout(() => { ui.toast.style.display = 'none'; }, ms || 2000);
   }
 
+  /* 경로의 끝 이름 (저장 위치 창에서 고른 경로는 Windows 면 \ 로 나뉜다) */
   function short(path) {
-    return String(path || '').split('/').pop();
+    return String(path || '').split(/[\\/]/).pop();
   }
 
   function nextPaint() {
