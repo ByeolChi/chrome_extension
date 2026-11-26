@@ -1,5 +1,5 @@
 /* CleanShot Picker — 설정 화면 (options.html)
- * 저장 형식·크기·파일 이름 양식·저장 위치 묻기·주소와 시각 띠를 chrome.storage.sync 에 둔다.
+ * 저장 형식·크기·파일 이름 양식·저장 위치 묻기·주소와 시각 띠·스크롤 막대 빼기·이어서 찍기를 chrome.storage.sync 에 둔다.
  * 값의 뜻과 기본값, 파일 이름 만들기는 settings.js(서비스 워커와 같은 파일)를 쓴다. 바꾸면 바로 저장한다.
  */
 (() => {
@@ -20,6 +20,8 @@
     if (document.activeElement !== nameInput) nameInput.value = v.nameTemplate;
     $('askWhere').checked = v.askWhere;
     $('stamp').checked = v.stamp;
+    $('hideScrollbars').checked = v.hideScrollbars;
+    $('keepAfter').checked = v.keepAfter;
     paintPreview();
   }
 
@@ -79,6 +81,8 @@
   radios('outScale').forEach((r) => r.addEventListener('change', () => { if (r.checked) write({ outScale: r.value }); }));
   $('askWhere').addEventListener('change', (e) => write({ askWhere: e.target.checked }));
   $('stamp').addEventListener('change', (e) => write({ stamp: e.target.checked }));
+  $('hideScrollbars').addEventListener('change', (e) => write({ hideScrollbars: e.target.checked }));
+  $('keepAfter').addEventListener('change', (e) => write({ keepAfter: e.target.checked }));
 
   // 파일 이름: 쓰는 동안 미리 보기만, 칸을 떠나거나 Enter 를 누르면 저장한다 (빈 값이면 기본 양식으로 되돌림)
   nameInput.addEventListener('input', paintPreview);

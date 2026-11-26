@@ -34,6 +34,7 @@
   const MAX_ESCALATE = 6;        // 자동 승격 최대 단계
   const AREA_RATIO = 0.9;        // 부모 면적의 이 비율 이상이면 부모를 대신 선택
   const NUDGE_MERGE_MS = 400;    // 이 안에 이어진 방향키는 한 작업으로 묶는다
+  const ESC_CONFIRM_MS = 2500;   // 정리한 것이 있을 때 이 안에 Esc 를 한 번 더 눌러야 닫힌다
   const FRAME_TAGS = 'iframe, frame, object, embed';
 
   /* key 는 누른 글자(e.key), code 가 있으면 키 위치(e.code)로 본다 — 한글 입력 상태에서 T 는 'ㅅ' 이 된다.
@@ -95,6 +96,9 @@
     hover: null,             // 포인터 아래에 있는 잡을 수 있는 그림
     noteEdit: null,          // 글을 쓰는 중인 글상자 { obj, before(글), isNew, g0(자리·크기) }
     eatClick: false,         // 다음 클릭 한 번은 도구 동작으로 쓰지 않는다 (글상자 쓰기를 끝낸 클릭)
+    keepAfter: false,        // 찍은 뒤에도 정리한 상태를 두고 이어서 찍는다 (툴바 "찍고 계속")
+    pass: null,              // Space 를 누르고 있는 동안 페이지 조작 — "페이지 조작" 참고
+    escAt: 0,                // 정리한 것이 있을 때 Esc 를 처음 누른 시각 (한 번 더 눌러야 닫힌다)
     drag: null,
     editing: null,
     editSnapshot: null,
@@ -240,6 +244,9 @@
       }
       .selbox { outline: 1.5px dashed #2f6fed; outline-offset: 3px; }
       .hoverbox { outline: 1px solid rgba(47,111,237,0.9); outline-offset: 3px; }
+      /* Space 를 누른 채 페이지를 조작하는 동안: 페이지를 누르는 데 걸리지 않게 핸들·고른 표시를 숨긴다 */
+      :host(.passing) .handle, :host(.passing) .selbox, :host(.passing) .hoverbox,
+      :host(.passing) .hl, :host(.passing) .tag { display: none !important; }
 
       /* 툴바: 윗줄은 도구, 아랫줄은 작업·저장 단추. 좁은 화면에서는 줄마다 접힌다.
          left:50% + translate 로 가운데 두면 쓸 수 있는 너비가 화면 절반으로 줄어 일찍 접히므로 margin:auto 로 가운데 둔다 */
@@ -340,6 +347,7 @@
           <button class="shot primary" title="보이는 화면 (Enter)">캡처</button>
           <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
           <button class="copy" title="보이는 화면을 클립보드에 복사 (C)">복사</button>
+          <button class="keep" title="찍은 뒤 닫을지, 정리한 상태를 두고 이어서 찍을지">찍고 닫기</button>
           <span class="status"></span>
           <button class="opts" title="저장 형식·크기·파일 이름·저장 위치·주소와 시각 표시">설정</button>
           <button class="flip" title="툴바를 위/아래로 (Tab)">⇅</button>
@@ -373,6 +381,7 @@
     shot: root.querySelector('.shot'),
     full: root.querySelector('.full'),
     copy: root.querySelector('.copy'),
+    keep: root.querySelector('.keep'),
     opts: root.querySelector('.opts'),
     flip: root.querySelector('.flip'),
     close: root.querySelector('.close')
@@ -389,6 +398,7 @@
   ui.shot.addEventListener('click', () => captureViewport());
   ui.full.addEventListener('click', () => captureFullPage());
   ui.copy.addEventListener('click', () => captureViewport('', { copy: true }));
+  ui.keep.addEventListener('click', toggleKeep);
   // 설정 화면은 서비스 워커가 연다 (콘텐츠 스크립트에는 openOptionsPage 가 없다). 정리한 것은 그대로 둔다
   ui.opts.addEventListener('click', () => {
     send({ type: 'CLEANSHOT_OPEN_OPTIONS' }).then((res) => {
@@ -532,7 +542,9 @@
 
   function deactivate() {
     if (!state.active) return;
+    endPass();
     state.active = false;
+    state.escAt = 0;
 
     keepAlive('cooldown');
     endTextEdit();
@@ -559,11 +571,13 @@
     try {
       // 가리기 방식 설정은 없어졌다. 예전 판이 남긴 키는 치운다.
       chrome.storage.sync.remove(['maskStyle', 'settingsVersion']).catch(() => {});
-      chrome.storage.sync.get({ forceRemove: false, barTop: false }).then((v) => {
+      chrome.storage.sync.get({ forceRemove: false, barTop: false, keepAfter: false }).then((v) => {
         state.forceRemove = !!v.forceRemove;
         state.barTop = !!v.barTop;
+        state.keepAfter = v.keepAfter === true;
         paintMode();
         paintBarSide();
+        paintKeep();
       }).catch(() => {});
     } catch (_) { /* storage 권한이 없어도 동작한다 */ }
   }
@@ -572,10 +586,20 @@
     try {
       chrome.storage.sync.set({
         forceRemove: state.forceRemove,
-        barTop: state.barTop
+        barTop: state.barTop,
+        keepAfter: state.keepAfter
       }).catch(() => {});
     } catch (_) { /* 무시 */ }
   }
+
+  /* 설정 화면에서 "이어서 찍기"를 바꾸면 켜져 있는 툴바에도 바로 보인다 */
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync' || !changes.keepAfter) return;
+      state.keepAfter = changes.keepAfter.newValue === true;
+      paintKeep();
+    });
+  } catch (_) { /* 무시 */ }
 
   /* ============================================================ 프레임
    * 같은 출처 iframe 은 안쪽 문서에도 같은 리스너를 걸어 그 안의 요소까지 고른다.
@@ -599,10 +623,11 @@
     BLOCKED.forEach((t) => doc.addEventListener(t, onBlocked, true));
     doc.addEventListener('keydown', onKey, true);
     doc.addEventListener('keypress', onKeyQuiet, true);
-    doc.addEventListener('keyup', onKeyQuiet, true);
+    doc.addEventListener('keyup', onKeyUp, true);
     doc.addEventListener('load', onFrameLoad, true);
     win.addEventListener('scroll', reposition, true);
     win.addEventListener('resize', reposition, true);
+    if (doc === document) win.addEventListener('blur', onWindowBlur);
 
     if (doc !== document) {
       try {
@@ -624,12 +649,13 @@
       BLOCKED.forEach((t) => doc.removeEventListener(t, onBlocked, true));
       doc.removeEventListener('keydown', onKey, true);
       doc.removeEventListener('keypress', onKeyQuiet, true);
-      doc.removeEventListener('keyup', onKeyQuiet, true);
+      doc.removeEventListener('keyup', onKeyUp, true);
       doc.removeEventListener('load', onFrameLoad, true);
       const win = doc.defaultView;
       if (win) {
         win.removeEventListener('scroll', reposition, true);
         win.removeEventListener('resize', reposition, true);
+        win.removeEventListener('blur', onWindowBlur);
       }
     } catch (_) { /* 이미 사라진 문서 */ }
     const s = frameStyles.get(doc);
@@ -722,6 +748,19 @@
   function paintMode() {
     ui.mode.textContent = state.forceRemove ? '빈자리 제거' : '빈자리 남김';
     ui.mode.classList.toggle('on', state.forceRemove);
+  }
+
+  /* 찍고 닫기 ↔ 찍고 계속: 계속이면 저장·복사한 뒤에도 정리한 상태를 두어 이어서 찍는다 (설정 화면과 같은 값) */
+  function toggleKeep() {
+    state.keepAfter = !state.keepAfter;
+    paintKeep();
+    writeSettings();
+    toast(state.keepAfter ? '찍은 뒤에도 정리한 상태를 두고 이어서 찍습니다' : '찍으면 모두 되돌리고 닫습니다', 1600);
+  }
+
+  function paintKeep() {
+    ui.keep.textContent = state.keepAfter ? '찍고 계속' : '찍고 닫기';
+    ui.keep.classList.toggle('on', state.keepAfter);
   }
 
   function flipBar() {
@@ -2100,6 +2139,7 @@
       else if (k === 'arrowEnd') updateArrowEnd(p);
       return;
     }
+    if (state.pass) return; // 페이지 조작 중: 요소를 고르지 않는다
     if (inOurUI(e)) return;
     state.pointer.x = p.x;
     state.pointer.y = p.y;
@@ -2116,7 +2156,7 @@
   }
 
   function onPointerDown(e) {
-    if (inOurUI(e) || inEditing(e)) return;
+    if (state.pass || inOurUI(e) || inEditing(e)) return; // 페이지 조작 중에는 페이지가 받는다
     if (state.busy) { block(e); return; }
     block(e);
     state.eatClick = false;
@@ -2160,7 +2200,7 @@
   }
 
   function onBlocked(e) {
-    if (inOurUI(e) || inEditing(e)) return;
+    if (state.pass || inOurUI(e) || inEditing(e)) return; // 페이지 조작 중에는 페이지가 받는다
     block(e);
 
     if (e.type !== 'click' || state.busy || state.justDragged) return;
@@ -2189,6 +2229,49 @@
     if (e.stopImmediatePropagation) e.stopImmediatePropagation();
   }
 
+  /* Space 를 떼면 페이지 조작을 끝낸다. 버튼에 포커스가 있을 때 Space 를 떼면 눌리므로 그것도 막는다 */
+  function onKeyUp(e) {
+    onKeyQuiet(e);
+    if (e.code !== 'Space' || state.editing || state.noteEdit) return;
+    block(e);
+    endPass();
+  }
+
+  /* ============================================================ 페이지 조작 (Space 를 누르는 동안)
+   * 누르고 있는 동안은 클릭·누르기를 막지 않아, 페이지의 드롭다운·메뉴·탭을 직접 열 수 있다. 떼면 다시 고르기로 돌아오고
+   * 연 상태 그대로 Enter·C 로 찍는다 — 그 키는 페이지로 가지 않으므로 바깥 클릭이나 키로 닫히는 메뉴도 열린 채 찍힌다.
+   * 그동안 요소 강조·핸들·도구 커서를 끄고(페이지 커서가 보인다), 막아 둔 다른 출처 iframe 도 풀어 그 안도 누를 수 있게 한다.
+   * 창이 포커스를 잃으면(iframe 안을 누른 경우 등, 떼는 키를 받지 못할 수 있다) 끝낸다. 호버로 열리는 메뉴는 원래도 열린다
+   * (포인터 움직임은 막지 않는다).
+   */
+  const PASS_HINT = '페이지 조작 중 · 클릭이 페이지로 갑니다 · Space 를 떼면 돌아옵니다';
+
+  function startPass() {
+    if (state.pass || state.busy || state.drag) return;
+    state.pass = { frames: [...blinded.keys()] };
+    if (state.hover) { state.hover = null; }
+    setCandidate(null);
+    unblindAll();
+    cursorStyle.textContent = '';
+    for (const s of frameStyles.values()) s.textContent = '';
+    host.classList.add('passing');
+    toast(PASS_HINT, 600000);
+  }
+
+  function endPass() {
+    const p = state.pass;
+    if (!p) return;
+    state.pass = null;
+    for (const f of p.frames) if (f.isConnected) watchFrame(f); // 다시 막는다 (그사이 같은 출처가 되었으면 안을 고르게)
+    host.classList.remove('passing');
+    paintCursor();
+    if (ui.toast.textContent === PASS_HINT) hideToast();
+  }
+
+  function onWindowBlur() {
+    if (state.pass) endPass();
+  }
+
   function onKey(e) {
     // 편집 중에는 Esc 만 가로챈다. 나머지는 그대로 입력되어야 한다.
     if (state.editing) {
@@ -2209,13 +2292,29 @@
 
     if (e.key === 'Escape') {
       block(e);
+      if (state.pass) { endPass(); return; }                // 페이지 조작만 끝낸다
       if (state.full) { state.full.cancel = true; return; } // 전체 페이지 캡처만 멈춘다
       if (state.sel) { select(null); return; }             // 고른 그림이 있으면 고르기만 푼다
+      // 정리한 것이 있으면 한 번 더 눌러야 모두 되돌리고 닫는다 — 편집·고르기를 끝내려고 누른 Esc 가 작업을 날리지 않게
+      const n = state.history.length;
+      if (n && Date.now() - state.escAt > ESC_CONFIRM_MS) {
+        state.escAt = Date.now();
+        toast(`작업 ${n}개를 모두 되돌리고 닫으려면 Esc 를 한 번 더 누르세요`, ESC_CONFIRM_MS);
+        return;
+      }
+      state.escAt = 0;
       deactivate();
       return;
     }
 
     if (state.busy) { block(e); return; }
+
+    // Space 를 누르고 있는 동안 페이지 조작 (자동 반복되는 keydown 도 막아 페이지가 스크롤되지 않게)
+    if (e.code === 'Space' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      block(e);
+      startPass();
+      return;
+    }
 
     // 키 위치(code)로 정한 도구는 Shift 와 함께 누르면 고르지 않는다
     const tool = TOOLS.find((t) => (t.code ? e.code === t.code && !e.shiftKey : t.key === e.key));
@@ -2340,6 +2439,7 @@
       if (whole && (whole.w - v.w > 1 || whole.h - v.h > 1)) cropNote = ' · 화면 밖 부분은 빠졌습니다';
     }
 
+    const vs = viewSize(document); // 스크롤 막대를 뺀 문서 화면 — 설정(스크롤 막대 빼기)이 켜져 있으면 이만큼만 저장한다
     const res = await send({
       type: 'CLEANSHOT_CAPTURE',
       copy: !!opts.copy,
@@ -2347,6 +2447,7 @@
       pageTitle: document.title,
       masks,
       crop,
+      client: { x: 0, y: 0, w: vs.w, h: vs.h },
       viewport: { w: window.innerWidth, h: window.innerHeight },
       dpr: window.devicePixelRatio || 1
     });
@@ -2815,7 +2916,12 @@
     ui.copy.disabled = on;
   }
 
+  /* 저장·복사를 마쳤을 때. 찍고 계속이면 정리한 상태를 그대로 두고, 아니면 전체 복원 후 닫는다 */
   function finish(message) {
+    if (state.keepAfter) {
+      toast(`${message} · 정리한 것은 그대로, 이어서 찍을 수 있습니다`, 2600);
+      return;
+    }
     restoreAll();
     toast(message, 2200);
     setTimeout(deactivate, 700);
@@ -2828,7 +2934,12 @@
     ui.toast.textContent = text;
     ui.toast.style.display = 'block';
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { ui.toast.style.display = 'none'; }, ms || 2000);
+    toastTimer = setTimeout(hideToast, ms || 2000);
+  }
+
+  function hideToast() {
+    clearTimeout(toastTimer);
+    ui.toast.style.display = 'none';
   }
 
   /* 경로의 끝 이름 (저장 위치 창에서 고른 경로는 Windows 면 \ 로 나뉜다) */

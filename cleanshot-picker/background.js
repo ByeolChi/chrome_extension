@@ -107,9 +107,14 @@ const HANDLERS = {
     const crop = cleanMasks(msg.crop ? [msg.crop] : [])[0] || null;
     const fmt = msg.copy ? 'png' : out.outFormat; // 클립보드는 PNG 만 받는다
     const dpr = Number(msg.dpr) > 0 ? Number(msg.dpr) : 1;
+    // 스크롤 막대 빼기: 피커가 보낸 문서 화면(스크롤 막대를 뺀 부분)만 남긴다. 고른 영역이 있으면 그것이 이미 그 안이다
+    const vp = cleanRect({ x: 0, y: 0, ...(msg.viewport || {}) });
+    const client = out.hideScrollbars && !crop ? cleanRect(msg.client) : null;
+    const bars = client && vp && (client.x > 0.5 || client.y > 0.5 || client.w < vp.w - 0.5 || client.h < vp.h - 0.5) ? client : null;
+    const cut = crop || bars;
 
     let made;
-    if (!masks.length && !crop && fmt === 'png' && !out.stamp && Math.abs(CS.outFactor(out.outScale, dpr) - dpr) < 0.01) {
+    if (!masks.length && !cut && fmt === 'png' && !out.stamp && Math.abs(CS.outFactor(out.outScale, dpr) - dpr) < 0.01) {
       made = { dataUrl: shot.dataUrl, ext: 'png' }; // 손볼 것이 없으면 찍은 PNG 그대로 (가장 빠른 길)
     } else {
       let canvas;
@@ -132,13 +137,13 @@ const HANDLERS = {
             return { ok: false, error: `가리기 박스를 이미지에 넣지 못해 ${msg.copy ? '복사' : '저장'}하지 않았습니다 (${describe(err)})` };
           }
         }
-        if (crop) {
+        if (cut) {
           try {
-            const cut = cropCanvas(canvas, crop, sx, sy);
+            const part = cropCanvas(canvas, cut, sx, sy);
             freeCanvas(canvas);
-            canvas = cut;
+            canvas = part;
           } catch (err) {
-            return { ok: false, error: `고른 영역을 잘라 내지 못했습니다 (${describe(err)})` };
+            return { ok: false, error: `${crop ? '고른 영역을' : '스크롤 막대를 뺀 화면을'} 잘라 내지 못했습니다 (${describe(err)})` };
           }
         }
         try {

@@ -7,6 +7,8 @@
  *   nameTemplate 'cleanshot/{host}-{date}-{time}'   파일 이름 양식. / 로 폴더를 나누고, 끝의 -full·-area 와 확장자는 붙여 준다
  *   askWhere     boolean                            저장할 때마다 위치와 이름 묻기
  *   stamp        boolean                            그림 아래에 페이지 주소와 찍은 시각을 적은 띠
+ *   hideScrollbars boolean (기본 켬)                 보이는 화면을 찍을 때 페이지의 스크롤 막대 자리를 빼고 저장
+ *   keepAfter    boolean                            찍은 뒤에도 정리한 상태를 두고 이어서 찍기 (툴바의 "찍고 계속", picker.js 가 읽는다)
  */
 
 (() => {
@@ -17,7 +19,9 @@
     outScale: 'device',
     nameTemplate: 'cleanshot/{host}-{date}-{time}',
     askWhere: false,
-    stamp: false
+    stamp: false,
+    hideScrollbars: true,
+    keepAfter: false
   });
 
   const FORMATS = Object.freeze({
@@ -42,6 +46,8 @@
     if (typeof v.nameTemplate === 'string' && v.nameTemplate.trim()) o.nameTemplate = v.nameTemplate.trim().slice(0, TEMPLATE_MAX);
     o.askWhere = v.askWhere === true;
     o.stamp = v.stamp === true;
+    o.hideScrollbars = v.hideScrollbars !== false; // 기본 켬 — 끈다고 저장했을 때만 끈다
+    o.keepAfter = v.keepAfter === true;
     return o;
   }
 
