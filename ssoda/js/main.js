@@ -10,6 +10,7 @@ import { RequestView } from './ui/request-view.js';
 import { EnvironmentView } from './ui/env-view.js';
 import { CollectionView } from './ui/collection-view.js';
 import { RunnerView } from './ui/runner-view.js';
+import { CompareView } from './ui/compare-view.js';
 import { CodePanel } from './ui/code-panel.js';
 import { openImport, saveAsDialog, askSaveChanges, openSettings, openCookieManager, openShortcuts, envQuickLook, openSearch, openCurlHelper } from './ui/dialogs.js';
 import { generateCode } from './codegen.js';
@@ -303,6 +304,7 @@ function tabEl(t, active) {
   if (t.type === 'request') lead = h('span.tab-method.' + methodClass(t.draft.method), methodShort(t.draft.method));
   else if (t.type === 'environment') lead = icon(t.refId === 'globals' ? 'globe' : 'layers', 14, 'tab-ic');
   else if (t.type === 'runner') lead = icon('play', 14, 'tab-ic');
+  else if (t.type === 'compare') lead = icon('compare', 14, 'tab-ic');
   else lead = icon('collections', 14, 'tab-ic');
   const close = h('button.tab-close', { title: '닫기 (Alt+W)' }, icon('x', 13));
   close.addEventListener('click', (e) => {
@@ -335,6 +337,7 @@ function tabEl(t, active) {
       t.type === 'request' ? { label: '저장', icon: 'save', hint: `${MOD}+S`, onClick: () => app.saveTab(t) } : null,
       t.type === 'request' ? { label: '탭 복제', icon: 'duplicate', onClick: () => app.duplicateTab(t) } : null,
       t.type === 'request' ? { label: 'cURL로 복사', icon: 'terminal', onClick: () => copyAsCurl(t) } : null,
+      t.type === 'request' ? { label: '환경 비교', icon: 'compare', onClick: () => app.openCompare({ tab: t }) } : null,
       t.type === 'request' ? { divider: true } : null,
       { label: '닫기', hint: 'Alt+W', onClick: () => app.closeTab(t.id) },
       { label: '다른 탭 모두 닫기', onClick: () => app.closeTabs(app.tabs.filter((x) => x.id !== t.id).map((x) => x.id)) },
@@ -402,6 +405,7 @@ function getView(tab) {
   if (tab.type === 'request') v = new RequestView(tab);
   else if (tab.type === 'environment') v = new EnvironmentView(tab);
   else if (tab.type === 'runner') v = new RunnerView(tab);
+  else if (tab.type === 'compare') v = new CompareView(tab);
   else v = new CollectionView(tab);
   app.views.set(tab.id, v);
   return v;
@@ -787,7 +791,19 @@ function wireUi() {
       codePanel.update();
       sidebar.render();
     },
-    onDraftChanged: () => codePanel.update(),
+    onDraftChanged: () => {
+      codePanel.update();
+      // 환경 비교 탭의 머리(메서드·주소)는 다음에 그 탭을 열 때 새로 그린다
+      app.views.forEach((v) => {
+        if (v instanceof CompareView) v.stale = true;
+      });
+    },
+    newEnvironment: () => {
+      const e = app.createEnvironment();
+      app.state.workspace.sidebar = 'environments';
+      renderLeft();
+      app.openEnvironment(e.id);
+    },
     askSaveChanges,
     saveAsDialog,
     openImport,
@@ -838,6 +854,8 @@ function wireUi() {
     if (app.state.workspace.sidebar === 'environments') sidebar.render();
     renderEnvSelector();
     app.ui.refreshEngines();
+    // 환경 비교 탭의 환경 칩 (이름·SSH·지운 환경)
+    for (const t of app.tabs) if (t.type === 'compare') app.ui.refreshView(t);
   });
   app.store.on('history', () => {
     if (app.state.workspace.sidebar === 'history') sidebar.render();

@@ -45,6 +45,7 @@ const P = {
   bulk: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   beautify: '<path d="M4 6h16M8 12h12M8 18h12M4 12h.01M4 18h.01"/>',
   play: '<path d="M7 4v16l13-8z"/>',
+  compare: '<path d="M4 8h14M14 4l4 4-4 4M20 16H6M10 12l-4 4 4 4"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="1"/>',
   layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',

@@ -20,6 +20,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /* ---------------- 시험용 서버 ---------------- */
 const seen = [];
 const hanging = new Set();
+let cmpCount = 0;
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
@@ -76,6 +77,13 @@ const server = http.createServer((req, res) => {
       return res.end('openapi: 3.0.0\ninfo:\n  title: E2E API\nservers:\n  - url: /\npaths:\n  /items/{itemId}:\n    get:\n      summary: 아이템 하나\n      parameters:\n        - { name: itemId, in: path, required: true, schema: { type: integer }, example: 7 }\n');
     }
     if (u.pathname.startsWith('/items/')) return json({ id: decodeURIComponent(u.pathname.slice('/items/'.length)) });
+    // 환경 비교 시험: 환경마다 다른 값(stage·ver·k)과 요청마다 달라지는 값(n·at·X-Request-Id), 19자리 ID 는 늘 같음
+    if (u.pathname === '/cmp') {
+      cmpCount += 1;
+      const q = (k) => u.searchParams.get(k) || '';
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Version': q('ver'), 'X-Request-Id': 'rid-' + cmpCount });
+      return res.end(`{"stage":${JSON.stringify(q('stage'))},"ver":${Number(q('ver')) || 0},"id":1234567890123456789,"k":${JSON.stringify(q('k'))},"n":${cmpCount},"items":[{"name":"a","at":${cmpCount}},{"name":"b","at":${cmpCount + 1}}]}`);
+    }
     json({ path: u.pathname });
   });
 });
@@ -990,6 +998,192 @@ await check('환경 복제: 복사본의 비밀 변수는 값이 같고 따로 �
     return { same, apart, plainAgain: !!(st.vault && st.vault.plain) && !st.vault.enc, cleaned: !JSON.stringify(after.vault).includes(secret) };
   }, SECRET);
   assert(r.same && r.apart && r.plainAgain && r.cleaned, JSON.stringify(r));
+});
+
+const CMP_SECRET = 'prod-secret-key-7788';
+await check('환경 비교: Send ▾ 에서 열어 고른 환경마다 한꺼번에 보내고 기준과 견줌 (상태·머리글·JSON 경로, 날짜·요청 ID 는 뺌) · 비밀 변수는 값으로 보내고 주소에선 가림 · 히스토리·변수 그대로', async () => {
+  seen.length = 0;
+  const r = await ev(page, async (base, secret) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    const mk = (name, tag, vars) => {
+      const e = app.createEnvironment(name);
+      e.variables = vars.map(([key, value, sec], i) => ({ id: `cmpv_${tag}_${i}`, key, value: sec ? '' : value, enabled: true, description: '', ...(sec ? { secret: true } : {}) }));
+      vars.forEach(([, value, sec], i) => sec && vault.set(`cmpv_${tag}_${i}`, value));
+      return e;
+    };
+    const dev = mk('비교-개발', 'dev', [['host', base], ['stage', 'dev'], ['ver', '1'], ['key', 'dev-key']]);
+    const p1 = mk('비교-운영1', 'p1', [['host', base], ['stage', 'prod'], ['ver', '2'], ['key', secret, true]]);
+    const p2 = mk('비교-운영2', 'p2', [['host', base], ['stage', 'prod'], ['ver', '2'], ['key', 'p2-key']]);
+    app.store.changed('environments');
+    app.setActiveEnv(dev.id);
+    const histBefore = app.store.state.history.length;
+    const t = app.newRequestTab({
+      method: 'GET', url: '{{host}}/cmp?stage={{stage}}&ver={{ver}}&k={{key}}',
+      tests: { extract: [{ name: 'cmpStage', from: 'json', path: '$.stage', scope: 'env' }], assert: [{ target: 'status', op: 'eq', value: '200' }] },
+    }, '비교 시험');
+    await sleep(200);
+    app.views.get(t.id).sendMore.click();
+    await sleep(100);
+    [...document.querySelectorAll('.menu .menu-item')].find((b) => b.textContent.includes('환경 비교')).click();
+    await sleep(300);
+    const ct = app.activeTab();
+    const view = app.views.get(ct.id);
+    ct.compare.envIds = [p1.id, dev.id, p2.id];
+    ct.compare.baseId = dev.id;
+    view.build();
+    const chips = [...view.el.querySelectorAll('.cmp-chip.on')].map((c) => c.textContent);
+    view.el.querySelector('.cmp-go').click();
+    for (let i = 0; i < 200 && (view.running || !view.runs || !view.runs.every(Boolean)); i++) await sleep(50);
+    const cards = [...view.el.querySelectorAll('.cmp-card')].map((c) => c.innerText.replace(/\s+/g, ' '));
+    const d1 = view.diffOf(view.runs[1]);
+    const d2 = view.diffOf(view.runs[2]);
+    const out = {
+      tabType: ct.type, tabName: ct.name, chips, cards, order: view.runs.map((x) => x.env.name), engine: view.engine,
+      paths1: d1.body.diffs.map((x) => x.path), hdr1: d1.headers.map((x) => `${x.name}:${x.a}>${x.b}`), paths2: d2.body.diffs.map((x) => x.path),
+    };
+    // 목록의 "빼기": $.items[0].at → $.items[*].at (다른 번째도 함께), 키 이름 n 은 어느 깊이든
+    const row = [...view.el.querySelectorAll('.cmp-table tr')].find((tr) => tr.textContent.includes('$.items[0].at'));
+    row.querySelector('.cmp-act .link-btn').click();
+    await sleep(50);
+    app.views.get(ct.id).addIgnore('body', 'n');
+    out.after = view.diffOf(view.runs[1]).body.diffs.map((x) => x.path);
+    out.ignoreBody = ct.compare.ignoreBody;
+    out.cards2 = [...view.el.querySelectorAll('.cmp-card')].map((c) => c.innerText.replace(/\s+/g, ' '));
+    // 본문 나란히: 같은 경로끼리 한 행, 다른 곳은 색, 뺀 곳은 회색
+    [...view.el.querySelectorAll('.cmp-mode .seg-btn')].find((b) => b.textContent === '본문 나란히').click();
+    await sleep(50);
+    const txt = (sel) => [...view.el.querySelectorAll(sel)].map((x) => x.textContent.trim());
+    out.side = {
+      rows: view.el.querySelectorAll('.cmp-row').length,
+      del: txt('.cmp-cell.del .cmp-tx'), add: txt('.cmp-cell.add .cmp-tx'), ign: txt('.cmp-cell.ign .cmp-tx').length,
+      stageRow: [...view.el.querySelectorAll('.cmp-row')].map((rw) => [...rw.querySelectorAll('.cmp-tx')].map((x) => x.textContent.trim())).find((c) => c[0] && c[0].startsWith('"stage"')),
+    };
+    // 차이 복사 (클립보드는 가로챔)
+    let copied = '';
+    navigator.clipboard.writeText = async (s) => {
+      copied = s;
+    };
+    [...view.el.querySelectorAll('.cmp-detail-bar .btn')].find((b) => b.textContent.includes('차이 복사')).click();
+    await sleep(150);
+    delete navigator.clipboard.writeText;
+    out.copied = copied;
+    // 기준을 바꾸면 다시 보내지 않고 받은 응답끼리 다시 견줌 · 칩을 빼면 그 카드도 빠지고, 다시 넣으면 받은 응답이 다시 보임
+    const pickBase = async (id) => {
+      const sel = view.el.querySelector('.cmp-base select');
+      sel.value = id;
+      sel.dispatchEvent(new Event('change'));
+      await sleep(50);
+    };
+    const cardTexts = () => [...view.el.querySelectorAll('.cmp-card')].map((c) => c.innerText.replace(/\s+/g, ' ').replace(/ http\S*/g, ''));
+    await pickBase(p1.id);
+    out.rebased = cardTexts();
+    const chip = (name) => [...view.el.querySelectorAll('.cmp-chip')].find((c) => c.textContent.includes(name));
+    chip('비교-운영2').click();
+    await sleep(50);
+    out.afterRemove = cardTexts().length;
+    chip('비교-운영2').click();
+    await sleep(50);
+    await pickBase(dev.id);
+    out.restored = cardTexts();
+    out.histDelta = app.store.state.history.length - histBefore;
+    out.captured = [dev, p1, p2].filter((e) => e.variables.some((v) => v.key === 'cmpStage')).length;
+    return out;
+  }, BASE, CMP_SECRET);
+  const cmp = seen.filter((s) => s.path.startsWith('/cmp')).map((s) => new URL(s.path, 'http://x').searchParams.get('k')).sort();
+  assert(r.tabType === 'compare' && r.tabName === '비교 · 비교 시험', r.tabType + ' ' + r.tabName);
+  assert(r.chips.length === 3 && r.chips.some((c) => /비교-개발/.test(c) && /기준/.test(c)), JSON.stringify(r.chips));
+  assert(JSON.stringify(r.order) === JSON.stringify(['비교-개발', '비교-운영1', '비교-운영2']) && r.engine === 'browser', JSON.stringify(r.order) + r.engine);
+  assert(JSON.stringify(cmp) === JSON.stringify(['dev-key', 'p2-key', CMP_SECRET].sort()), '서버가 받은 k: ' + JSON.stringify(cmp));
+  assert(/기준/.test(r.cards[0]) && /200 OK/.test(r.cards[0]) && /Tests 1\/1 통과/.test(r.cards[0]), r.cards[0]);
+  assert(/기준과 다른 곳 7개/.test(r.cards[1]) && /기준과 다른 곳 7개/.test(r.cards[2]), r.cards[1] + ' / ' + r.cards[2]);
+  assert(r.cards[1].includes('k=••••••••') && !r.cards.join(' ').includes(CMP_SECRET), '주소의 비밀 값을 가리지 않음: ' + r.cards[1]);
+  assert(JSON.stringify(r.paths1) === JSON.stringify(['$.stage', '$.ver', '$.k', '$.n', '$.items[0].at', '$.items[1].at']), JSON.stringify(r.paths1));
+  assert(JSON.stringify(r.hdr1) === JSON.stringify(['x-version:1>2']), '머리글 차이: ' + JSON.stringify(r.hdr1));
+  assert(JSON.stringify(r.after) === JSON.stringify(['$.stage', '$.ver', '$.k']) && r.ignoreBody === '$.items[*].at\nn', JSON.stringify(r.after) + ' / ' + JSON.stringify(r.ignoreBody));
+  assert(/기준과 다른 곳 4개/.test(r.cards2[1]), r.cards2[1]);
+  assert(r.side.rows >= 15 && r.side.del.includes('"stage": "dev",') && r.side.add.includes('"stage": "prod",') && r.side.ign === 6, JSON.stringify(r.side));
+  assert(JSON.stringify(r.side.stageRow) === JSON.stringify(['"stage": "dev",', '"stage": "prod",']), '같은 경로가 한 행에 있지 않음: ' + JSON.stringify(r.side.stageRow));
+  assert(r.copied.includes('본문 $.stage: "dev" → "prod"') && r.copied.includes('머리글 x-version: 1 → 2') && r.copied.includes('k=••••••••') && !r.copied.includes(CMP_SECRET)
+    && r.copied.includes('뺀 곳: $.items[*].at, n') && r.copied.includes('본문 $.k: "dev-key" → "••••••••"'), '복사한 글: ' + JSON.stringify(r.copied.slice(-320)));
+  assert(/^비교-운영1 기준/.test(r.rebased[0]) && /^비교-개발 .*기준과 다른 곳 4개/.test(r.rebased[1]) && /^비교-운영2 .*기준과 다른 곳 1개/.test(r.rebased[2]), '기준 바꾸기: ' + JSON.stringify(r.rebased));
+  assert(r.afterRemove === 2 && r.restored.length === 3 && /^비교-개발 기준/.test(r.restored[0]) && /기준과 다른 곳 4개/.test(r.restored[1]), `칩 빼기 ${r.afterRemove} · 되돌림 ${JSON.stringify(r.restored)}`);
+  assert(r.histDelta === 0 && r.captured === 0, `히스토리 +${r.histDelta}, 꺼낸 값을 저장한 환경 ${r.captured}`);
+  return r.cards2.map((c) => c.split(' http')[0]).join(' | ');
+});
+
+await check('환경 비교: POST 는 보내기 전에 묻고(취소하면 안 보냄) · 응답을 못 받은 환경은 "견주지 못함" · 요청 탭에서 고친 내용으로 다시 보냄', async () => {
+  seen.length = 0;
+  const r = await ev(page, async () => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const ct = app.activeTab();
+    const view = app.views.get(ct.id);
+    const src = app.compareSource(ct);
+    src.tab.draft.method = 'POST';
+    view.el.querySelector('.cmp-go').click();
+    await sleep(200);
+    const modal = document.querySelector('.modal');
+    const title = modal ? modal.querySelector('.modal-title').textContent : '(확인창 없음)';
+    if (modal) [...modal.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소').click();
+    await sleep(300);
+    const runningAfterCancel = view.running;
+    // 닫힌 포트를 쓰는 환경을 하나 더 (변수도 모자람)
+    const bad = app.createEnvironment('비교-꺼진 서버');
+    bad.variables = [{ id: 'cmpv_bad_0', key: 'host', value: 'http://127.0.0.1:1', enabled: true, description: '' }];
+    app.store.changed('environments');
+    ct.compare.envIds.push(bad.id);
+    src.tab.draft.method = 'GET';
+    src.tab.draft.url += '&extra=1';
+    view.build();
+    const notSent = [...view.el.querySelectorAll('.cmp-card')].map((c) => c.innerText.replace(/\s+/g, ' '))[3] || '';
+    view.el.querySelector('.cmp-go').click();
+    for (let i = 0; i < 300 && (view.running || !view.runs || !view.runs.every(Boolean)); i++) await sleep(50);
+    const cards = [...view.el.querySelectorAll('.cmp-card')].map((c) => c.innerText.replace(/\s+/g, ' '));
+    const d = view.diffOf(view.runs[3]);
+    // 고른 환경 칩에서 빼면 다음에는 보내지 않는다
+    return { title, runningAfterCancel, notSent, cards, failed: d && d.failed, n: view.runs.length };
+  });
+  const cmp = seen.filter((s) => s.path.startsWith('/cmp'));
+  assert(/POST 요청을 3곳에/.test(r.title), '확인창: ' + r.title);
+  assert(!r.runningAfterCancel, '취소했는데 보내는 중');
+  assert(/비교-꺼진 서버 아직 보내지 않았습니다/.test(r.notSent), '새로 넣은 환경 카드: ' + r.notSent);
+  assert(cmp.length === 3 && cmp.every((s) => s.method === 'GET' && s.path.includes('extra=1')), JSON.stringify(cmp.map((s) => s.method + ' ' + s.path)));
+  assert(r.n === 4 && r.failed === 'other' && /응답 없음/.test(r.cards[3]) && /견주지 못함/.test(r.cards[3]) && /정의되지 않은 변수/.test(r.cards[3]), JSON.stringify(r.cards[3]));
+  return r.cards[3].slice(0, 90);
+});
+
+await check('환경 비교: 사이드바에서 열어도 요청 탭이 열려 있으면 그 탭의 지금 내용으로, 탭을 닫으면 저장된 요청으로 · 요청 이름을 바꾸면 비교 탭 이름도', async () => {
+  const r = await ev(page, async () => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const { normalizeRequest } = await import(chrome.runtime.getURL('js/model.js'));
+    app.store.state.collections.push({
+      id: 'col_cmp', name: '비교 컬렉션', description: '', auth: { type: 'none' }, variables: [],
+      items: [{ id: 'cmp_item', type: 'request', name: '저장된 요청', request: normalizeRequest({ method: 'GET', url: '{{host}}/cmp?saved=1' }) }],
+    });
+    app.store.changed('collections');
+    app.openItem('cmp_item');
+    await sleep(200);
+    const rt = app.activeTab();
+    rt.draft.url = '{{host}}/cmp?live=1'; // 저장하지 않은 고침
+    app.openCompare({ itemId: 'cmp_item' }); // 사이드바 메뉴와 같은 호출
+    await sleep(200);
+    const ct = app.activeTab();
+    const live = app.compareSource(ct);
+    const out = { type: ct.type, live: live && live.live, liveUrl: live && live.draft.url };
+    app.renameItem('cmp_item', '바뀐 이름');
+    out.name = ct.name;
+    await app.closeTab(rt.id, { force: true });
+    const saved = app.compareSource(ct);
+    out.savedLive = saved && saved.live;
+    out.savedUrl = saved && saved.draft.url;
+    return out;
+  });
+  assert(r.type === 'compare' && r.live === true && r.liveUrl === '{{host}}/cmp?live=1', JSON.stringify(r));
+  assert(r.name === '비교 · 바뀐 이름', '이름: ' + r.name);
+  assert(r.savedLive === false && r.savedUrl === '{{host}}/cmp?saved=1', JSON.stringify(r));
 });
 
 await check('앱 탭을 하나 더 열면 먼저 열린 탭은 저장을 멈추고 안내를 띄움', async () => {

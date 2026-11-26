@@ -45,6 +45,11 @@ export const app = {
     return store.state.environments.find((e) => e.id === store.state.activeEnvId) || null;
   },
 
+  // 요청을 보낼 환경: 보통은 활성 환경. 환경 비교가 환경마다 만드는 탭은 tab.forEnv (null 이면 환경 없이)
+  envOf(tab) {
+    return tab && tab.forEnv !== undefined ? tab.forEnv : this.activeEnv();
+  },
+
   // 활성 환경의 SSH 터널 설정 (사용 중일 때만)
   tunnelOf(env = this.activeEnv()) {
     return env && env.ssh && env.ssh.enabled ? normalizeSsh(env.ssh) : null;
@@ -68,7 +73,7 @@ export const app = {
 
   // mask: 비밀 변수를 값 대신 {{이름}} 으로 둔다 (코드 창·cURL 복사처럼 화면이나 클립보드로 나가는 곳)
   getScope(tab = this.activeTab(), { mask = false } = {}) {
-    const env = this.activeEnv();
+    const env = this.envOf(tab);
     const col = tab && tab.type === 'request' ? this.collectionOfTab(tab) : tab && tab.type === 'collection' ? this.findCollection(tab.refId) : null;
     return buildScope([
       // 러너의 데이터 파일 행 (Postman 처럼 환경보다 앞)
@@ -91,16 +96,20 @@ export const app = {
     return r;
   },
 
-  // 비밀 변수 보관함이 잠겨 있는데 이 요청이 비밀 변수를 쓰면 비밀번호를 묻는다. 계속해도 되면 true
-  async ensureSecretsFor(tab) {
-    if (!vault.locked) return true;
+  // 이 요청이 쓰는데 보관함이 잠겨 있어 값을 모르는 비밀 변수 이름
+  lockedNamesFor(tab) {
+    if (!vault.locked) return [];
     const scope = this.getScope(tab);
-    if (!scope.locked.size) return true;
+    if (!scope.locked.size) return [];
     const inh = this.getInheritedAuth(this.contextIdOf(tab));
     const p = prepareRequest(tab.draft, { scope, inheritedAuth: inh ? inh.auth : null, defaults: this.settings });
-    const need = p.unresolved.filter((n) => scope.locked.has(n));
-    if (!need.length) return true;
-    return this.unlockSecrets(need);
+    return p.unresolved.filter((n) => scope.locked.has(n));
+  },
+
+  // 비밀 변수 보관함이 잠겨 있는데 이 요청이 비밀 변수를 쓰면 비밀번호를 묻는다. 계속해도 되면 true
+  async ensureSecretsFor(tab) {
+    const need = this.lockedNamesFor(tab);
+    return need.length ? this.unlockSecrets(need) : true;
   },
 
   // 비밀번호를 물어 보관함을 연다 (취소하면 false). names: 이 요청이 쓰는 잠긴 변수 이름 (안내용)
@@ -254,6 +263,41 @@ export const app = {
     return this.addTab({ id: uid('tab'), type: 'runner', refId, name: `러너 · ${hit.item.name}` });
   },
 
+  // 요청 탭(또는 저장된 요청)의 환경 비교 탭 (ui/compare-view.js). 요청 탭이 열려 있으면 그 탭의 지금 내용으로 보낸다
+  openCompare({ tab = null, itemId = null } = {}) {
+    if (tab && tab.type !== 'request') return;
+    // 사이드바에서 열어도 그 요청의 탭이 열려 있으면 그 탭의 지금 내용으로
+    if (!tab && itemId) tab = this.tabs.find((t) => t.type === 'request' && t.itemId === itemId) || null;
+    const refId = (tab && tab.itemId) || itemId || null;
+    if (!tab && !refId) return;
+    const existing = this.tabs.find((t) => t.type === 'compare' && (refId ? t.refId === refId : t.srcTabId === tab.id));
+    if (existing) {
+      if (tab) existing.srcTabId = tab.id;
+      this.saveWorkspace();
+      return this.setActive(existing.id);
+    }
+    const hit = refId ? findInCollections(store.state.collections, refId) : null;
+    const name = tab ? tab.name : hit ? hit.item.name : '요청';
+    // 처음에는 활성 환경을 기준으로, 다른 환경을 둘까지 함께 고른다 (운영 환경에 실수로 보내지 않게 열기만 하고 보내지는 않는다)
+    const envs = store.state.environments;
+    const active = this.activeEnv() || envs[0] || null;
+    const picked = active ? [active.id, ...envs.filter((e) => e !== active).slice(0, 2).map((e) => e.id)] : [];
+    return this.addTab({
+      id: uid('tab'), type: 'compare', refId, srcTabId: tab ? tab.id : null, name: `비교 · ${name}`,
+      compare: { envIds: picked, baseId: active ? active.id : null, ignoreBody: '', ignoreHeaders: '' },
+    });
+  },
+
+  // 비교 탭이 보낼 요청: 요청 탭이 열려 있으면 그 탭의 지금 내용(저장하지 않은 것 포함), 아니면 저장된 요청
+  compareSource(ctab) {
+    const src = (ctab.srcTabId && this.tabs.find((t) => t.id === ctab.srcTabId && t.type === 'request'))
+      || (ctab.refId && this.tabs.find((t) => t.type === 'request' && t.itemId === ctab.refId)) || null;
+    if (src) return { draft: src.draft, itemId: src.itemId || null, contextId: src.contextId || null, name: src.name, live: true, tab: src };
+    const hit = ctab.refId ? findInCollections(store.state.collections, ctab.refId) : null;
+    if (hit && hit.item.type === 'request') return { draft: normalizeRequest(hit.item.request), itemId: hit.item.id, contextId: null, name: hit.item.name, live: false, tab: null };
+    return null;
+  },
+
   openEnvironment(envId) {
     const existing = this.tabs.find((t) => t.type === 'environment' && t.refId === envId);
     if (existing) return this.setActive(existing.id);
@@ -370,7 +414,7 @@ export const app = {
   /* ---------------- 전송 ---------------- */
   engineOf(tab) {
     // SSH 터널은 PC의 curl 로만 사용할 수 있음
-    if (this.tunnelOf()) return 'curl';
+    if (this.tunnelOf(this.envOf(tab))) return 'curl';
     const e = tab && tab.draft && tab.draft.settings.engine;
     return e === 'curl' || e === 'browser' ? e : this.settings.defaultEngine === 'curl' ? 'curl' : 'browser';
   },
@@ -384,7 +428,7 @@ export const app = {
       multiline: multiline ?? this.settings.curlMultiline !== false,
       exact: !!exact,
       short: true,
-      curl: { ...curl, extraArgs: parseExtraArgs(curl.extra, { ssh: !!this.tunnelOf() }).args },
+      curl: { ...curl, extraArgs: parseExtraArgs(curl.extra, { ssh: !!this.tunnelOf(this.envOf(tab)) }).args },
     });
   },
 
@@ -471,10 +515,10 @@ export const app = {
   /**
    * 요청 하나를 보내고 결과를 돌려준다. 화면은 건드리지 않고, 실패도 예외 대신 결과(ok:false)로 돌려준다.
    * send(요청 탭)와 러너가 같이 쓴다. tab 은 화면의 탭이 아니어도 된다:
-   *   { draft, itemId | contextId (변수·인증 상속 기준), dataVars (러너 데이터 행, 변수 중 가장 앞) }
+   *   { draft, itemId | contextId (변수·인증 상속 기준), dataVars (러너 데이터 행, 변수 중 가장 앞), forEnv (환경 비교) }
    * ssh: sshConfigFor() 로 미리 받은 SSH 터널 설정 (env 가 터널을 쓰면 engine 은 'curl')
    */
-  async execute(tab, { engine, ssh = null, env = this.activeEnv(), signal, onWait, onStream, onUnresolved } = {}) {
+  async execute(tab, { engine, ssh = null, env = this.envOf(tab), signal, onWait, onStream, onUnresolved } = {}) {
     engine = engine || this.engineOf(tab);
     let prepared;
     let result;
@@ -510,6 +554,45 @@ export const app = {
       if (err.code === 'SSH_AUTH' && env) this.forgetSshSecret(env.id);
     }
     return result;
+  },
+
+  /**
+   * 환경 비교: 같은 요청을 고른 환경마다 한 번씩, 한꺼번에 보낸다 (ui/compare-view.js).
+   * 히스토리에는 남기지 않는다. Tests 탭의 확인은 하지만 꺼낸 값은 변수에 저장하지 않는다 (환경마다 같은 변수를 덮어쓰지 않게).
+   * src: compareSource() 의 결과, envs: 보낼 환경 (맨 앞이 기준)
+   * onStart({ engine, forced }): 비밀번호를 다 받고 보내기 직전 (forced: SSH 환경 때문에 요청의 실행 방식 대신 cURL 로 보냄)
+   * onResult(i, out): 환경마다 응답을 받는 대로
+   * 반환 [{ env, engine, ssh, unresolved, result }] (envs 순서) — 비밀번호 창을 취소하면 null
+   */
+  async compareAcross(src, envs, { signal, onStart, onResult } = {}) {
+    const draft = clone(src.draft); // 기다리는 동안 요청 탭에서 고쳐도 환경마다 같은 요청이 나가게
+    const tabs = envs.map((env) => ({ type: 'request', itemId: src.itemId || null, contextId: src.contextId || null, draft, forEnv: env }));
+    // 잠긴 비밀 변수: 처음에 한 번만 묻는다
+    const need = [...new Set(tabs.flatMap((t) => this.lockedNamesFor(t)))];
+    if (need.length && !(await this.unlockSecrets(need))) return null;
+    // SSH 터널을 쓰는 환경: 비밀번호를 미리 하나씩 묻는다 (창이 겹치지 않게)
+    const sshOf = new Map();
+    for (const env of envs) {
+      if (!this.tunnelOf(env)) continue;
+      const ssh = await this.sshConfigFor(env);
+      if (!ssh) return null;
+      sshOf.set(env.id, ssh);
+    }
+    if (signal && signal.aborted) return null;
+    // 터널을 쓰는 환경이 하나라도 있으면 모두 cURL 로 보낸다 (같은 방식으로 받아야 머리글까지 견줄 수 있다)
+    const own = this.engineOf({ draft, forEnv: null });
+    const engine = sshOf.size ? 'curl' : own;
+    onStart && onStart({ engine, forced: engine !== own });
+    return Promise.all(tabs.map(async (t, i) => {
+      const env = envs[i];
+      let unresolved = [];
+      const ssh = sshOf.get(env.id) || null;
+      const result = await this.execute(t, { engine, ssh, env, signal, onUnresolved: (names) => (unresolved = names) });
+      if (countTests(draft.tests)) result.checks = this.runChecks(t, draft.tests, result, { save: false });
+      const out = { env, engine, ssh: !!ssh, unresolved, result };
+      onResult && onResult(i, out);
+      return out;
+    }));
   },
 
   /* ---------------- SSH ---------------- */
@@ -589,17 +672,27 @@ export const app = {
     };
   },
 
+  // 여러 환경에 한꺼번에 보낼 때(환경 비교) 지문 확인 창이 겹치지 않게 하나씩 묻는다
   async confirmHostKey(env, ssh) {
-    const scan = await scanSshHost(ssh);
-    if (!scan.keys) {
-      throw new CurlRunError('서버의 호스트 키를 가져오지 못했습니다.', {
-        code: 'SSH_ERROR',
-        hint: scan.error || 'SSH 서버 주소와 포트를 확인하세요.',
-      });
+    const prev = this.hostKeyTurn || Promise.resolve();
+    let done;
+    const turn = new Promise((r) => (done = r));
+    this.hostKeyTurn = prev.then(() => turn);
+    await prev;
+    try {
+      const scan = await scanSshHost(ssh);
+      if (!scan.keys) {
+        throw new CurlRunError('서버의 호스트 키를 가져오지 못했습니다.', {
+          code: 'SSH_ERROR',
+          hint: scan.error || 'SSH 서버 주소와 포트를 확인하세요.',
+        });
+      }
+      if (!(await this.ui.askTrustHostKey(env, ssh, scan))) return false;
+      await trustSshHost(ssh, scan.keys);
+      return true;
+    } finally {
+      done();
     }
-    if (!(await this.ui.askTrustHostKey(env, ssh, scan))) return false;
-    await trustSshHost(ssh, scan.keys);
-    return true;
   },
 
   // SSH 터널을 지원하는 도우미인지 확인 (구버전 도우미는 터널 없이 바로 요청을 보내 버리므로 실행 전에 막는다)
@@ -667,7 +760,8 @@ export const app = {
 
   /* ---------------- 응답값 꺼내기·확인 (Tests 탭) ---------------- */
   // 꺼낸 값을 먼저 변수에 저장하고, 확인의 기대값·식은 저장한 뒤의 변수로 바꾼다 (방금 꺼낸 값도 쓸 수 있게)
-  runChecks(tab, tests, result) {
+  // save: false 면 꺼내기만 하고 저장하지 않는다 (환경 비교: 환경마다 같은 변수를 덮어쓰지 않게)
+  runChecks(tab, tests, result, { save = true } = {}) {
     if (!result.ok) return { skipped: '응답을 받지 못해 실행하지 않았습니다.', captures: [], asserts: [], passed: 0, failed: 0 };
     const ctx = responseContext(result);
     const resolver = () => {
@@ -675,7 +769,7 @@ export const app = {
       return (s) => resolveString(s, scope);
     };
     const captures = runCaptures(tests.extract, ctx, resolver());
-    this.saveCaptures(tab, captures);
+    if (save) this.saveCaptures(tab, captures);
     const asserts = runAsserts(tests.assert, ctx, resolver());
     const failed = asserts.filter((a) => !a.ok).length;
     return { captures, asserts, passed: asserts.length - failed, failed };
@@ -799,13 +893,13 @@ export const app = {
     hit.item.name = name;
     // 열린 탭 이름 동기화
     for (const t of this.tabs) {
-      if ((t.type === 'request' && t.itemId === id) || ((t.type === 'collection' || t.type === 'runner') && t.refId === id)) {
+      if ((t.type === 'request' && t.itemId === id) || ((t.type === 'collection' || t.type === 'runner' || t.type === 'compare') && t.refId === id)) {
         if (t.type === 'request') {
           const wasDirty = t.dirty;
           t.name = name;
           t.savedSig = requestSignature(name, hit.item.request);
           t.dirty = wasDirty ? requestSignature(t.name, t.draft) !== t.savedSig : false;
-        } else t.name = t.type === 'runner' ? `러너 · ${name}` : name;
+        } else t.name = t.type === 'runner' ? `러너 · ${name}` : t.type === 'compare' ? `비교 · ${name}` : name;
         this.ui.refreshView && this.ui.refreshView(t);
       }
     }
@@ -836,6 +930,9 @@ export const app = {
         t.savedSig = '';
       } else if ((t.type === 'collection' || t.type === 'runner') && ids.has(t.refId)) {
         this.closeTab(t.id, { force: true });
+      } else if (t.type === 'compare' && ids.has(t.refId)) {
+        // 요청 탭이 열려 있으면 (저장 안 된 탭이 된) 그 탭으로 계속 비교한다
+        t.refId = null;
       }
     }
     store.changed('collections');

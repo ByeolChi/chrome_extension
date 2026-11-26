@@ -249,6 +249,7 @@ export class Sidebar {
       items.push({ label: '열기', icon: 'file', onClick: () => app.openItem(it.id) });
       items.push({ label: '새 탭에서 열기', icon: 'plus', onClick: () => app.openItem(it.id, { newTab: true }) });
       items.push({ label: 'cURL로 복사', icon: 'terminal', onClick: () => app.ui.copyItemAsCurl(it.id) });
+      items.push({ label: '환경 비교', icon: 'compare', onClick: () => app.openCompare({ itemId: it.id }) });
       items.push({ divider: true });
     } else {
       items.push({ label: '요청 추가', icon: 'filePlus', onClick: () => app.addRequestTo(it.id) });
