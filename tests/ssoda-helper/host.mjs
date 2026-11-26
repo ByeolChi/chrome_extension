@@ -21,7 +21,7 @@ export function hostScript(kind, root = SSODA_DIR) {
  * 도우미 하나를 띄운다.
  *  script: 실행할 도우미 파일 (복사본을 쓸 때), env: 환경 변수,
  *  onMessage(msg) / onExit(): 메시지가 올 때마다 / 도우미가 끝났을 때
- * 반환: { send(msg), until(types, ms), close(), messages }
+ * 반환: { send(msg), until(types, ms), close(), kill(), messages }
  */
 export function startHost(kind, { script = hostScript(kind), env = process.env, onMessage = null, onExit = null } = {}) {
   const cp = kind === 'ps1'
@@ -80,7 +80,15 @@ export function startHost(kind, { script = hostScript(kind), env = process.env, 
       /* noop */
     }
   };
-  return { send, until, close, messages };
+  // 도우미가 갑자기 끝난 것처럼 (작업 관리자에서 끝내기)
+  const kill = () => {
+    try {
+      cp.kill();
+    } catch (e) {
+      /* noop */
+    }
+  };
+  return { send, until, close, kill, messages };
 }
 
 export const b64text = (s) => Buffer.from(s || '', 'base64').toString('utf8');

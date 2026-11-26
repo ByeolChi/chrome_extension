@@ -12,11 +12,14 @@ import { prepareRequest } from './prepare.js';
 import { sendRequest, getBrowserCookies, initHttpEngine } from './http.js';
 import {
   runCurl, curlOptsOf, pingHelper, testSsh, forgetSshHost, scanSshHost, trustSshHost, parseExtraArgs, versionAtLeast, SSH_HOST_VERSION,
-  SSH_LEGACY_HOST_VERSION, LATEST_HOST_VERSION, CurlRunError,
+  SSH_LEGACY_HOST_VERSION, KNOWN_HOSTS_PATH_HOST_VERSION, CurlRunError, configureHelper,
 } from './curl-runner.js';
 
 // SSH 비밀번호는 저장하지 않고 이 탭의 메모리에만 둔다. 마지막으로 쓴 뒤 이 시간이 지나면 지운다.
 export const SSH_SECRET_TTL_MS = 30 * 60 * 1000;
+// SSH 연결 유지 시간 설정(분)의 처음 값과 가장 긴 값
+export const SSH_KEEP_DEFAULT_MINUTES = 10;
+export const SSH_KEEP_MAX_MINUTES = 120;
 import { genCurl } from './codegen.js';
 import { parseSetCookie, storeCookie, cookiesForUrl, purgeExpired } from './cookiejar.js';
 import { detectImport, exportPostmanCollection, exportPostmanEnvironment } from './postman.js';
@@ -528,7 +531,7 @@ export const app = {
       if (prepared.unresolved.length && onUnresolved) onUnresolved(prepared.unresolved);
       if (engine === 'curl') {
         command = this.curlCommandFor(tab, prepared, { shell: 'bash', multiline: true, exact: true });
-        const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal, curlPath: this.settings.curlPath || '', command, ssh });
+        const run = () => runCurl(prepared, curlOptsOf(tab.draft), { signal, curlPath: this.settings.curlPath || '', command, ssh, keepMs: this.sshKeepMs() });
         if (ssh) {
           await this.ensureSshHelper(ssh);
           result = await this.withHostKeyTrust(env, ssh, run);
@@ -664,11 +667,11 @@ export const app = {
   // (macOS 기본 설치 경로, 이름에 공백이 있는 Windows 사용자 폴더) 저장한 키를 읽지 못한다.
   async staleHostKeyInfo() {
     const st = await this.ui.helperStatus();
-    if (!st || !st.ok || versionAtLeast(st.hostVersion, LATEST_HOST_VERSION)) return {};
+    if (!st || !st.ok || versionAtLeast(st.hostVersion, KNOWN_HOSTS_PATH_HOST_VERSION)) return {};
     return {
       code: 'HOST_OUTDATED',
       message: `설치된 cURL 실행 도우미(v${st.hostVersion || '?'})가 저장한 서버 키를 읽지 못했습니다.`,
-      hint: `도우미 v${LATEST_HOST_VERSION} 미만은 설치 경로에 공백이 있으면(macOS 는 항상) 서버 키 파일을 찾지 못합니다. 아래 [도우미 설치 / 확인] 버튼으로 설치 파일을 다시 받아 실행해 주세요.`,
+      hint: `도우미 v${KNOWN_HOSTS_PATH_HOST_VERSION} 미만은 설치 경로에 공백이 있으면(macOS 는 항상) 서버 키 파일을 찾지 못합니다. 아래 [도우미 설치 / 확인] 버튼으로 설치 파일을 다시 받아 실행해 주세요.`,
     };
   },
 
@@ -709,14 +712,26 @@ export const app = {
     }
   },
 
+  // SSH 연결 유지 시간(ms): 마지막 요청 뒤 이만큼 연결을 열어 두고 다음 요청에 다시 쓴다 (켜 둔 도우미 2.0). 0 이면 요청마다 새로 접속
+  sshKeepMs() {
+    const raw = this.settings.sshKeepMinutes;
+    const m = raw == null || raw === '' ? SSH_KEEP_DEFAULT_MINUTES : Number(raw);
+    return (Number.isFinite(m) ? Math.max(0, Math.min(SSH_KEEP_MAX_MINUTES, m)) : SSH_KEEP_DEFAULT_MINUTES) * 60000;
+  },
+
+  // 설정이 바뀌면 켜 둔 도우미에도 알린다 (0 으로 끄면 쓰지 않는 연결을 바로 닫음)
+  applyHelperSettings() {
+    configureHelper({ keepMs: this.sshKeepMs() });
+  },
+
   async testSshFor(env) {
     const ssh = await this.sshConfigFor(env);
     if (!ssh) return null;
     await this.ensureSshHelper(ssh);
-    let r = await testSsh(ssh);
+    let r = await testSsh(ssh, { keepMs: this.sshKeepMs() });
     if (!r.ok && r.code === 'SSH_HOSTKEY_UNKNOWN') {
       if (!(await this.confirmHostKey(env, ssh))) return { ok: false, code: 'SSH_HOSTKEY_UNKNOWN', message: '서버 지문을 확인하지 않아 접속하지 않았습니다.', hint: '' };
-      r = await testSsh(ssh);
+      r = await testSsh(ssh, { keepMs: this.sshKeepMs() });
       if (!r.ok && r.code === 'SSH_HOSTKEY_UNKNOWN') r = { ...r, ...(await this.staleHostKeyInfo()) };
     }
     if (!r.ok && r.code === 'SSH_AUTH') this.forgetSshSecret(env.id);
@@ -1134,6 +1149,7 @@ export const app = {
 
   async init() {
     await store.load();
+    this.applyHelperSettings();
     await vault.load();
     await initHttpEngine();
     // 예전에 저장된 SSH 비밀번호(평문) 삭제

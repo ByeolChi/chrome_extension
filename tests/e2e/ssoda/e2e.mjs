@@ -335,7 +335,35 @@ await check('도우미가 구버전(v1.3.1)이면 도우미 창에 새 버전 �
     return { stale, fresh, text };
   });
   assert(r.stale.code === 'HOST_OUTDATED' && !r.fresh.code, JSON.stringify({ stale: r.stale, fresh: r.fresh }));
-  assert(/새 버전\(v1\.3\.2\)/.test(r.text), r.text.slice(0, 200));
+  assert(/새 버전\(v2\.0\.0\)/.test(r.text), r.text.slice(0, 200));
+});
+
+await check('설정의 SSH 연결 유지(분): 처음 10분, 바꾸면 저장되고 켜 둔 도우미 설정에도 바로 반영(0 = 요청마다 새로 접속, 최대 120분)', async () => {
+  const r = await ev(page, async () => {
+    const app = window.csApp;
+    const runner = await import(chrome.runtime.getURL('js/curl-runner.js'));
+    document.querySelector('.topbar button[title="설정"]').click();
+    await new Promise((r) => setTimeout(r, 300));
+    const row = [...document.querySelectorAll('.set-row')].find((x) => /SSH 연결 유지/.test(x.innerText));
+    const input = row && row.querySelector('input');
+    const out = { first: input && input.value, firstKeep: runner.helperSession().keepMs, note: row ? row.innerText : '' };
+    const put = async (v) => {
+      input.value = v;
+      input.dispatchEvent(new Event('change'));
+      await new Promise((r) => setTimeout(r, 50));
+      return { shown: input.value, saved: app.settings.sshKeepMinutes, keep: runner.helperSession().keepMs };
+    };
+    out.zero = await put('0');
+    out.big = await put('999');
+    out.back = await put('10');
+    document.querySelectorAll('.modal-x').forEach((x) => x.click());
+    return out;
+  });
+  assert(r.first === '10' && r.firstKeep === 600000, JSON.stringify(r));
+  assert(r.zero.saved === 0 && r.zero.keep === 0, JSON.stringify(r.zero));
+  assert(r.big.shown === '120' && r.big.saved === 120 && r.big.keep === 7200000, JSON.stringify(r.big));
+  assert(r.back.saved === 10 && r.back.keep === 600000, JSON.stringify(r.back));
+  assert(/여러 사람이 함께 쓰는/.test(r.note), r.note);
 });
 
 await check('다른 서버로 리다이렉트되면 그 서버 차례를 기다렸다 보내고, 그 서버로 가는 다른 요청의 헤더가 섞이지 않음', async () => {

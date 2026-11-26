@@ -7,7 +7,7 @@ import { DEFAULT_SETTINGS } from '../store.js';
 import { detectOS, downloadInstaller } from '../helper-installer.js';
 import { versionAtLeast, LATEST_HOST_VERSION } from '../curl-runner.js';
 import { sanitizeBackupData, curlSettingsSummary } from '../backup-check.js';
-import { app } from '../app.js';
+import { app, SSH_KEEP_MAX_MINUTES } from '../app.js';
 import { vault, MASK, PBKDF2_ITER } from '../secrets.js';
 
 /**
@@ -277,6 +277,15 @@ export function openSettings() {
     });
     return inp;
   };
+  // SSH 연결 유지 시간 (분). 0 또는 빈 값 = 요청마다 새로 접속
+  const keepIn = h('input.input.input-num', { type: 'number', min: '0', max: String(SSH_KEEP_MAX_MINUTES), value: String(app.sshKeepMs() / 60000), title: `0 ~ ${SSH_KEEP_MAX_MINUTES}분` });
+  keepIn.addEventListener('change', () => {
+    const v = Math.max(0, Math.min(SSH_KEEP_MAX_MINUTES, parseInt(keepIn.value, 10) || 0));
+    keepIn.value = String(v);
+    s.sshKeepMinutes = v;
+    app.store.changed('settings');
+    app.applyHelperSettings();
+  });
   const restoreIn = h('input', { type: 'file', accept: '.json', style: { display: 'none' } });
   restoreIn.addEventListener('change', async () => {
     const f = restoreIn.files[0];
@@ -307,6 +316,10 @@ export function openSettings() {
     h('div.set-sec', 'cURL 실행'),
     row('기본 실행 방식', '요청별로 Send ▾ 메뉴나 cURL 탭에서 바꿀 수 있습니다', select('defaultEngine', [['browser', '브라우저 (fetch)'], ['curl', 'cURL (PC의 curl 실행)']], () => app.ui.refreshEngines && app.ui.refreshEngines())),
     row('cURL 실행 도우미', '실제 curl 로 실행하려면 한 번 설치가 필요합니다', h('button.btn', { onclick: () => openCurlHelper() }, icon('terminal', 14), '도우미 설정 열기')),
+    row('SSH 연결 유지 (분)',
+      '마지막 요청 뒤 이 시간 동안 SSH 연결을 열어 두고 다음 요청에 다시 씁니다 (도우미 v2.0.0 이상). 0 = 요청마다 새로 접속. ' +
+      '연결이 열려 있는 동안에는 이 PC 의 다른 프로그램도 그 연결로 서버에 들어갈 수 있으니, 여러 사람이 함께 쓰는 PC·원격 데스크톱 서버에서는 0 을 권합니다.',
+      keepIn),
     h('div.set-sec', '쿠키 & 히스토리'),
     row('응답 쿠키 자동 저장', '응답의 Set-Cookie를 쿠키 관리자에 저장하고 같은 도메인 요청에 자동으로 보냅니다', toggle('autoSaveCookies')),
     row('히스토리 기록', null, toggle('historyEnabled')),
@@ -336,7 +349,7 @@ export function openSettings() {
       restoreIn),
     h('div.set-about', `Ssoda v${chrome?.runtime?.getManifest ? chrome.runtime.getManifest().version : '1.0.0'} · 데이터는 이 브라우저(chrome.storage.local)에만 저장됩니다.`)
   );
-  const m = openModal({ title: '설정', width: 640, body, footer: [h('button.btn', { onclick: () => { Object.assign(s, DEFAULT_SETTINGS, { theme: s.theme }); app.store.changed('settings'); m.close(); openSettings(); } }, '기본값으로'), h('div.flex1'), h('button.btn.btn-primary', { onclick: () => m.close() }, '완료')] });
+  const m = openModal({ title: '설정', width: 640, body, footer: [h('button.btn', { onclick: () => { Object.assign(s, DEFAULT_SETTINGS, { theme: s.theme }); app.store.changed('settings'); app.applyHelperSettings(); m.close(); openSettings(); } }, '기본값으로'), h('div.flex1'), h('button.btn.btn-primary', { onclick: () => m.close() }, '완료')] });
 }
 
 /* ---------------- 비밀 변수 보관함 (설정) ---------------- */
@@ -662,7 +675,7 @@ export function openCurlHelper() {
       statusBox.className = 'helper-status ' + (outdated ? 'bad' : 'ok');
       statusBox.append(icon(outdated ? 'alert' : 'check', 18), h('div',
         h('div.hs-title', outdated ? `도우미는 연결되었지만 새 버전(v${LATEST_HOST_VERSION})이 있습니다.` : '도우미가 연결되었습니다. 이제 cURL 로 실행할 수 있습니다.'),
-        outdated ? h('div.hs-sub', '아래에서 설치 파일을 다시 받아 실행하면 업데이트됩니다. 새 버전은 curl 인자를 한 번 더 검사하고, 설치 경로에 공백이 있을 때(macOS 등) SSH 서버 키를 찾지 못하는 문제를 고쳤습니다.') : null,
+        outdated ? h('div.hs-sub', '아래에서 설치 파일을 다시 받아 실행하면 업데이트됩니다. 새 버전은 Ssoda 탭이 열려 있는 동안 켜 둔 채 여러 요청을 처리해 요청마다 0.3~1초 빨라지고, SSH 연결을 설정한 시간 동안 열어 두고 다시 씁니다.') : null,
         h('div.hs-sub', st.curl || 'curl 을 찾지 못했습니다'),
         h('div.hs-sub', `${st.path || ''}  ·  도우미 v${st.hostVersion || '?'}`)));
     } else {

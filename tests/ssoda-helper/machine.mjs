@@ -4,6 +4,7 @@
 // 인터넷에서 받은 zip 을 푼 것처럼 원본에 Zone.Identifier 표시를 붙여, 설치본에서는 지워지는지도 본다.
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -59,6 +60,58 @@ function ping(bat) {
   });
 }
 
+// 브라우저처럼 cmd 로 bat 을 띄워 켜 둔 도우미로 요청 두 개를 보내고, 입력을 닫아 끝나는지 본다
+async function sessionViaBat(bat) {
+  const server = http.createServer((req, res) => res.end('ok:' + req.url.slice(1)));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  const cp = spawn('cmd.exe', ['/d', '/c', bat, `chrome-extension://${extId}/`, '--parent-window=0'], { windowsHide: true });
+  const msgs = [];
+  let buf = Buffer.alloc(0);
+  let exited = false;
+  cp.on('exit', () => (exited = true));
+  cp.stdout.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32LE(0)) {
+      const len = buf.readUInt32LE(0);
+      msgs.push(JSON.parse(buf.subarray(4, 4 + len).toString('utf8')));
+      buf = buf.subarray(4 + len);
+    }
+  });
+  const send = (m) => {
+    const body = Buffer.from(JSON.stringify(m));
+    const head = Buffer.alloc(4);
+    head.writeUInt32LE(body.length, 0);
+    cp.stdin.write(Buffer.concat([head, body]));
+  };
+  const waitFor = async (pred, ms) => {
+    for (let t = 0; t < ms; t += 50) {
+      if (msgs.some(pred) || exited) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return msgs.find(pred) || null;
+  };
+  const out = { session: false, bodies: [], exitMs: null };
+  try {
+    send({ type: 'ping', session: true, curlPath: '' });
+    const pong = await waitFor((m) => m.type === 'pong', 30000);
+    out.session = !!(pong && pong.session);
+    for (const id of ['1', '2']) {
+      send({ type: 'run', id, files: [], timeoutMs: 20000, curlPath: '', args: ['-sS', '-D', '__CS_HDR__', '-o', '__CS_BODY__', '--url', `http://127.0.0.1:${port}/${id}`] });
+      await waitFor((m) => m.id === id && (m.type === 'end' || m.type === 'error'), 20000);
+      out.bodies.push(Buffer.concat(msgs.filter((m) => m.id === id && m.type === 'body').map((m) => Buffer.from(m.data, 'base64'))).toString());
+    }
+    const t0 = performance.now();
+    cp.stdin.end();
+    for (let t = 0; t < 8000 && !exited; t += 50) await new Promise((r) => setTimeout(r, 50));
+    if (exited) out.exitMs = performance.now() - t0;
+  } finally {
+    if (!exited) cp.kill();
+    server.close();
+  }
+  return out;
+}
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssoda-machine-'));
 try {
   // 압축을 푼 ssoda 폴더 흉내 (도우미 원본에 인터넷 표시를 붙임)
@@ -102,6 +155,14 @@ try {
   const pong = fs.existsSync(bat) ? await ping(bat) : null;
   check(`브라우저처럼 bat 으로 띄운 도우미가 응답함 (v${LATEST_HOST_VERSION})`, pong && pong.type === 'pong' && pong.hostVersion === LATEST_HOST_VERSION,
     pong ? `${pong.type} v${pong.hostVersion}` : '응답 없음');
+
+  // 도우미 2.0: bat(cmd.exe) 으로 띄워도 켜 둔 채 여러 요청을 처리하고, 연결을 끊으면 끝나는지
+  if (fs.existsSync(bat)) {
+    const r = await sessionViaBat(bat);
+    check('bat 으로 띄운 도우미도 켜 둔 채 요청 둘을 처리하고, 연결을 끊으면 끝남',
+      r.session && r.bodies.join(',') === 'ok:1,ok:2' && r.exitMs !== null,
+      `session=${r.session}, 응답 ${JSON.stringify(r.bodies)}, ${r.exitMs !== null ? Math.round(r.exitMs) + 'ms 만에 끝남' : '끝나지 않음'}`);
+  }
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }

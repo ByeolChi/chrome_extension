@@ -12,8 +12,13 @@ export const HOST_NAME = 'com.ssoda.runner';
 export const SSH_HOST_VERSION = '1.3.0';
 // 구형 서버 호환(ssh-rsa) 옵션을 지원하는 도우미 버전
 export const SSH_LEGACY_HOST_VERSION = '1.3.1';
-// 1.3.2: 서버 키 파일 경로에 공백이 있어도(macOS 기본 설치 경로 등) 저장한 키를 읽음, curl 인자 이중 검사(--proto 고정 등)
-export const LATEST_HOST_VERSION = '1.3.2';
+// 서버 키 파일 경로에 공백이 있어도(macOS 기본 설치 경로 등) 저장한 키를 읽는 도우미 버전
+export const KNOWN_HOSTS_PATH_HOST_VERSION = '1.3.2';
+// 1.3.2: 위의 경로 문제 수정, curl 인자 이중 검사(--proto 고정 등)
+// 2.0.0: Ssoda 탭이 열려 있는 동안 켜 두고 여러 요청을 처리(요청 번호·취소), SSH 연결을 다시 씀
+export const LATEST_HOST_VERSION = '2.0.0';
+// 켜 둔 채 요청 번호로 여러 요청을 주고받는 도우미 버전
+export const SESSION_HOST_VERSION = '2.0.0';
 
 export function versionAtLeast(v, min) {
   const a = String(v || '0').split('.').map((n) => parseInt(n, 10) || 0);
@@ -343,6 +348,177 @@ function connect() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 도우미 2.0: 켜 둔 도우미 하나로 여러 요청                             */
+/* ------------------------------------------------------------------ */
+// Ssoda 탭이 열려 있는 동안 도우미 하나를 켜 두고 요청 번호(id)로 여러 요청을 동시에 주고받는다.
+// 요청마다 PowerShell 을 새로 띄우지 않아 0.3~1초가 줄고, SSH 연결은 keepMs 동안 열어 두었다가 다시 쓴다.
+// 첫 메시지 {type:'ping', session:true} 에 옛 도우미(1.x)는 session 없이 답하고 끝나므로, 그때는 예전처럼 요청마다 띄운다.
+
+// 요청이 없으면 도우미를 끝내기까지 (SSH 연결 유지 시간이 더 길면 그 시간 + 30초)
+const SESSION_IDLE_MS = 10 * 60 * 1000;
+const sess = { port: null, opening: null, legacy: false, info: null, handlers: new Map(), seq: 0, idleTimer: null, keepMs: 10 * 60 * 1000 };
+
+function sessionIdleMs() {
+  return Math.max(SESSION_IDLE_MS, sess.keepMs + 30000);
+}
+
+function armIdle() {
+  clearTimeout(sess.idleTimer);
+  sess.idleTimer = null;
+  if (!sess.port || sess.handlers.size) return;
+  sess.idleTimer = setTimeout(() => {
+    if (!sess.handlers.size) closeHelperSession();
+  }, sessionIdleMs());
+}
+
+// 연결을 버리고, 답을 기다리던 요청은 err 로 끝낸다. 반환: 버린 연결
+function dropSession(err) {
+  const port = sess.port;
+  sess.port = null;
+  sess.info = null;
+  clearTimeout(sess.idleTimer);
+  sess.idleTimer = null;
+  const pending = [...sess.handlers.values()];
+  sess.handlers.clear();
+  pending.forEach((h) => h.fail(err));
+  return port;
+}
+
+/** 켜 둔 도우미를 끝낸다 (열어 둔 SSH 연결도 함께 닫힘). 다음 요청 때 다시 켠다 */
+export function closeHelperSession() {
+  const port = dropSession(new CurlRunError('cURL 실행 도우미 연결을 닫았습니다.', { code: 'HOST_CLOSED' }));
+  if (port) {
+    try {
+      port.disconnect();
+    } catch (e) {
+      /* 이미 끊김 */
+    }
+  }
+}
+
+/** 지금 상태 (화면·시험용) */
+export function helperSession() {
+  return { connected: !!sess.port, legacy: sess.legacy, info: sess.info, pending: sess.handlers.size, keepMs: sess.keepMs };
+}
+
+/** SSH 연결 유지 시간(ms). 켜 둔 도우미에도 바로 알린다 (0 이면 쓰지 않는 연결을 바로 닫음) */
+export function configureHelper({ keepMs } = {}) {
+  if (keepMs != null && Number.isFinite(+keepMs)) sess.keepMs = Math.max(0, Math.round(+keepMs));
+  if (sess.port) {
+    post({ type: 'config', keepMs: sess.keepMs });
+    armIdle();
+  }
+}
+
+function post(m) {
+  if (!sess.port) return false;
+  try {
+    sess.port.postMessage(m);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function pongInfo(m) {
+  return {
+    ok: true, hostVersion: m.hostVersion, platform: m.platform, curl: b64ToText(m.curlB64), path: b64ToText(m.pathB64),
+    ssh: b64ToText(m.sshB64), sshPath: b64ToText(m.sshPathB64),
+  };
+}
+
+// 켜 둔 도우미에 연결한다 (이미 있으면 그대로). true: 켜 둔 도우미, false: 옛 도우미(요청마다 띄움)
+function openSession(curlPath = '') {
+  if (sess.port) return Promise.resolve(true);
+  if (sess.legacy) return Promise.resolve(false);
+  if (sess.opening) return sess.opening;
+  const opening = new Promise((resolve, reject) => {
+    let port;
+    try {
+      port = connect();
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    let state = 'wait'; // wait → open | legacy | failed → closed
+    const settle = (fn, v) => {
+      if (sess.opening === opening) sess.opening = null;
+      fn(v);
+    };
+    const drop = () => {
+      try {
+        port.disconnect();
+      } catch (e) {
+        /* noop */
+      }
+    };
+    port.onMessage.addListener((m) => {
+      if (!m) return;
+      if (state === 'wait') {
+        if (m.type === 'pong' && m.session) {
+          state = 'open';
+          sess.port = port;
+          sess.info = pongInfo(m);
+          armIdle();
+          settle(resolve, true);
+        } else if (m.type === 'pong') {
+          // 옛 도우미: 이 답을 보내고 스스로 끝난다
+          state = 'legacy';
+          sess.legacy = true;
+          drop();
+          settle(resolve, false);
+        } else if (m.type === 'error') {
+          state = 'failed';
+          drop();
+          settle(reject, new CurlRunError('도우미 오류: ' + b64ToText(m.messageB64), { code: 'HOST_ERROR' }));
+        }
+        return;
+      }
+      if (state !== 'open' || sess.port !== port) return;
+      const h = m.id != null ? sess.handlers.get(m.id) : null;
+      if (h) h.onMessage(m);
+      else if (m.type === 'error' && m.id == null) {
+        // 도우미 자체의 오류: 도우미가 끝난다
+        state = 'closed';
+        dropSession(new CurlRunError('도우미 오류: ' + b64ToText(m.messageB64), { code: 'HOST_ERROR' }));
+        drop();
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      const err = hostError(chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Native host has exited.');
+      if (state === 'wait') {
+        state = 'failed';
+        settle(reject, err);
+      } else if (state === 'open' && sess.port === port) {
+        state = 'closed';
+        dropSession(err);
+      }
+    });
+    port.postMessage({ type: 'ping', session: true, curlPath, keepMs: sess.keepMs });
+  });
+  sess.opening = opening;
+  return opening;
+}
+
+// 켜 둔 도우미에 요청 하나를 보낸다. build(id) → 보낼 메시지들, handler: { onMessage(m), fail(err) }. 반환: 요청 번호
+function sessionSend(build, handler) {
+  const id = 'q' + ++sess.seq;
+  if (!sess.port) {
+    handler.fail(hostError('Native host has exited.'));
+    return id;
+  }
+  clearTimeout(sess.idleTimer);
+  sess.idleTimer = null;
+  sess.handlers.set(id, handler);
+  for (const m of build(id)) post(m);
+  return id;
+}
+
+function sessionDone(id) {
+  if (sess.handlers.delete(id) && !sess.handlers.size) armIdle();
+}
+
 // 도우미 연결 확인
 export function pingHelper({ curlPath = '', timeoutMs = 15000 } = {}) {
   return new Promise((resolve) => {
@@ -368,10 +544,9 @@ export function pingHelper({ curlPath = '', timeoutMs = 15000 } = {}) {
     const timer = setTimeout(() => finish({ ok: false, code: 'TIMEOUT', message: '도우미가 응답하지 않습니다.' }), timeoutMs);
     port.onMessage.addListener((m) => {
       if (m && m.type === 'pong') {
-        finish({
-          ok: true, hostVersion: m.hostVersion, platform: m.platform, curl: b64ToText(m.curlB64), path: b64ToText(m.pathB64),
-          ssh: b64ToText(m.sshB64), sshPath: b64ToText(m.sshPathB64),
-        });
+        // 도우미를 새 버전으로 다시 설치했으면 다음 요청부터 켜 둔 도우미로
+        if (versionAtLeast(m.hostVersion, SESSION_HOST_VERSION)) sess.legacy = false;
+        finish(pongInfo(m));
       } else if (m && m.type === 'error') {
         finish({ ok: false, code: 'HOST_ERROR', message: b64ToText(m.messageB64) });
       }
@@ -389,48 +564,57 @@ export function pingHelper({ curlPath = '', timeoutMs = 15000 } = {}) {
  * curl 실행. 결과 형식은 브라우저 엔진(http.js)과 동일 + engine:'curl', terminal:{...}
  * opts: { signal, curlPath, command(표시용 명령), ssh }
  * ssh: { host, port, user, password, label } 이 있으면 도우미가 SSH 터널(SOCKS5)을 열고 그 위로 curl 을 실행
+ * keepMs: 이 요청이 쓴 SSH 연결을 끝난 뒤 열어 둘 시간 (켜 둔 도우미일 때. 0 이면 바로 닫음, 없으면 configureHelper 값)
  */
-export function runCurl(prepared, curlOpts, { signal, curlPath = '', command = '', ssh = null } = {}) {
+export async function runCurl(prepared, curlOpts, { signal, curlPath = '', command = '', ssh = null, keepMs = null } = {}) {
   const exec = buildCurlExec(prepared, curlOpts, { ssh: !!ssh });
   const t0 = performance.now();
-  return new Promise((resolve, reject) => {
-    let port;
-    try {
-      port = connect();
-    } catch (e) {
-      reject(e);
-      return;
+  const aborted = () => new CurlRunError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed: performance.now() - t0 });
+  if (signal && signal.aborted) throw aborted();
+  const session = await openSession(curlPath);
+  if (signal && signal.aborted) throw aborted();
+  const timeoutMs = prepared.settings && prepared.settings.timeout > 0 ? prepared.settings.timeout + 5000 : 0;
+  const run = { type: 'run', args: exec.argv, files: exec.files.map((f) => f.name), timeoutMs, curlPath };
+  if (ssh) run.ssh = sshPayload(ssh);
+  // 파일 전송 (청크). id: 켜 둔 도우미에서 이 요청의 번호
+  const fileMsgs = (id) => {
+    const out = [];
+    for (const f of exec.files) {
+      if (!f.b64) out.push({ type: 'file', id, name: f.name, data: '' });
+      for (let i = 0; i < f.b64.length; i += B64_CHUNK) out.push({ type: 'file', id, name: f.name, data: f.b64.slice(i, i + B64_CHUNK) });
     }
+    return out;
+  };
+  return new Promise((resolve, reject) => {
     let meta = null;
     const chunks = [];
     let done = false;
-    const cleanup = () => {
+    let close = () => {};
+    let cancel = () => {};
+    const finish = () => {
       done = true;
       if (signal) signal.removeEventListener('abort', onAbort);
-      try {
-        port.disconnect();
-      } catch (e) {
-        /* ignore */
-      }
+      close();
+    };
+    const fail = (err) => {
+      if (done) return;
+      finish();
+      reject(err);
     };
     const onAbort = () => {
       if (done) return;
-      cleanup();
-      reject(new CurlRunError('요청이 취소되었습니다.', { code: 'ABORTED', elapsed: performance.now() - t0 }));
+      finish();
+      cancel();
+      reject(aborted());
     };
-    if (signal) {
-      if (signal.aborted) return onAbort();
-      signal.addEventListener('abort', onAbort);
-    }
-    port.onMessage.addListener((m) => {
+    const onMessage = (m) => {
       if (done || !m) return;
       if (m.type === 'result') meta = m;
       else if (m.type === 'body') chunks.push(m.data);
       else if (m.type === 'sshError') {
-        cleanup();
         const log = b64ToText(m.messageB64);
         const info = describeSshError(log);
-        reject(new CurlRunError(info.message, {
+        fail(new CurlRunError(info.message, {
           code: info.code,
           hint: info.hint,
           elapsed: performance.now() - t0,
@@ -438,32 +622,43 @@ export function runCurl(prepared, curlOpts, { signal, curlPath = '', command = '
           terminal: { command, stderr: '', exitCode: null, ssh: { ...sshLabel(ssh), log, failed: true, path: b64ToText(m.pathB64) } },
         }));
       } else if (m.type === 'error') {
-        cleanup();
-        reject(new CurlRunError('도우미 오류: ' + b64ToText(m.messageB64), { code: 'HOST_ERROR' }));
+        fail(new CurlRunError('도우미 오류: ' + b64ToText(m.messageB64), { code: 'HOST_ERROR' }));
       } else if (m.type === 'end') {
-        cleanup();
+        finish();
         try {
           resolve(assemble(meta, chunks, prepared, curlOpts, exec, command, performance.now() - t0, ssh));
         } catch (e) {
           reject(e);
         }
       }
-    });
-    port.onDisconnect.addListener(() => {
-      if (done) return;
-      done = true;
-      if (signal) signal.removeEventListener('abort', onAbort);
-      reject(hostError(chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Native host has exited.'));
-    });
-    // 파일 전송 (청크)
-    for (const f of exec.files) {
-      if (!f.b64) port.postMessage({ type: 'file', name: f.name, data: '' });
-      for (let i = 0; i < f.b64.length; i += B64_CHUNK) port.postMessage({ type: 'file', name: f.name, data: f.b64.slice(i, i + B64_CHUNK) });
+    };
+    if (signal) signal.addEventListener('abort', onAbort);
+    if (session) {
+      let id = null;
+      close = () => sessionDone(id);
+      cancel = () => post({ type: 'cancel', id });
+      id = sessionSend((rid) => [...fileMsgs(rid), { ...run, id: rid, keepMs: keepMs ?? sess.keepMs }], { onMessage, fail });
+      return;
     }
-    const timeoutMs = prepared.settings && prepared.settings.timeout > 0 ? prepared.settings.timeout + 5000 : 0;
-    const msg = { type: 'run', args: exec.argv, files: exec.files.map((f) => f.name), timeoutMs, curlPath };
-    if (ssh) msg.ssh = sshPayload(ssh);
-    port.postMessage(msg);
+    // 옛 도우미(1.x): 요청마다 새로 띄운다. 연결을 끊으면 도우미가 curl 을 멈춘다
+    let port;
+    try {
+      port = connect();
+    } catch (e) {
+      fail(e);
+      return;
+    }
+    close = () => {
+      try {
+        port.disconnect();
+      } catch (e) {
+        /* ignore */
+      }
+    };
+    port.onMessage.addListener(onMessage);
+    port.onDisconnect.addListener(() => fail(hostError(chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Native host has exited.')));
+    for (const m of fileMsgs(undefined)) port.postMessage(m);
+    port.postMessage(run);
   });
 }
 
@@ -515,9 +710,43 @@ function hostRequest(msg, expect, timeoutMs) {
   });
 }
 
-// SSH 접속만 시험 (터널을 열었다가 바로 닫음)
-export async function testSsh(ssh) {
-  const m = await hostRequest({ type: 'sshTest', ssh: sshPayload(ssh) }, ['sshOk', 'sshError'], 40000);
+// 도우미에 요청 하나를 보내고 답 하나를 받는다: 켜 둔 도우미가 있으면 그쪽으로, 옛 도우미면 새로 띄워서
+async function hostCall(msg, expect, timeoutMs) {
+  if (!(await openSession())) return hostRequest(msg, expect, timeoutMs);
+  return new Promise((resolve, reject) => {
+    let id = null;
+    let timer = null;
+    const done = () => {
+      clearTimeout(timer);
+      sessionDone(id);
+    };
+    id = sessionSend((rid) => [{ ...msg, id: rid }], {
+      onMessage: (m) => {
+        if (expect.includes(m.type)) {
+          done();
+          resolve(m);
+        } else if (m.type === 'error') {
+          done();
+          reject(new CurlRunError('도우미 오류: ' + b64ToText(m.messageB64), { code: 'HOST_ERROR' }));
+        }
+      },
+      fail: (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    });
+    timer = setTimeout(() => {
+      if (!sess.handlers.has(id)) return;
+      done();
+      post({ type: 'cancel', id });
+      reject(new CurlRunError('도우미가 응답하지 않습니다.', { code: 'TIMEOUT' }));
+    }, timeoutMs);
+  });
+}
+
+// SSH 접속만 시험. 옛 도우미는 터널을 열었다가 바로 닫고, 켜 둔 도우미는 새로 접속한 연결을 keepMs 동안 열어 두어 다음 요청에 쓴다
+export async function testSsh(ssh, { keepMs = null } = {}) {
+  const m = await hostCall({ type: 'sshTest', ssh: sshPayload(ssh), keepMs: keepMs ?? sess.keepMs }, ['sshOk', 'sshError'], 40000);
   const log = b64ToText(m.logB64 || m.messageB64);
   if (m.type === 'sshError') return { ok: false, ...describeSshError(log), log };
   return { ok: true, connectMs: m.connectMs, fingerprint: b64ToText(m.fingerprintB64), firstTime: /Permanently added/i.test(log), log, path: b64ToText(m.pathB64) };
@@ -525,20 +754,20 @@ export async function testSsh(ssh) {
 
 // 서버 호스트 키 가져오기 (아직 신뢰하지 않음) → { keys, fingerprints:[...] }
 export async function scanSshHost(ssh) {
-  const m = await hostRequest({ type: 'sshScan', ssh: sshPayload(ssh) }, ['sshScanned'], 40000);
+  const m = await hostCall({ type: 'sshScan', ssh: sshPayload(ssh) }, ['sshScanned'], 40000);
   const keys = b64ToText(m.keysB64);
   return { keys, fingerprints: b64ToText(m.fingerprintsB64).split(/\r?\n/).filter(Boolean), error: b64ToText(m.errB64) };
 }
 
 // 사용자가 확인한 호스트 키 저장
 export async function trustSshHost(ssh, keys) {
-  const m = await hostRequest({ type: 'sshTrust', ssh: sshPayload(ssh), keys }, ['sshTrusted'], 15000);
+  const m = await hostCall({ type: 'sshTrust', ssh: sshPayload(ssh), keys }, ['sshTrusted'], 15000);
   return m.added || 0;
 }
 
-// 저장된 호스트 키 삭제 (서버 키가 정상적으로 바뀐 경우)
+// 저장된 호스트 키 삭제 (서버 키가 정상적으로 바뀐 경우). 켜 둔 도우미는 그 서버로 열어 둔 연결도 닫는다
 export async function forgetSshHost(ssh) {
-  const m = await hostRequest({ type: 'sshForget', ssh: sshPayload(ssh) }, ['sshForgot'], 15000);
+  const m = await hostCall({ type: 'sshForget', ssh: sshPayload(ssh) }, ['sshForgot'], 15000);
   return m.removed || 0;
 }
 
@@ -676,7 +905,11 @@ function assemble(meta, chunks, prepared, curlOpts, exec, command, elapsed, ssh)
         engine: 'curl',
       });
     }
-    terminal.ssh = { ...sshLabel(ssh), socksPort: meta.ssh.port, connectMs: meta.ssh.connectMs, log: b64ToText(meta.ssh.logB64), path: b64ToText(meta.ssh.pathB64) };
+    // reused: 열어 둔 연결을 다시 씀 (켜 둔 도우미, 이때 connectMs 는 0)
+    terminal.ssh = {
+      ...sshLabel(ssh), socksPort: meta.ssh.port, connectMs: meta.ssh.connectMs, reused: !!meta.ssh.reused,
+      log: b64ToText(meta.ssh.logB64), path: b64ToText(meta.ssh.pathB64),
+    };
   }
   const warnings = [...(prepared.warnings || []).filter((w) => !/Body가 제외/.test(w)), ...exec.warnings];
   // SSE(text/event-stream)를 받다가 시간이 다 되어 끊기면(curl 종료 코드 28) 받은 데까지 응답으로 쓴다 (브라우저로 보낼 때와 같게)
