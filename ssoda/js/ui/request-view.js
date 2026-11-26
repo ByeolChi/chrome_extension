@@ -270,6 +270,7 @@ export class RequestView {
         { label: 'cURL 명령 복사 (bash)', icon: 'copy', onClick: () => this.copyCommand('bash') },
         { label: 'cURL 명령 복사 (Windows cmd)', icon: 'copy', onClick: () => this.copyCommand('cmd') },
         { divider: true },
+        { label: '환경 비교…', icon: 'compare', hint: '여러 환경에 보내 견주기', onClick: () => app.openCompare({ tab: this.tab }) },
         { label: 'cURL 실행 도우미 설정…', icon: 'settings', onClick: () => app.ui.openCurlHelper() },
       ], { alignRight: true, minWidth: 250 });
       return;
@@ -288,6 +289,7 @@ export class RequestView {
       { label: 'cURL 명령 복사 (bash)', icon: 'copy', onClick: () => this.copyCommand('bash') },
       { label: 'cURL 명령 복사 (Windows cmd)', icon: 'copy', onClick: () => this.copyCommand('cmd') },
       { divider: true },
+      { label: '환경 비교…', icon: 'compare', hint: '여러 환경에 보내 견주기', onClick: () => app.openCompare({ tab: this.tab }) },
       { label: 'cURL 실행 도우미 설정…', icon: 'settings', onClick: () => app.ui.openCurlHelper() },
     ], { alignRight: true, minWidth: 250 });
   }
