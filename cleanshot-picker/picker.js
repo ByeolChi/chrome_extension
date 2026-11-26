@@ -1,7 +1,8 @@
 /* CleanShot Picker — content script (격리 world)
  *
- * 다섯 도구로 페이지를 정리한 뒤 현재 화면(Enter)이나 페이지 전체(Shift+Enter)를 PNG 로 저장한다.
- *   1 지우기 · 2 이동 · 3 크기 · 4 텍스트 · 5 가리기(검정)
+ * 도구로 페이지를 정리하고 표시를 더한 뒤 현재 화면(Enter)이나 페이지 전체(Shift+Enter)를 PNG 로 저장한다.
+ *   1 지우기 · 2 이동 · 3 크기 · 4 텍스트 · 5 가리기(검정) · 6 영역
+ *   7 강조 · 8 스포트라이트 · 9 화살표 · 0 번호 · T 글상자 — 찍은 그림에 남는 표시. 그린 뒤 옮기고 크기를 바꾼다.
  *
  * 원본 DOM 구조는 건드리지 않는다. 모든 변경은 인라인 스타일 한 줄이거나
  * 오버레이 위의 박스이고, 모든 조작은 하나의 작업 스택에 쌓여 Ctrl+Z 로 풀린다.
@@ -35,19 +36,38 @@
   const NUDGE_MERGE_MS = 400;    // 이 안에 이어진 방향키는 한 작업으로 묶는다
   const FRAME_TAGS = 'iframe, frame, object, embed';
 
+  /* key 는 누른 글자(e.key), code 가 있으면 키 위치(e.code)로 본다 — 한글 입력 상태에서 T 는 'ㅅ' 이 된다.
+     hint 는 키로 바꿀 때 띄우는 안내 */
   const TOOLS = [
     { id: 'hide',   key: '1', label: '지우기', cursor: 'crosshair' },
     { id: 'move',   key: '2', label: '이동',   cursor: 'move' },
     { id: 'resize', key: '3', label: '크기',   cursor: 'crosshair' },
-    { id: 'text',   key: '4', label: '텍스트', cursor: 'text' },
+    { id: 'text',   key: '4', label: '텍스트', cursor: 'text', tip: '페이지 문구를 제자리에서 고쳐 씁니다' },
     { id: 'mask',   key: '5', label: '가리기', cursor: 'crosshair' },
     { id: 'crop',   key: '6', label: '영역',   cursor: 'crosshair' },
     { id: 'box',    key: '7', label: '강조',   cursor: 'crosshair' },
-    { id: 'spot',   key: '8', label: '스포트라이트', cursor: 'crosshair' }
+    { id: 'spot',   key: '8', label: '스포트라이트', cursor: 'crosshair' },
+    { id: 'arrow',  key: '9', label: '화살표', cursor: 'crosshair', hint: '화살표 · 꼬리에서 머리 쪽으로 끌어 그립니다' },
+    { id: 'badge',  key: '0', label: '번호',   cursor: 'crosshair', hint: '번호 · 누르는 곳마다 1, 2, 3… 을 붙입니다' },
+    { id: 'label',  key: 'T', code: 'KeyT', label: '글상자', cursor: 'text', tip: '그림 위에 글을 써 넣습니다',
+      hint: '글상자 · 누른 곳에 씁니다 (Enter 끝, Shift+Enter 줄바꿈)' }
   ];
 
   // 클릭으로 요소, Shift+드래그(또는 빈 곳 드래그)로 영역을 고르는 도구
   const AREA_TOOLS = new Set(['mask', 'crop', 'box', 'spot']);
+  // 그린 것을 눌러 고르고 옮기고 크기를 바꿀 수 있는 도구. 그 도구로 그린 것만 잡는다.
+  const OBJ_TOOLS = new Set(['mask', 'crop', 'box', 'spot', 'arrow', 'badge', 'label']);
+  // 사각형으로 크기를 바꾸는 그림 (8방향 핸들). 화살표는 두 끝, 번호·글상자는 옮기기만.
+  const RECT_KINDS = new Set(['mask', 'crop', 'box', 'spot']);
+  // 페이지 요소를 고르지 않는 도구 — 요소 강조 상자를 띄우지 않는다
+  const FREE_TOOLS = new Set(['arrow', 'badge', 'label']);
+
+  const GRAB = 7;          // 테두리만 있는 그림(강조·스포트라이트·영역)은 테두리에서 이만큼 안팎을 눌러야 잡힌다
+  const MIN_OBJ = 8;       // 크기를 줄일 수 있는 한도
+  const ARROW_PAD = 14;    // 화살표 사각형이 두 끝 바깥으로 두는 여백 (굵기와 머리가 들어가게)
+  const ARROW_MIN = 10;    // 이보다 짧게 끌면 클릭으로 보고 누른 곳을 가리키는 화살표를 놓는다
+  const BADGE = 28;        // 번호 배지 지름
+  const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const HANDLE_DIRS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
   const HANDLE_CURSOR = {
@@ -66,10 +86,15 @@
     candidate: null,
     pointer: { x: 0, y: 0 }, // 최상위 화면 좌표
     history: [],             // { kind, el, undo, t }
-    masks: [],               // { box, anchor, size, view, last } — "5 가리기" 참고
-    crop: null,              // { anchor, size, view, last } — "6 영역" 참고. 있으면 그 부분만 저장·복사
-    notes: [],               // { box, anchor, size, view, last } — "7 강조" 빨간 테두리
-    spot: null,              // { anchor, size, view, last } — "8 스포트라이트" 바깥을 어둡게 (하나만)
+    /* 그린 것은 모두 { kind, anchor, size, view, last } 틀로 페이지를 따라간다 — "5 가리기"·"그린 것 고르기" 참고 */
+    masks: [],               // kind 'mask' (+box: 검은 박스 요소)
+    crop: null,              // kind 'crop' — "6 영역". 있으면 그 부분만 저장·복사
+    notes: [],               // kind 'box'·'arrow'·'badge'·'label' (+box: 그리는 요소) — 7 강조·9 화살표·0 번호·T 글상자
+    spot: null,              // kind 'spot' — "8 스포트라이트" 바깥을 어둡게 (하나만)
+    sel: null,               // 고른 그림. 그 그림을 그린 도구일 때 옮기고 크기를 바꾼다
+    hover: null,             // 포인터 아래에 있는 잡을 수 있는 그림
+    noteEdit: null,          // 글을 쓰는 중인 글상자 { obj, before(글), isNew, g0(자리·크기) }
+    eatClick: false,         // 다음 클릭 한 번은 도구 동작으로 쓰지 않는다 (글상자 쓰기를 끝낸 클릭)
     drag: null,
     editing: null,
     editSnapshot: null,
@@ -98,16 +123,57 @@
     <style>
       :host, * { box-sizing: border-box; }
 
-      /* 마스크 레이어 — 캡처에 남는다 */
-      .masks { position: absolute; inset: 0; pointer-events: none; }
-      .mask { position: absolute; background: #000; }
-
-      /* 주석 레이어 (7 강조·8 스포트라이트) — 보이는 화면 캡처에 그대로 찍힌다 */
+      /* 주석 레이어 (7 강조·8 스포트라이트·9 화살표·0 번호·T 글상자) — 캡처 때도 남아 화면 그대로 찍힌다.
+         페이지 전체 캡처에서도 장마다 그 스크롤 위치에 맞춰 그려져 함께 이어 붙는다. */
       .notes { position: absolute; inset: 0; pointer-events: none; }
       .note-box { position: absolute; border: 3px solid #ff3b30; border-radius: 6px; box-shadow: 0 0 0 1px rgba(255,255,255,0.85); }
       .note-spot { position: absolute; border-radius: 4px; box-shadow: 0 0 0 200vmax rgba(0,0,0,0.5); display: none; }
-      /* 페이지 전체 캡처에는 아직 넣지 않는다 (장마다 같은 자리에 되풀이되지 않게 숨긴다) */
-      :host(.capturing-full) .notes { display: none; }
+      .note-arrow { position: absolute; overflow: visible; }
+      .note-arrow .halo { stroke: #fff; stroke-width: 8; stroke-linecap: round; }
+      .note-arrow .halo-head { fill: #fff; stroke: #fff; stroke-width: 4; stroke-linejoin: round; }
+      .note-arrow .shaft { stroke: #ff3b30; stroke-width: 4; stroke-linecap: round; }
+      .note-arrow .head { fill: #ff3b30; stroke: #ff3b30; stroke-width: 1; stroke-linejoin: round; }
+      .note-badge {
+        position: absolute;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 50%;
+        border: 2px solid #fff;
+        background: #ff3b30;
+        color: #fff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+        font: 700 15px/1 "Segoe UI", "Malgun Gothic", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .note-badge.small { font-size: 11px; }
+      .note-label {
+        position: absolute;
+        max-width: 420px;
+        min-width: 24px;
+        padding: 4px 9px;
+        border-radius: 6px;
+        background: #ff3b30;
+        color: #fff;
+        caret-color: #fff;
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.85), 0 1px 3px rgba(0,0,0,0.3);
+        font: 600 15px/1.4 "Segoe UI", "Malgun Gothic", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        text-align: left;
+      }
+      .note-label.editing {
+        pointer-events: auto;
+        cursor: text;
+        outline: 2px dashed #2f6fed;
+        outline-offset: 3px;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      .note-label.editing:empty::before { content: '글자를 입력하세요'; opacity: .75; }
+
+      /* 마스크 레이어 — 캡처에 남는다. 주석보다 위: 저장할 때도 서비스 워커가 가리기를 맨 위에 칠한다 */
+      .masks { position: absolute; inset: 0; pointer-events: none; }
+      .mask { position: absolute; background: #000; }
 
       /* UI 레이어 — 캡처 직전에 사라진다 */
       .ui { position: absolute; inset: 0; pointer-events: none; cursor: default; }
@@ -164,16 +230,29 @@
         pointer-events: auto;
         display: none;
       }
+      .handle.end { width: 13px; height: 13px; margin: -7px 0 0 -7px; border-radius: 50%; cursor: move; }
+      /* 고른 그림과 포인터 아래의 잡을 수 있는 그림 */
+      .selbox, .hoverbox {
+        position: absolute;
+        pointer-events: none;
+        display: none;
+        border-radius: 4px;
+      }
+      .selbox { outline: 1.5px dashed #2f6fed; outline-offset: 3px; }
+      .hoverbox { outline: 1px solid rgba(47,111,237,0.9); outline-offset: 3px; }
 
+      /* 툴바: 윗줄은 도구, 아랫줄은 작업·저장 단추. 좁은 화면에서는 줄마다 접힌다.
+         left:50% + translate 로 가운데 두면 쓸 수 있는 너비가 화면 절반으로 줄어 일찍 접히므로 margin:auto 로 가운데 둔다 */
       .bar {
         position: absolute;
-        left: 50%;
+        left: 0;
+        right: 0;
+        margin: 0 auto;
+        width: fit-content;
         bottom: 24px;
         top: auto;
-        transform: translateX(-50%);
         display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
+        flex-direction: column;
         align-items: center;
         gap: 6px;
         max-width: 94vw;
@@ -189,6 +268,7 @@
         white-space: nowrap;
       }
       .bar.at-top { top: 24px; bottom: auto; }
+      .row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; }
 
       .count { font-variant-numeric: tabular-nums; opacity: .85; padding: 0 2px; }
       .status { opacity: .85; font-variant-numeric: tabular-nums; }
@@ -211,11 +291,14 @@
       button.tool.sel { background: #2f6fed; color: #fff; }
       .num { opacity: .55; font-size: 11px; padding-left: 3px; }
 
+      /* 알림은 툴바 바로 위(툴바가 위에 있으면 바로 아래). --bar-h 는 툴바 높이 (ResizeObserver) */
       .toast {
         position: absolute;
-        left: 50%;
-        bottom: 96px;
-        transform: translateX(-50%);
+        left: 0;
+        right: 0;
+        margin: 0 auto;
+        width: fit-content;
+        bottom: calc(var(--bar-h, 76px) + 34px);
         padding: 9px 14px;
         border-radius: 10px;
         background: rgba(20,20,22,0.94);
@@ -227,33 +310,40 @@
         display: none;
         max-width: 70vw;
       }
-      .toast.at-top { top: 96px; bottom: auto; }
+      .toast.at-top { top: calc(var(--bar-h, 76px) + 34px); bottom: auto; }
     </style>
 
-    <div class="masks"></div>
     <div class="notes"><div class="note-spot"></div></div>
+    <div class="masks"></div>
 
     <div class="ui">
       <div class="crop"></div>
       <div class="hl"></div>
       <div class="tag"></div>
       <div class="marquee"></div>
+      <div class="hoverbox"></div>
+      <div class="selbox"></div>
       ${HANDLE_DIRS.map((d) => `<div class="handle" data-dir="${d}" style="cursor:${HANDLE_CURSOR[d]}"></div>`).join('')}
+      <div class="handle end" data-end="tail" title="꼬리"></div>
+      <div class="handle end" data-end="head" title="머리"></div>
       <div class="toast"></div>
       <div class="bar">
-        ${TOOLS.map((t) => `<button class="tool" data-tool="${t.id}" title="${t.label} (${t.key})">${t.label}<span class="num">${t.key}</span></button>`).join('')}
-        <span class="sep"></span>
-        <span class="count">0개 작업</span>
-        <button class="mode" title="지우기가 빈자리를 남길지 접을지">빈자리 남김</button>
-        <button class="undo" disabled title="Ctrl+Z">되돌리기</button>
-        <button class="reset" disabled>전체 복원</button>
-        <span class="sep"></span>
-        <button class="shot primary" title="보이는 화면 (Enter)">캡처</button>
-        <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
-        <button class="copy" title="보이는 화면을 클립보드에 복사 (C)">복사</button>
-        <span class="status"></span>
-        <button class="flip" title="툴바를 위/아래로 (Tab)">⇅</button>
-        <button class="close" title="Esc">닫기</button>
+        <div class="row tools">
+          ${TOOLS.map((t) => `<button class="tool" data-tool="${t.id}" title="${t.label} (${t.key})${t.tip ? ' — ' + t.tip : ''}">${t.label}<span class="num">${t.key}</span></button>`).join('')}
+        </div>
+        <div class="row acts">
+          <span class="count">0개 작업</span>
+          <button class="mode" title="지우기가 빈자리를 남길지 접을지">빈자리 남김</button>
+          <button class="undo" disabled title="Ctrl+Z">되돌리기</button>
+          <button class="reset" disabled>전체 복원</button>
+          <span class="sep"></span>
+          <button class="shot primary" title="보이는 화면 (Enter)">캡처</button>
+          <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
+          <button class="copy" title="보이는 화면을 클립보드에 복사 (C)">복사</button>
+          <span class="status"></span>
+          <button class="flip" title="툴바를 위/아래로 (Tab)">⇅</button>
+          <button class="close" title="Esc">닫기</button>
+        </div>
       </div>
     </div>
   `;
@@ -267,7 +357,10 @@
     tag: root.querySelector('.tag'),
     marquee: root.querySelector('.marquee'),
     crop: root.querySelector('.crop'),
-    handles: [...root.querySelectorAll('.handle')],
+    selbox: root.querySelector('.selbox'),
+    hoverbox: root.querySelector('.hoverbox'),
+    handles: [...root.querySelectorAll('.handle[data-dir]')],
+    ends: [...root.querySelectorAll('.handle[data-end]')],
     toast: root.querySelector('.toast'),
     bar: root.querySelector('.bar'),
     tools: [...root.querySelectorAll('.tool')],
@@ -284,19 +377,32 @@
   };
 
   ui.tools.forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
+  // 툴바 높이가 바뀌면(좁은 화면에서 줄이 접힘) 알림을 그 위로 옮긴다
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => ui.layer.style.setProperty('--bar-h', ui.bar.offsetHeight + 'px')).observe(ui.bar);
+  }
   ui.mode.addEventListener('click', toggleMode);
   ui.undo.addEventListener('click', undo);
-  ui.reset.addEventListener('click', () => { restoreAll(); paintBar(); });
+  ui.reset.addEventListener('click', () => { restoreAll(); paintBar(); reposition(); });
   ui.shot.addEventListener('click', () => captureViewport());
   ui.full.addEventListener('click', () => captureFullPage());
   ui.copy.addEventListener('click', () => captureViewport('', { copy: true }));
   ui.flip.addEventListener('click', flipBar);
   ui.close.addEventListener('click', deactivate);
+  /* 8방향 핸들: 고른 그림이 있으면 그 크기를, 아니면 3 크기 도구에서 고른 요소의 크기를 바꾼다 */
   ui.handles.forEach((h) =>
     h.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      startResize(pt(e), h.dataset.dir);
+      if (selShown()) startObjResize(pt(e), h.dataset.dir);
+      else startResize(pt(e), h.dataset.dir);
+    })
+  );
+  ui.ends.forEach((h) =>
+    h.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (selShown()) startArrowEnd(pt(e), h.dataset.end);
     })
   );
 
@@ -391,7 +497,7 @@
     paintMode();
     paintBar();
     keepAlive('active');
-    toast('지울 요소를 클릭하세요 · 1~5 로 도구 전환', 2200);
+    toast('지울 요소를 클릭하세요 · 1~9·0·T 로 도구 전환', 2200);
   }
 
   /* 선택 모드가 열려 있는 동안 service worker 를 깨워 둔다.
@@ -423,6 +529,7 @@
     keepAlive('cooldown');
     endTextEdit();
     restoreAll();
+    state.hover = null;
     setCandidate(null);
 
     pageWatch.disconnect();
@@ -483,6 +590,8 @@
     doc.addEventListener('pointerup', onPointerUp, true);
     BLOCKED.forEach((t) => doc.addEventListener(t, onBlocked, true));
     doc.addEventListener('keydown', onKey, true);
+    doc.addEventListener('keypress', onKeyQuiet, true);
+    doc.addEventListener('keyup', onKeyQuiet, true);
     doc.addEventListener('load', onFrameLoad, true);
     win.addEventListener('scroll', reposition, true);
     win.addEventListener('resize', reposition, true);
@@ -506,6 +615,8 @@
       doc.removeEventListener('pointerup', onPointerUp, true);
       BLOCKED.forEach((t) => doc.removeEventListener(t, onBlocked, true));
       doc.removeEventListener('keydown', onKey, true);
+      doc.removeEventListener('keypress', onKeyQuiet, true);
+      doc.removeEventListener('keyup', onKeyQuiet, true);
       doc.removeEventListener('load', onFrameLoad, true);
       const win = doc.defaultView;
       if (win) {
@@ -584,10 +695,14 @@
   function setTool(id) {
     if (!TOOLS.some((t) => t.id === id)) return;
     if (state.editing && id !== 'text') endTextEdit();
+    if (state.noteEdit && id !== 'label') endNoteEdit();
     state.tool = id;
+    if (state.sel && state.sel.kind !== id) state.sel = null; // 고른 그림은 그린 도구에서만 다룬다
+    state.hover = null;
     ui.tools.forEach((b) => b.classList.toggle('sel', b.dataset.tool === id));
     paintCursor();
-    layoutHandles();
+    if (FREE_TOOLS.has(id) && state.candidate) setCandidate(null);
+    else layoutHandles();
   }
 
   function toggleMode() {
@@ -641,10 +756,12 @@
   }
 
   function restoreAll() {
+    endNoteEdit();
     while (state.history.length) {
       const op = state.history.pop();
       try { op.undo(); } catch (_) { /* 계속 진행 */ }
     }
+    state.sel = null;
     paintBar();
   }
 
@@ -790,10 +907,11 @@
     reposition();
   }
 
+  /* 그린 것의 자리를 먼저 다시 잰 뒤(layoutMasks) 그 자리에 핸들과 고른 표시를 놓는다 */
   function reposition() {
     paintHighlight();
-    layoutHandles();
     layoutMasks();
+    layoutHandles();
   }
 
   function paintHighlight() {
@@ -821,24 +939,48 @@
     ui.tag.textContent = `${label(el)}  ${Math.round(r.w)}×${Math.round(r.h)}`;
   }
 
+  /* 8방향 핸들: 고른 그림(가리기·영역·강조·스포트라이트)이 있으면 그 둘레에, 아니면 3 크기 도구에서 요소 둘레에.
+     화살표를 골랐으면 두 끝에 둥근 핸들. 고른 그림과 포인터 아래 그림의 테두리도 여기서 그린다. */
   function layoutHandles() {
-    const el = state.candidate;
-    const show = state.tool === 'resize' && el && el.isConnected;
-    if (!show) {
-      ui.handles.forEach((h) => { h.style.display = 'none'; });
-      return;
+    if (state.sel && !alive(state.sel)) state.sel = null;   // 되돌리기 등으로 사라졌다
+    if (state.hover && !alive(state.hover)) state.hover = null;
+    const o = selShown() ? state.sel : null;
+    let r = null;
+    if (o) {
+      if (RECT_KINDS.has(o.kind)) r = drawnFull(o);
+    } else if (state.tool === 'resize' && state.candidate && state.candidate.isConnected) {
+      r = rectOf(state.candidate);
     }
-    const r = rectOf(el);
-    const px = { w: r.x, e: r.x + r.w, n: r.y, s: r.y + r.h };
-    const mid = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-    ui.handles.forEach((h) => {
-      const d = h.dataset.dir;
-      const x = d.includes('w') ? px.w : d.includes('e') ? px.e : mid.x;
-      const y = d.includes('n') ? px.n : d.includes('s') ? px.s : mid.y;
+    if (!r) {
+      ui.handles.forEach((h) => { h.style.display = 'none'; });
+    } else {
+      const px = { w: r.x, e: r.x + r.w, n: r.y, s: r.y + r.h };
+      const mid = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+      ui.handles.forEach((h) => {
+        const d = h.dataset.dir;
+        const x = d.includes('w') ? px.w : d.includes('e') ? px.e : mid.x;
+        const y = d.includes('n') ? px.n : d.includes('s') ? px.s : mid.y;
+        h.style.display = 'block';
+        h.style.left = x + 'px';
+        h.style.top = y + 'px';
+      });
+    }
+
+    const ends = o && o.kind === 'arrow' && o.last ? arrowEnds(o, o.last) : null;
+    ui.ends.forEach((h) => {
+      const q = ends && ends[h.dataset.end];
+      if (!q) { h.style.display = 'none'; return; }
       h.style.display = 'block';
-      h.style.left = x + 'px';
-      h.style.top = y + 'px';
+      h.style.left = q.x + 'px';
+      h.style.top = q.y + 'px';
     });
+
+    // 고른 그림의 점선 테두리 (화살표는 두 끝 핸들로 보이고, 쓰는 중인 글상자는 제 테두리가 있다)
+    const editingIt = !!o && !!state.noteEdit && state.noteEdit.obj === o;
+    placeAt(ui.selbox, o && o.kind !== 'arrow' && !editingIt ? drawnFull(o) : null, 0);
+    // 포인터 아래의 잡을 수 있는 그림 (끄는 동안은 숨긴다)
+    const h = !state.drag && state.hover && state.hover !== o && state.hover.kind === state.tool ? state.hover : null;
+    placeAt(ui.hoverbox, h ? drawnVis(h) : null, 0);
   }
 
   function label(el) {
@@ -1131,7 +1273,7 @@
     box.className = 'mask';
     ui.masks.appendChild(box);
 
-    const m = { box, anchor, size, view: null, last: null };
+    const m = { kind: 'mask', box, anchor, size, view: null, last: null };
     state.masks.push(m);
     layoutMasks();
 
@@ -1285,37 +1427,249 @@
     if (d.moved && d.rect && d.rect.w > 4 && d.rect.h > 4) {
       const size = { w: d.rect.w, h: d.rect.h };
       if (state.tool === 'crop') setCrop(regionAnchor(d.rect), size);
-      else if (state.tool === 'box') addNote(regionAnchor(d.rect), size);
+      else if (state.tool === 'box') addNote('box', regionAnchor(d.rect), size);
       else if (state.tool === 'spot') setSpot(regionAnchor(d.rect), size);
       else addMask(regionAnchor(d.rect), size);
     }
   }
 
-  /* ============================================================ 7 강조 · 8 스포트라이트
-   * 가리기 박스와 같은 기준(요소·영역)으로 붙어 따라가는 주석. 주석 레이어는 캡처 직전에도 남아 화면 그대로 찍힌다.
+  /* ============================================================ 7 강조 · 8 스포트라이트 · 9 화살표 · 0 번호 · T 글상자
+   * 찍은 그림에 남는 표시. 가리기 박스와 같은 기준(요소·영역)으로 붙어 스크롤·레이아웃이 바뀌어도 따라간다.
    *   강조 — 빨간 테두리. 요소면 요소 바깥으로 3px 띄워 그린다. 여러 개.
    *   스포트라이트 — 고른 곳 바깥을 어둡게. 하나만 두고 다시 고르면 바뀐다.
-   * 작업 스택에 들어가 Ctrl+Z·전체 복원으로 없앤다. 페이지 전체 캡처에는 아직 넣지 않는다. */
+   *   화살표 — 끈 방향(꼬리 → 머리)으로. 그냥 누르면 누른 곳을 가리키는 화살표를 놓는다.
+   *   번호 — 누르는 곳마다 1, 2, 3… (지금 있는 번호 가운데 가장 큰 것 다음).
+   *   글상자 — 누른 곳에 글을 쓴다. Enter·Esc·바깥 클릭으로 끝내고 Shift+Enter 는 줄바꿈. 비우면 없어진다.
+   * 주석 레이어는 캡처 직전에도 남아 화면 그대로 찍히고, 페이지 전체 캡처에서도 장마다 그 스크롤 위치에 그려져
+   * 함께 이어 붙는다. 스크롤 영역·화면 끝에 걸쳐 일부만 보이면 잘린 쪽을 잘라 그린다 — 잘린 자리에 가짜 테두리를
+   * 긋지 않아 전체 페이지의 이음매에도 줄이 생기지 않는다. 작업 스택에 들어가 Ctrl+Z·전체 복원으로 없앤다. */
 
-  function addNote(anchor, size) {
-    const box = document.createElement('div');
-    box.className = 'note-box';
-    ui.notes.appendChild(box);
-    const n = { box, anchor, size, view: null, last: null };
+  function makeNote(kind, anchor, size, extra) {
+    let node;
+    if (kind === 'arrow') {
+      node = document.createElementNS(SVG_NS, 'svg');
+      node.setAttribute('class', 'note-arrow');
+      for (const c of ['halo', 'halo-head', 'shaft', 'head']) {
+        const part = document.createElementNS(SVG_NS, c.endsWith('head') ? 'polygon' : 'line');
+        part.setAttribute('class', c);
+        node.appendChild(part);
+      }
+    } else {
+      node = document.createElement('div');
+      node.className = 'note-' + kind;
+    }
+    ui.notes.appendChild(node);
+    const n = { kind, box: node, anchor, size, view: null, last: null, ...extra };
     state.notes.push(n);
+    return n;
+  }
+
+  /* 주석을 뺀다. 작업 스택에는 남기지 않는다 (만들기를 되돌릴 때, 그리다 그만둘 때) */
+  function dropNote(n) {
+    const i = state.notes.indexOf(n);
+    if (i >= 0) state.notes.splice(i, 1);
+    n.box.remove();
+    if (state.sel === n) state.sel = null;
+    if (state.hover === n) state.hover = null;
+  }
+
+  function addNote(kind, anchor, size, extra) {
+    const n = makeNote(kind, anchor, size, extra);
     layoutMasks();
-    push('note', null, () => {
-      const i = state.notes.indexOf(n);
-      if (i >= 0) state.notes.splice(i, 1);
-      n.box.remove();
-    });
+    push('note', null, () => dropNote(n));
+    return n;
   }
 
   function setSpot(anchor, size) {
     const prev = state.spot;
-    state.spot = { anchor, size, view: null, last: null };
+    state.spot = { kind: 'spot', anchor, size, view: null, last: null };
     layoutMasks();
     push('spot', null, () => { state.spot = prev; layoutMasks(); });
+  }
+
+  /* 화살표 사각형 r(두 끝 바깥 여백 포함)의 두 끝. dir 은 꼬리가 오른쪽(tx)·아래쪽(ty)에 있는지 */
+  function arrowEnds(n, r) {
+    const P = ARROW_PAD;
+    const left = r.x + P;
+    const right = r.x + r.w - P;
+    const top = r.y + P;
+    const bottom = r.y + r.h - P;
+    return {
+      tail: { x: n.dir.tx ? right : left, y: n.dir.ty ? bottom : top },
+      head: { x: n.dir.tx ? left : right, y: n.dir.ty ? top : bottom }
+    };
+  }
+
+  /* 화살표를 tail → head 로 놓고 그 사각형을 돌려준다. final 이면 사각형을 품는 요소에 붙인다 */
+  function setArrow(n, tail, head, final) {
+    const P = ARROW_PAD;
+    const rect = {
+      x: Math.min(tail.x, head.x) - P,
+      y: Math.min(tail.y, head.y) - P,
+      w: Math.abs(head.x - tail.x) + P * 2,
+      h: Math.abs(head.y - tail.y) + P * 2
+    };
+    n.dir = { tx: tail.x > head.x ? 1 : 0, ty: tail.y > head.y ? 1 : 0 };
+    placeObject(n, rect, final);
+    return rect;
+  }
+
+  /* 끌기 시작. 조금이라도 움직여야 화살표가 생긴다 */
+  function startArrow(p) {
+    state.drag = { kind: 'arrow', obj: null, x0: p.x, y0: p.y, moved: false };
+  }
+
+  function updateArrowDraw(p) {
+    const d = state.drag;
+    if (!d.moved && Math.hypot(p.x - d.x0, p.y - d.y0) < 4) return;
+    d.moved = true;
+    if (!d.obj) d.obj = makeNote('arrow', null, null, { dir: { tx: 0, ty: 0 } });
+    setArrow(d.obj, { x: d.x0, y: d.y0 }, p, false);
+  }
+
+  function endArrow(d, p) {
+    let n = d.obj;
+    let tail = { x: d.x0, y: d.y0 };
+    let head = p;
+    if (!n || Math.hypot(head.x - tail.x, head.y - tail.y) < ARROW_MIN) {
+      // 그냥 눌렀다: 누른 곳을 머리로, 왼쪽 아래에서 오는 화살표 (화면 끝이면 반대쪽에서)
+      head = tail;
+      tail = defaultTail(head);
+      if (!n) n = makeNote('arrow', null, null, { dir: { tx: 0, ty: 0 } });
+    }
+    setArrow(n, tail, head, true);
+    push('note', null, () => dropNote(n));
+  }
+
+  function defaultTail(h) {
+    const vs = viewSize(document);
+    return { x: h.x + (h.x - 64 < 8 ? 64 : -64), y: h.y + (h.y + 48 > vs.h - 8 ? -48 : 48) };
+  }
+
+  function paintArrow(n) {
+    const svg = n.box;
+    const full = n.last;
+    const vis = n.view;
+    if (!full || !vis) { svg.style.display = 'none'; return; }
+    placeClipped(svg, full, vis, 0, true);
+    const { tail, head } = arrowEnds(n, { x: 0, y: 0, w: full.w, h: full.h });
+    const dx = head.x - tail.x;
+    const dy = head.y - tail.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const hl = Math.min(18, len * 0.7);  // 머리 길이
+    const hw = hl * 0.85;                // 머리 너비
+    const bx = head.x - ux * hl;         // 머리 밑변 가운데
+    const by = head.y - uy * hl;
+    const pts = [
+      [head.x, head.y],
+      [bx - (uy * hw) / 2, by + (ux * hw) / 2],
+      [bx + (uy * hw) / 2, by - (ux * hw) / 2]
+    ].map((q) => q.map((v) => v.toFixed(2)).join(',')).join(' ');
+    // 몸통은 머리 안쪽에서 끝낸다 (둥근 끝이 머리 앞으로 삐져나오지 않게)
+    const ex = head.x - ux * hl * 0.6;
+    const ey = head.y - uy * hl * 0.6;
+    const [halo, haloHead, shaft, tip] = svg.children;
+    for (const line of [halo, shaft]) {
+      line.setAttribute('x1', tail.x.toFixed(2));
+      line.setAttribute('y1', tail.y.toFixed(2));
+      line.setAttribute('x2', ex.toFixed(2));
+      line.setAttribute('y2', ey.toFixed(2));
+    }
+    haloHead.setAttribute('points', pts);
+    tip.setAttribute('points', pts);
+  }
+
+  function addBadge(p) {
+    const num = state.notes.reduce((m, n) => (n.kind === 'badge' ? Math.max(m, n.num) : m), 0) + 1;
+    const n = makeNote('badge', null, null, { num });
+    n.box.textContent = String(num);
+    if (num >= 100) n.box.classList.add('small');
+    placeObject(n, { x: p.x - BADGE / 2, y: p.y - BADGE / 2, w: BADGE, h: BADGE }, true);
+    push('note', null, () => dropNote(n));
+  }
+
+  /* 글상자: 누른 곳에서 바로 쓰기 시작한다. 다 쓰면(endNoteEdit) 작업 스택에 들어간다 */
+  function newLabel(p) {
+    const n = makeNote('label', null, { w: 40, h: 29 }, { text: '' });
+    placeObject(n, { x: p.x - 6, y: p.y - 14, w: 40, h: 29 }, true);
+    startNoteEdit(n, true);
+  }
+
+  function startNoteEdit(n, isNew) {
+    endNoteEdit();
+    const node = n.box;
+    state.noteEdit = { obj: n, before: n.text || '', isNew, g0: geomOf(n) };
+    node.classList.add('editing');
+    node.setAttribute('contenteditable', 'plaintext-only');
+    node.setAttribute('spellcheck', 'false');
+    node.addEventListener('input', onLabelInput);
+    node.addEventListener('blur', onLabelBlur);
+    layoutMasks();
+    host.removeAttribute('aria-hidden'); // 포커스를 받는 동안은 보조 기술에서 숨기지 않는다
+    try { node.focus({ preventScroll: true }); } catch (_) { node.focus(); }
+    try { // 고칠 때는 글 끝에 커서를 둔다
+      const sel = typeof root.getSelection === 'function' ? root.getSelection() : document.getSelection();
+      if (sel && node.firstChild) { sel.selectAllChildren(node); sel.collapseToEnd(); }
+    } catch (_) { /* 무시 */ }
+    measureLabel(n);
+    reposition();
+  }
+
+  function onLabelInput() {
+    if (!state.noteEdit) return;
+    measureLabel(state.noteEdit.obj);
+    reposition();
+  }
+
+  /* 툴바 단추나 다른 창으로 포커스가 옮겨 가면 쓰기를 끝낸다 */
+  function onLabelBlur() {
+    if (state.noteEdit) endNoteEdit();
+  }
+
+  function measureLabel(n) {
+    const r = n.box.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) n.size = { w: r.width, h: r.height };
+  }
+
+  /* 글상자 쓰기를 끝낸다. 비었으면 새 글상자는 없애고, 있던 글상자는 지운 작업으로 남긴다(Ctrl+Z 로 되살림) */
+  function endNoteEdit() {
+    const ed = state.noteEdit;
+    if (!ed) return;
+    state.noteEdit = null;
+    const n = ed.obj;
+    const node = n.box;
+    node.removeEventListener('input', onLabelInput);
+    node.removeEventListener('blur', onLabelBlur);
+    const text = String(node.innerText || '').replace(/ /g, ' ').replace(/\r/g, '').trim();
+    node.removeAttribute('contenteditable');
+    node.removeAttribute('spellcheck');
+    node.classList.remove('editing');
+    try { node.blur(); } catch (_) { /* 무시 */ }
+    host.setAttribute('aria-hidden', 'true');
+    if (!alive(n)) return; // 그사이 없어졌다
+
+    const g0 = ed.g0;
+    if (!text) {
+      node.textContent = ed.before;
+      if (ed.isNew) dropNote(n);
+      else { setGeom(n, g0); removeObject(n); }
+      reposition();
+      return;
+    }
+    node.textContent = text;
+    n.text = text;
+    measureLabel(n);
+    layoutMasks();
+    if (n.last) n.anchor = regionAnchor(n.last); // 다 쓴 글상자를 통째로 품는 가장 안쪽 요소에 다시 붙인다
+    if (ed.isNew) {
+      push('note', null, () => dropNote(n));
+    } else if (text !== ed.before) {
+      const before = ed.before;
+      push('label', n, () => { n.text = before; node.textContent = before; setGeom(n, g0); measureLabel(n); });
+    }
+    reposition();
   }
 
   function pickTarget(el) {
@@ -1336,19 +1690,310 @@
     s.height = (r.h + out * 2) + 'px';
   }
 
+  /* 잘리기 전 사각형 full 에 그리되, 보이는 부분 vis 밖은 잘라 낸다(clip-path). out 은 바깥으로 띄운 만큼.
+     안 잘린 쪽은 띄운 테두리까지 그리고, 잘린 쪽은 보이는 경계에서 자른다. sized 가 아니면 크기는 내용이 정한다(글상자). */
+  function placeClipped(node, full, vis, out, sized) {
+    const s = node.style;
+    if (!full || !vis) { s.display = 'none'; return; }
+    s.display = '';
+    s.left = (full.x - out) + 'px';
+    s.top = (full.y - out) + 'px';
+    if (sized) {
+      s.width = (full.w + out * 2) + 'px';
+      s.height = (full.h + out * 2) + 'px';
+    }
+    s.clipPath = clipInset(full, vis, out);
+  }
+
+  function clipInset(full, vis, out) {
+    const t = vis.y > full.y + 0.5 ? vis.y - full.y + out : 0;
+    const l = vis.x > full.x + 0.5 ? vis.x - full.x + out : 0;
+    const b = vis.y + vis.h < full.y + full.h - 0.5 ? full.y + full.h - vis.y - vis.h + out : 0;
+    const r = vis.x + vis.w < full.x + full.w - 0.5 ? full.x + full.w - vis.x - vis.w + out : 0;
+    return t || r || b || l ? `inset(${t}px ${r}px ${b}px ${l}px)` : '';
+  }
+
   function layoutNotes() {
     for (const n of state.notes) {
       let r = null;
-      try { r = maskRect(n); } catch (_) { r = n.view; }
+      if (n.anchor && !hiddenInFull(n)) {
+        try { r = maskRect(n); } catch (_) { r = n.view; }
+      }
       n.view = r;
-      placeAt(n.box, r, n.size ? 0 : 3);   // 요소를 감쌀 때는 바깥으로 띄워 내용을 가리지 않는다
+      if (n.kind === 'arrow') paintArrow(n);
+      else placeClipped(n.box, n.last, r, outOf(n), n.kind !== 'label'); // 요소를 감싼 강조는 바깥으로 띄운다
     }
+    layoutSpot();
+  }
+
+  /* 스포트라이트. 페이지 전체를 찍는 동안 구멍이 이 장에 없으면 장 전체를 어둡게 한다 */
+  function layoutSpot() {
     const sp = state.spot;
     if (!sp) { ui.spot.style.display = 'none'; return; }
     let r = null;
-    try { r = maskRect(sp); } catch (_) { r = sp.view; }
+    if (!hiddenInFull(sp)) {
+      try { r = maskRect(sp); } catch (_) { r = sp.view; }
+    }
     sp.view = r;
-    placeAt(ui.spot, r, sp.size ? 0 : 4);
+    if (r) placeAt(ui.spot, r, outOf(sp));
+    else if (state.full) placeAt(ui.spot, { x: -41, y: -41, w: 1, h: 1 }, 0);
+    else ui.spot.style.display = 'none';
+  }
+
+  /* 페이지 전체를 찍는 동안 이 장에서 뺄 표시인가
+     - 이 장에서 숨긴 화면 고정(fixed) 요소 안에 붙은 것 (그 요소와 함께 첫 장·마지막 장에만)
+     - 안쪽 스크롤 영역을 찍을 때 그 영역 밖에 붙은 것 — 화면에 떠 있는 셈이라 첫 장에만 둔다 */
+  function hiddenInFull(o) {
+    const run = state.full;
+    if (!run || !run.plan) return false;
+    const el = o.anchor && o.anchor.el;
+    const f = el ? run.fixed.find((x) => insideOf(x.el, el)) : null;
+    if (f) return f.hidden;
+    if (run.plan.el && !(el && insideOf(run.plan.el, el))) return run.frame > 0;
+    return false;
+  }
+
+  /* ============================================================ 그린 것 고르기·옮기기·크기
+   * 가리기·영역·강조·스포트라이트·화살표·번호·글상자는 모두 같은 틀(anchor·size·view·last)로 페이지를 따라간다.
+   * 그 도구일 때 그린 것을 누르면 고르고, 끌면 옮긴다. 고른 것은 8방향 핸들(화살표는 두 끝)로 크기를 바꾸고,
+   * 방향키로 1px(Shift 10px)씩 옮기고, Delete 로 지운다. Esc 는 고르기만 푼다. 고른 글상자를 한 번 더 누르면 글을 고친다.
+   * 테두리만 있는 강조·스포트라이트·영역은 테두리 근처를 눌러야 잡힌다 — 안쪽 클릭은 지금처럼 요소를 고른다.
+   * Shift 를 누른 채 누르면 잡지 않고 새로 끈다(영역).
+   * 옮기거나 크기를 바꾸면 새 사각형을 통째로 품는 가장 안쪽 요소에 다시 붙인다(regionAnchor). 요소를 감싸던 것도
+   * 그때부터는 그 자리·크기를 지킨다. 모든 조작은 작업 스택에 들어가 Ctrl+Z 로 풀린다.
+   */
+
+  /* 요소를 감쌀 때 바깥으로 띄우는 만큼 (강조 3px, 스포트라이트 4px). 영역으로 그렸거나 옮긴 뒤에는 0 */
+  function outOf(o) {
+    if (o.size) return 0;
+    return o.kind === 'box' ? 3 : o.kind === 'spot' ? 4 : 0;
+  }
+
+  function grow(r, d) {
+    return { x: r.x - d, y: r.y - d, w: r.w + d * 2, h: r.h + d * 2 };
+  }
+
+  /* 그려지는 사각형 — 잘리기 전(full)과 보이는 부분(vis). 화면에 없으면 null */
+  function drawnFull(o) { return o && o.view && o.last ? grow(o.last, outOf(o)) : null; }
+  function drawnVis(o) { return o && o.view ? grow(o.view, outOf(o)) : null; }
+
+  function objectsOf(tool) {
+    if (tool === 'mask') return state.masks;
+    if (tool === 'crop') return state.crop ? [state.crop] : [];
+    if (tool === 'spot') return state.spot ? [state.spot] : [];
+    return state.notes.filter((n) => n.kind === tool);
+  }
+
+  function alive(o) {
+    if (!o) return false;
+    if (o.kind === 'mask') return state.masks.includes(o);
+    if (o.kind === 'crop') return state.crop === o;
+    if (o.kind === 'spot') return state.spot === o;
+    return state.notes.includes(o);
+  }
+
+  /* 고른 그림을 지금 도구로 다룰 수 있는가 (selShown 은 화면에 보이기까지) */
+  function selActive() {
+    const o = state.sel;
+    return !!o && o.kind === state.tool && alive(o);
+  }
+
+  function selShown() {
+    return selActive() && !!state.sel.view;
+  }
+
+  /* 포인터 아래에서 지금 도구가 잡을 그림 (나중에 그린 것이 위) */
+  function hitObject(tool, p) {
+    const list = objectsOf(tool);
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (hits(list[i], p)) return list[i];
+    }
+    return null;
+  }
+
+  function hits(o, p) {
+    const r = drawnVis(o);
+    if (!r) return false;
+    const inside = (m) => p.x >= r.x - m && p.x <= r.x + r.w + m && p.y >= r.y - m && p.y <= r.y + r.h + m;
+    if (o.kind === 'arrow') {
+      if (!inside(0) || !o.last) return false;
+      const { tail, head } = arrowEnds(o, o.last);
+      return segDist(p, tail, head) <= 8;
+    }
+    if (o.kind === 'mask' || o.kind === 'badge' || o.kind === 'label') return inside(2);
+    // 강조·스포트라이트·영역: 테두리 근처만
+    if (!inside(GRAB)) return false;
+    const deep = r.w > GRAB * 2 && r.h > GRAB * 2 &&
+      p.x > r.x + GRAB && p.x < r.x + r.w - GRAB && p.y > r.y + GRAB && p.y < r.y + r.h - GRAB;
+    return !deep;
+  }
+
+  function segDist(p, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const L = dx * dx + dy * dy;
+    const t = L ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L)) : 0;
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+  }
+
+  function select(o) {
+    state.sel = o || null;
+    layoutHandles();
+  }
+
+  /* 잡을 수 있는 그림 위에서는 이동 커서. 커서 규칙은 문서 전체를 다시 계산하게 하므로 바뀔 때만 건다 */
+  function setHover(o) {
+    if (state.hover === o) return;
+    state.hover = o;
+    paintCursor(o ? 'move' : '');
+    layoutHandles();
+  }
+
+  function geomOf(o) {
+    return { anchor: o.anchor, size: o.size, dir: o.dir };
+  }
+
+  function setGeom(o, g) {
+    o.anchor = g.anchor;
+    o.size = g.size;
+    if (g.dir) o.dir = g.dir;
+  }
+
+  /* 그림을 rect(그려지는 사각형, 최상위 화면 좌표) 자리로. 끄는 동안은 최상위 문서 좌표에 붙여 두고,
+     끝나면(final) 그 사각형을 통째로 품는 가장 안쪽 요소에 다시 붙인다. 글상자 크기는 글이 정한다. */
+  function placeObject(o, rect, final) {
+    o.anchor = final ? regionAnchor(rect) : docAnchor(document, rect);
+    if (o.kind !== 'label') o.size = { w: rect.w, h: rect.h };
+    layoutMasks();
+    layoutHandles();
+  }
+
+  function grabObject(o, p) {
+    const wasSel = state.sel === o;
+    select(o);
+    state.drag = { kind: 'objMove', obj: o, x0: p.x, y0: p.y, rect0: drawnFull(o), g0: geomOf(o), wasSel, moved: false };
+  }
+
+  function updateObjMove(p) {
+    const d = state.drag;
+    const dx = p.x - d.x0;
+    const dy = p.y - d.y0;
+    if (!d.rect0 || (!d.moved && Math.abs(dx) <= 3 && Math.abs(dy) <= 3)) return;
+    d.moved = true;
+    d.rect = { x: d.rect0.x + dx, y: d.rect0.y + dy, w: d.rect0.w, h: d.rect0.h };
+    placeObject(d.obj, d.rect, false);
+  }
+
+  function startObjResize(p, dir) {
+    const o = state.sel;
+    const r = drawnFull(o);
+    if (!r || !RECT_KINDS.has(o.kind)) return;
+    state.drag = {
+      kind: 'objResize', obj: o, dir,
+      x0: p.x, y0: p.y,
+      rect0: r, g0: geomOf(o),
+      ratio: r.h > 0 ? r.w / r.h : 1,
+      moved: false
+    };
+    layoutHandles();
+  }
+
+  /* 끈 쪽 변만 움직인다. 모서리를 Shift 로 끌면 가로세로 비율을 지킨다 */
+  function updateObjResize(p, keepRatio) {
+    const d = state.drag;
+    const dx = p.x - d.x0;
+    const dy = p.y - d.y0;
+    if (!d.moved && Math.abs(dx) <= 2 && Math.abs(dy) <= 2) return;
+    d.moved = true;
+    const r0 = d.rect0;
+    let x0 = r0.x;
+    let y0 = r0.y;
+    let x1 = r0.x + r0.w;
+    let y1 = r0.y + r0.h;
+    if (d.dir.includes('w')) x0 = Math.min(x1 - MIN_OBJ, x0 + dx);
+    if (d.dir.includes('e')) x1 = Math.max(x0 + MIN_OBJ, x1 + dx);
+    if (d.dir.includes('n')) y0 = Math.min(y1 - MIN_OBJ, y0 + dy);
+    if (d.dir.includes('s')) y1 = Math.max(y0 + MIN_OBJ, y1 + dy);
+    if (keepRatio && d.ratio > 0 && d.dir.length === 2) {
+      let w = x1 - x0;
+      let h = y1 - y0;
+      if (w / h > d.ratio) h = w / d.ratio;
+      else w = h * d.ratio;
+      if (d.dir.includes('w')) x0 = x1 - w; else x1 = x0 + w;
+      if (d.dir.includes('n')) y0 = y1 - h; else y1 = y0 + h;
+    }
+    d.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    placeObject(d.obj, d.rect, false);
+  }
+
+  /* 화살표 한쪽 끝을 끈다 */
+  function startArrowEnd(p, end) {
+    const o = state.sel;
+    if (!o || o.kind !== 'arrow' || !o.last) return;
+    const ends = arrowEnds(o, o.last);
+    state.drag = {
+      kind: 'arrowEnd', obj: o, end,
+      from: ends[end], other: ends[end === 'head' ? 'tail' : 'head'],
+      x0: p.x, y0: p.y, g0: geomOf(o), moved: false
+    };
+  }
+
+  function updateArrowEnd(p) {
+    const d = state.drag;
+    const dx = p.x - d.x0;
+    const dy = p.y - d.y0;
+    if (!d.moved && Math.abs(dx) <= 2 && Math.abs(dy) <= 2) return;
+    d.moved = true;
+    const q = { x: d.from.x + dx, y: d.from.y + dy };
+    d.rect = d.end === 'head' ? setArrow(d.obj, d.other, q, false) : setArrow(d.obj, q, d.other, false);
+  }
+
+  /* 옮기기·크기·화살표 끝 끌기를 마친다 */
+  function endObjDrag(d) {
+    const o = d.obj;
+    if (!d.moved || !d.rect) {
+      // 누르기만 했다. 이미 골라 둔 글상자를 다시 누르면 글을 고친다
+      if (d.kind === 'objMove' && o.kind === 'label' && d.wasSel && alive(o)) startNoteEdit(o, false);
+      return;
+    }
+    placeObject(o, d.rect, true);
+    const g0 = d.g0;
+    push(d.kind, o, () => { setGeom(o, g0); layoutMasks(); });
+  }
+
+  /* 방향키로 고른 그림을 옮긴다. 짧은 시간 안에 이어 누르면 한 작업으로 묶는다 */
+  function nudgeObject(o, dx, dy) {
+    const r = drawnFull(o);
+    if (!r) return;
+    const g0 = geomOf(o);
+    placeObject(o, { x: r.x + dx, y: r.y + dy, w: r.w, h: r.h }, true);
+    pushNudge('objMove', o, () => { setGeom(o, g0); layoutMasks(); });
+  }
+
+  /* 고른 그림을 지운다 (Ctrl+Z 로 되살린다) */
+  function removeObject(o) {
+    let back;
+    if (o.kind === 'crop' || o.kind === 'spot') {
+      if (state[o.kind] !== o) return;
+      state[o.kind] = null;
+      back = () => { state[o.kind] = o; };
+    } else {
+      const list = o.kind === 'mask' ? state.masks : state.notes;
+      const layer = o.kind === 'mask' ? ui.masks : ui.notes;
+      const i = list.indexOf(o);
+      if (i < 0) return;
+      const next = o.box.nextSibling;
+      list.splice(i, 1);
+      o.box.remove();
+      back = () => {
+        list.splice(Math.min(i, list.length), 0, o);
+        layer.insertBefore(o.box, next && next.parentNode === layer ? next : null);
+      };
+    }
+    if (state.sel === o) state.sel = null;
+    if (state.hover === o) { state.hover = null; paintCursor(); }
+    push('remove', null, () => { back(); layoutMasks(); });
+    reposition();
   }
 
   /* ============================================================ 6 영역
@@ -1359,7 +2004,7 @@
 
   function setCrop(anchor, size) {
     const prev = state.crop;
-    state.crop = { anchor, size, view: null, last: null };
+    state.crop = { kind: 'crop', anchor, size, view: null, last: null };
     layoutMasks();
     push('crop', null, () => { state.crop = prev; layoutMasks(); });
     const v = state.crop.view;
@@ -1437,16 +2082,28 @@
     const p = pt(e);
     if (state.drag) {
       block(e);
-      if (state.drag.kind === 'move') updateMove(p);
-      else if (state.drag.kind === 'resize') updateResize(p, e.shiftKey);
-      else if (state.drag.kind === 'marquee') updateMarquee(p);
+      const k = state.drag.kind;
+      if (k === 'move') updateMove(p);
+      else if (k === 'resize') updateResize(p, e.shiftKey);
+      else if (k === 'marquee') updateMarquee(p);
+      else if (k === 'objMove') updateObjMove(p);
+      else if (k === 'objResize') updateObjResize(p, e.shiftKey);
+      else if (k === 'arrow') updateArrowDraw(p);
+      else if (k === 'arrowEnd') updateArrowEnd(p);
       return;
     }
     if (inOurUI(e)) return;
     state.pointer.x = p.x;
     state.pointer.y = p.y;
-    if (state.busy || state.editing) return;
+    if (state.busy || state.editing || state.noteEdit) return;
     if (!host.isConnected) mountHost();
+    // 지금 도구로 그린 것 위면 그것을 잡을 수 있다고 보여 주고, 요소는 고르지 않는다
+    const over = OBJ_TOOLS.has(state.tool) && !e.shiftKey ? hitObject(state.tool, p) : null;
+    setHover(over);
+    if (over || FREE_TOOLS.has(state.tool)) {
+      if (state.candidate) setCandidate(null);
+      return;
+    }
     setCandidate(pickAt(p.x, p.y));
   }
 
@@ -1454,9 +2111,24 @@
     if (inOurUI(e) || inEditing(e)) return;
     if (state.busy) { block(e); return; }
     block(e);
+    state.eatClick = false;
+
+    // 글상자에 쓰는 중이면 바깥을 누른 것은 쓰기만 끝낸다
+    if (state.noteEdit) {
+      endNoteEdit();
+      state.eatClick = true;
+      return;
+    }
 
     const p = pt(e);
+    if (OBJ_TOOLS.has(state.tool) && !e.shiftKey) {
+      const hit = hitObject(state.tool, p);
+      if (hit) { grabObject(hit, p); return; }
+    }
+    if (state.sel) select(null);
+
     if (state.tool === 'move') startMove(p);
+    else if (state.tool === 'arrow') startArrow(p);
     else if (AREA_TOOLS.has(state.tool) && e.shiftKey) startMarquee(p);
     else if (AREA_TOOLS.has(state.tool) && !state.candidate) startMarquee(p);
   }
@@ -1466,9 +2138,12 @@
     block(e);
     const d = state.drag;
     state.drag = null;
-    state.justDragged = d.moved;
+    // 그린 것을 잡았거나 화살표를 그렸으면 움직이지 않았어도 뒤따르는 클릭을 도구 동작으로 쓰지 않는다
+    state.justDragged = d.moved || d.kind === 'objMove' || d.kind === 'objResize' || d.kind === 'arrow' || d.kind === 'arrowEnd';
 
     if (d.kind === 'marquee') endMarquee(d);
+    else if (d.kind === 'objMove' || d.kind === 'objResize' || d.kind === 'arrowEnd') endObjDrag(d);
+    else if (d.kind === 'arrow') endArrow(d, pt(e));
     else if (d.moved) push(d.kind, d.el, d.restore);
     else if (d.restore) d.restore(); // 움직이지 않았으면 없던 일로
 
@@ -1481,6 +2156,7 @@
     block(e);
 
     if (e.type !== 'click' || state.busy || state.justDragged) return;
+    if (state.eatClick) { state.eatClick = false; return; }
 
     const p = pt(e);
     if (state.tool === 'hide') hideEl(state.candidate || pickAt(p.x, p.y));
@@ -1490,9 +2166,19 @@
     else if (state.tool === 'box' || state.tool === 'spot') {
       const el = state.candidate || pickAt(p.x, p.y);
       if (!pickTarget(el)) return;
-      if (state.tool === 'box') addNote({ el }, null);
+      if (state.tool === 'box') addNote('box', { el }, null);
       else setSpot({ el }, null);
     }
+    else if (state.tool === 'badge') addBadge(p);
+    else if (state.tool === 'label') newLabel(p);
+  }
+
+  /* 글상자에 쓰는 동안 키 입력이 페이지 단축키에 닿지 않게 한다 (글자는 기본 동작으로 그대로 들어간다).
+     이 오버레이 안에서 난 키 입력은 페이지에는 오버레이 요소에서 난 것으로 보여, 입력란인 줄 모르고 단축키로 받는다. */
+  function onKeyQuiet(e) {
+    if (!state.noteEdit) return;
+    e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
   }
 
   function onKey(e) {
@@ -1502,20 +2188,40 @@
       return;
     }
 
+    // 글상자: Enter·Esc 로 끝내고 Shift+Enter 는 줄바꿈. 한글 조합 중의 Enter 는 조합을 끝내는 것이라 두고 본다.
+    if (state.noteEdit) {
+      onKeyQuiet(e);
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault();
+        endNoteEdit();
+      }
+      return;
+    }
+
     if (e.key === 'Escape') {
       block(e);
       if (state.full) { state.full.cancel = true; return; } // 전체 페이지 캡처만 멈춘다
+      if (state.sel) { select(null); return; }             // 고른 그림이 있으면 고르기만 푼다
       deactivate();
       return;
     }
 
     if (state.busy) { block(e); return; }
 
-    const tool = TOOLS.find((t) => t.key === e.key);
+    // 키 위치(code)로 정한 도구는 Shift 와 함께 누르면 고르지 않는다
+    const tool = TOOLS.find((t) => (t.code ? e.code === t.code && !e.shiftKey : t.key === e.key));
     if (tool && !e.ctrlKey && !e.metaKey && !e.altKey) {
       block(e);
       setTool(tool.id);
-      toast(tool.label, 900);
+      toast(tool.hint || tool.label, tool.hint ? 1800 : 900);
+      return;
+    }
+
+    // 고른 그림 지우기
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selActive()) {
+      block(e);
+      removeObject(state.sel);
       return;
     }
 
@@ -1545,6 +2251,7 @@
     if (!dir) return;
     block(e);
 
+    if (selActive()) { nudgeObject(state.sel, dir[0] * step, dir[1] * step); return; }
     if (state.tool === 'move') { nudge(dir[0] * step, dir[1] * step); return; }
     if (state.tool === 'resize') { nudgeSize(dir[0] * step, dir[1] * step); return; }
 
@@ -1592,6 +2299,7 @@
     state.busy = true;
     lockBar(true);
     endTextEdit();
+    endNoteEdit();
     setCandidate(null);
     setStatus('캡처 중…');
 
@@ -1703,6 +2411,8 @@
    *                화면을 거의 다 덮는 것(배경·앱 틀)과 스크롤 영역을 품은 것은 그대로 둔다.
    *   sticky 요소 — 찍는 동안 제자리(position: relative)에 둬서 한 번만 나오게 한다.
    *   가리기 — 화면의 박스 레이어는 숨기고, 장마다 그때의 박스 자리를 보내 service worker 가 칠한다.
+   *   주석 — 화면에 그대로 두어 장마다 그 스크롤 위치에 그려진 채 찍힌다. 숨긴 fixed 요소 안의 것은 그 장에서 빼고,
+   *          스포트라이트는 구멍이 없는 장도 어둡게 한다(hiddenInFull·layoutSpot).
    * 찍는 동안 휠 스크롤을 막고, Esc 나 아이콘으로 멈출 수 있다. 끝나면(멈춰도) 바꾼 스타일과 스크롤 위치를 돌려놓는다.
    * 장마다 service worker 가 찍기 직전·직후에 이 탭이 아직 활성 탭인지 본다(다른 탭 화면이 섞이지 않게).
    */
@@ -1716,6 +2426,7 @@
 
   async function captureFullPage() {
     if (state.busy) return;
+    endNoteEdit(); // 쓰던 글상자는 마치고 찍는다
     const roots = [document, ...RC.shadowRoots(document)];
     const plan = fullPlan(roots);
     if (!plan) {
@@ -1728,15 +2439,14 @@
     endTextEdit();
     setCandidate(null);
 
-    const run = { plan, roots, cancel: false, id: '', undos: [], fixed: [], total: plan.total, truncated: false };
+    const run = { plan, roots, cancel: false, id: '', undos: [], fixed: [], frame: 0, total: plan.total, truncated: false };
     state.full = run;
     window.addEventListener('wheel', blockWheel, { capture: true, passive: false });
     paintCursor('progress');
 
     let res;
     try {
-      const noNotes = state.notes.length || state.spot ? ' · 강조·스포트라이트는 넣지 않습니다' : '';
-      toast(`페이지 전체를 위에서부터 찍습니다 · Esc 로 멈춤${noNotes}`, FULL_HINT_MS + (noNotes ? 1500 : 300));
+      toast('페이지 전체를 위에서부터 찍습니다 · Esc 로 멈춤', FULL_HINT_MS + 300);
       await sleep(FULL_HINT_MS);
       host.classList.add('capturing', 'capturing-full');
       mountHost(); // 그사이 열린 dialog·popover 보다 위로
@@ -1845,6 +2555,9 @@
       if (to <= covered + 0.5) break; // 더 내려가지 않는다 (찍는 동안 페이지가 짧아졌다)
 
       showFixed(run, i === 0, last);
+      // 주석을 이 장에 맞춘다 — 숨긴 fixed 요소 안의 것은 빼고, 스포트라이트는 구멍이 없는 장도 어둡게
+      run.frame = i;
+      layoutMasks();
       await settle(plan);
       if (run.cancel) return { ok: false, cancelled: true };
       if (Math.abs(offsetOf(plan) - a) > 0.01) { const e = moved(); if (e) return e; continue; }

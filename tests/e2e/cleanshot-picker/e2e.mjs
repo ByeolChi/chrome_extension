@@ -157,10 +157,14 @@ const KEYS = {
   3: { code: 'Digit3', vk: 51, text: '3' }, 4: { code: 'Digit4', vk: 52, text: '4' },
   5: { code: 'Digit5', vk: 53, text: '5' }, 6: { code: 'Digit6', vk: 54, text: '6' },
   7: { code: 'Digit7', vk: 55, text: '7' }, 8: { code: 'Digit8', vk: 56, text: '8' },
+  9: { code: 'Digit9', vk: 57, text: '9' }, 0: { code: 'Digit0', vk: 48, text: '0' },
   Enter: { code: 'Enter', vk: 13, text: '\r' }, Escape: { code: 'Escape', vk: 27 },
   Tab: { code: 'Tab', vk: 9 }, ArrowUp: { code: 'ArrowUp', vk: 38 }, ArrowDown: { code: 'ArrowDown', vk: 40 },
-  z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' },
-  c: { code: 'KeyC', vk: 67, text: 'c' }, 'ㅊ': { code: 'KeyC', vk: 67, text: 'ㅊ' }
+  ArrowLeft: { code: 'ArrowLeft', vk: 37 }, ArrowRight: { code: 'ArrowRight', vk: 39 },
+  Delete: { code: 'Delete', vk: 46 }, Backspace: { code: 'Backspace', vk: 8 },
+  z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' }, b: { code: 'KeyB', vk: 66, text: 'b' },
+  c: { code: 'KeyC', vk: 67, text: 'c' }, 'ㅊ': { code: 'KeyC', vk: 67, text: 'ㅊ' },
+  t: { code: 'KeyT', vk: 84, text: 't' }, 'ㅅ': { code: 'KeyT', vk: 84, text: 'ㅅ' }
 };
 async function key(k, modifiers = 0) {
   const d = KEYS[k];
@@ -233,6 +237,26 @@ async function captureAndRead() {
 }
 
 const scaled = (r, inset = 1) => ({ x: r.x * DPR + inset, y: r.y * DPR + inset, w: r.w * DPR - 2 * inset, h: r.h * DPR - 2 * inset });
+
+/* ---------------------------------------------------------------- 주석(9 화살표·0 번호·T 글상자)·고르기 도우미 */
+const rectOut = (r) => r && { x: r.x, y: r.y, w: r.w, h: r.h };
+const notesNow = () => iso(`window.__cleanShot.state.notes.map((n) => ({
+  kind: n.kind, text: n.text || '', num: n.num || 0, dir: n.dir || null, el: !!(n.anchor && n.anchor.el), sized: !!n.size,
+  view: n.view && { x: n.view.x, y: n.view.y, w: n.view.w, h: n.view.h }, last: n.last && { x: n.last.x, y: n.last.y, w: n.last.w, h: n.last.h } }))`);
+const selNow = () => iso(`(() => { const s = window.__cleanShot.state.sel; return s ? s.kind : null; })()`);
+const ptNear = (a, b, tol = 1.5) => !!a && !!b && Math.abs(a.x - b.x) <= tol && Math.abs(a.y - b.y) <= tol;
+const fmtPt = (p) => (p ? `${p.x.toFixed(1)},${p.y.toFixed(1)}` : 'null');
+/* 화살표의 두 끝 (picker.js 의 arrowEnds 와 같은 계산, 여백 14px) */
+function arrowEndsOf(n) {
+  const P = 14;
+  const L = n.last.x + P, R = n.last.x + n.last.w - P, T = n.last.y + P, B = n.last.y + n.last.h - P;
+  return { tail: { x: n.dir.tx ? R : L, y: n.dir.ty ? B : T }, head: { x: n.dir.tx ? L : R, y: n.dir.ty ? T : B } };
+}
+/* 보이는 핸들 (8방향 data-dir, 화살표 끝 data-end) 의 가운데 */
+const handlesNow = () => iso(`[...${UI}.querySelectorAll('.handle')].filter((h) => getComputedStyle(h).display !== 'none')
+  .map((h) => { const r = h.getBoundingClientRect(); return { id: h.dataset.dir || h.dataset.end, x: r.left + r.width / 2, y: r.top + r.height / 2 }; })`);
+const NOTE_RED = [255, 59, 48];
+const HANDLE_IDS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
 /* ---------------------------------------------------------------- 전체 페이지 캡처 도우미 */
 const sameRgb = (p, c) => !!p && !!c && p[0] === c[0] && p[1] === c[1] && p[2] === c[2];
@@ -495,7 +519,26 @@ const cases = {
     await move(10, 300);
     await sleep(100);
     await shot('notes');
-    check('화면 네 장 저장', true);
+    await key('Escape');
+    // 9 화살표·0 번호·T 글상자와 고른 화살표(두 끝 핸들), 고른 강조(8방향 핸들)
+    await activate();
+    const bn = await rectMain('#banner');
+    await key('9');
+    await drag(160, bn.y + 105, 520, bn.y + 35);
+    await key('0');
+    await click(620, bn.y + 60);
+    await click(700, bn.y + 60);
+    await key('t');
+    await click(780, bn.y + 30);
+    await cdp.send('Input.insertText', { text: '여기를 누르세요' }, pageS);
+    await key('Enter');
+    await key('7');
+    await click(center(fs2).x, center(fs2).y);
+    await click(fs2.x - 2, fs2.y + fs2.h / 2); // 테두리를 눌러 고른다
+    await move(10, 330);
+    await sleep(100);
+    await shot('annotate');
+    check('화면 다섯 장 저장', true);
   },
 
   /* 여러 요소에 걸친 영역은 예전처럼 문서 좌표에 붙는다 */
@@ -939,6 +982,295 @@ const cases = {
     const c = await captureAndRead();
     const cEdge = c.img ? pixel(c.img, Math.round((M - 2) * DPR), Math.round((M + r.h / 2) * DPR)) : null;
     check('영역으로 잘라도 강조 테두리가 함께 들어감', !!c.img && red(cEdge), `${c.img ? `${c.img.width}×${c.img.height}` : 'no file'} edge=${cEdge}`);
+    await sleep(900);
+  },
+
+  /* 9 화살표·0 번호·T 글상자: 그리기, 캡처 PNG 에 찍힘, 글상자에 쓰는 키가 페이지 단축키에 닿지 않음 */
+  async annotate() {
+    const red = (p) => !!p && p[0] > 200 && p[1] < 110 && p[2] < 110;
+    const BANNER = [0, 128, 255];
+    await freshPage();
+    await activate();
+    const b = await rectMain('#banner'); // 파란 띠 — 이 위에 그린다
+
+    // 1) 화살표: 꼬리에서 머리 쪽으로 끈다
+    await key('9');
+    const A0 = { x: 200, y: b.y + 100 };
+    const A1 = { x: 560, y: b.y + 30 };
+    await drag(A0.x, A0.y, A1.x, A1.y);
+    let ns = await notesNow();
+    const a1 = ns.find((n) => n.kind === 'arrow');
+    const e1 = a1 && a1.last ? arrowEndsOf(a1) : null;
+    check('화살표(9): 끈 방향으로 꼬리·머리가 놓임', !!e1 && ptNear(e1.tail, A0) && ptNear(e1.head, A1),
+      e1 ? `tail=${fmtPt(e1.tail)} head=${fmtPt(e1.head)}` : JSON.stringify(ns));
+
+    // 2) 그냥 누르면 누른 곳을 머리로 하는 화살표 (왼쪽 아래에서)
+    const C = { x: 900, y: b.y + 60 };
+    await click(C.x, C.y);
+    ns = await notesNow();
+    const a2 = ns.filter((n) => n.kind === 'arrow')[1];
+    const e2 = a2 && a2.last ? arrowEndsOf(a2) : null;
+    check('화살표: 그냥 누르면 누른 곳을 가리키는 화살표', !!e2 && ptNear(e2.head, C) && e2.tail.x < C.x - 30 && e2.tail.y > C.y + 30,
+      e2 ? `tail=${fmtPt(e2.tail)} head=${fmtPt(e2.head)}` : JSON.stringify(ns));
+
+    // 3) 번호: 누를 때마다 1, 2
+    await key('0');
+    const B1 = { x: 700, y: b.y + 60 };
+    const B2 = { x: 780, y: b.y + 60 };
+    await click(B1.x, B1.y);
+    await click(B2.x, B2.y);
+    const badgeText = await iso(`[...${UI}.querySelectorAll('.note-badge')].map((e) => e.textContent)`);
+    check('번호(0): 누를 때마다 1, 2 가 붙음', JSON.stringify(badgeText) === '["1","2"]', badgeText);
+
+    // 4) 글상자: 한글 입력 상태(ㅅ)로 눌러도 T. 누른 곳에서 바로 쓰고 Shift+Enter 줄바꿈, Enter 로 끝냄
+    await main(`window.__pageKeys = 0; document.addEventListener('keydown', () => { window.__pageKeys++; }); true`);
+    await key('ㅅ');
+    const tool = await iso('window.__cleanShot.state.tool');
+    await click(1000, b.y + 20);
+    const editing = await iso('!!window.__cleanShot.state.noteEdit');
+    await key('a');
+    await cdp.send('Input.insertText', { text: '확인' }, pageS);
+    await key('Enter', SHIFT);
+    await cdp.send('Input.insertText', { text: '필요' }, pageS);
+    await key('Enter');
+    ns = await notesNow();
+    const lb = ns.find((n) => n.kind === 'label');
+    const done = !(await iso('!!window.__cleanShot.state.noteEdit'));
+    check('글상자(T·ㅅ): 누른 곳에서 바로 쓰고, Shift+Enter 줄바꿈, Enter 로 끝냄',
+      tool === 'label' && editing && done && !!lb && lb.text === 'a확인\n필요', `tool=${tool} editing=${editing} done=${done} text=${JSON.stringify(lb && lb.text)}`);
+    const keys1 = await main('window.__pageKeys');
+    await key('b'); // 피커가 쓰지 않는 키는 페이지로 간다 — 페이지 리스너가 살아 있음을 확인
+    const keys2 = await main('window.__pageKeys');
+    check('글상자에 쓰는 동안 누른 키가 페이지 단축키(keydown)에 닿지 않음', keys1 === 0 && keys2 === 1, { keys1, keys2 });
+
+    // 5) 캡처 PNG 에 셋 다 찍힘
+    const shot = await captureAndRead();
+    if (!shot.img) { check('주석 캡처 PNG', false, 'no file'); return; }
+    const at = (x, y) => pixel(shot.img, Math.round(x * DPR), Math.round(y * DPR));
+    const mid = { x: (A0.x + A1.x) / 2, y: (A0.y + A1.y) / 2 };
+    const len = Math.hypot(A1.x - A0.x, A1.y - A0.y);
+    const ux = (A1.x - A0.x) / len;
+    const uy = (A1.y - A0.y) / len;
+    const side = { x: mid.x - uy * 20, y: mid.y + ux * 20 };       // 몸통에서 옆으로 20px
+    const nearTip = { x: A1.x - ux * 6, y: A1.y - uy * 6 };         // 머리 끝에서 6px 안쪽
+    check('캡처 PNG: 화살표 몸통·머리는 빨강, 옆은 바탕 그대로', red(at(mid.x, mid.y)) && red(at(nearTip.x, nearTip.y)) && sameRgb(at(side.x, side.y), BANNER),
+      `mid=${at(mid.x, mid.y)} tip=${at(nearTip.x, nearTip.y)} side=${at(side.x, side.y)}`);
+    const ring = at(B1.x, B1.y - 13);
+    check('캡처 PNG: 번호 배지는 빨간 원에 흰 테두리', red(at(B1.x - 8, B1.y + 6)) && ring[0] > 200 && ring[1] > 200 && ring[2] > 200,
+      `fill=${at(B1.x - 8, B1.y + 6)} ring=${ring}`);
+    const L = lb.last;
+    check('캡처 PNG: 글상자는 빨간 바탕, 바깥은 그대로', sameRgb(at(L.x + 3, L.y + L.h / 2), NOTE_RED) && sameRgb(at(L.x - 6, L.y + L.h / 2), BANNER),
+      `in=${at(L.x + 3, L.y + L.h / 2)} out=${at(L.x - 6, L.y + L.h / 2)} ${fmt(L)}`);
+    await sleep(900);
+  },
+
+  /* 그린 것 고르기·옮기기·크기·지우기: 테두리를 끌어 옮김, 핸들로 크기, 화살표 끝, Delete, Esc 는 고르기만, 글상자 다시 쓰기, 가리기 옮김 */
+  async grab() {
+    const grow = (r, d) => ({ x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d });
+    await freshPage();
+    await activate();
+
+    // 1) 강조를 테두리에서 끌면 옮겨지고 골라짐 (8방향 핸들)
+    await key('7');
+    const r = await rectMain('#flowSecret');
+    await click(center(r).x, center(r).y);
+    const d0 = grow((await notesNow())[0].view, 3); // 요소를 감싼 강조는 바깥으로 3px
+    await drag(d0.x + 1, d0.y + d0.h / 2, d0.x + 61, d0.y + d0.h / 2 + 40);
+    const n1 = (await notesNow())[0];
+    const hs1 = await handlesNow();
+    check('강조를 테두리에서 끌면 옮겨짐 (+60, +40)', near(n1.view, { x: d0.x + 60, y: d0.y + 40, w: d0.w, h: d0.h }), `${fmt(n1.view)} 기대 ${fmt({ x: d0.x + 60, y: d0.y + 40, w: d0.w, h: d0.h })}`);
+    check('옮긴 강조가 골라지고 8방향 핸들이 그 둘레에 보임', (await selNow()) === 'box' && hs1.filter((h) => HANDLE_IDS.includes(h.id)).length === 8 &&
+      ptNear(hs1.find((h) => h.id === 'nw'), { x: d0.x + 60, y: d0.y + 40 }, 1), JSON.stringify(hs1.map((h) => h.id)));
+
+    // 2) 모서리 핸들로 크기
+    const se = hs1.find((h) => h.id === 'se');
+    await drag(se.x, se.y, se.x + 30, se.y + 20);
+    const n2 = (await notesNow())[0];
+    check('고른 강조의 모서리 핸들을 끌면 크기가 바뀜 (+30, +20)', Math.abs(n2.view.w - (d0.w + 30)) < 1.5 && Math.abs(n2.view.h - (d0.h + 20)) < 1.5 && ptNear(n2.view, n1.view),
+      `${fmt(n2.view)} (전 ${fmt(n1.view)})`);
+
+    // 3) Ctrl+Z 두 번 → 처음처럼 요소를 감쌈
+    await key('z', CTRL);
+    await key('z', CTRL);
+    const n3 = (await notesNow())[0];
+    check('Ctrl+Z 두 번으로 크기·자리가 처음대로 (다시 요소를 따라 감쌈)', n3.el && !n3.sized && near(grow(n3.view, 3), d0), `${fmt(grow(n3.view, 3))} vs ${fmt(d0)}`);
+
+    // 4) 안쪽을 누르면 잡지 않고 지금처럼 요소를 고른다 → 강조가 하나 더
+    await click(center(r).x, center(r).y);
+    check('테두리만 잡힘: 강조 안쪽을 누르면 요소 강조가 하나 더 생김', (await notesNow()).length === 2, (await notesNow()).length);
+    await key('z', CTRL);
+
+    // 5) 화살표: 몸통을 눌러 고르면 두 끝 핸들, 머리 핸들을 끌면 머리만 옮겨짐
+    await key('9');
+    const b = await rectMain('#banner');
+    const T = { x: 200, y: b.y + 100 };
+    const H = { x: 400, y: b.y + 30 };
+    await drag(T.x, T.y, H.x, H.y);
+    await click((T.x + H.x) / 2, (T.y + H.y) / 2);
+    const hs2 = await handlesNow();
+    const headH = hs2.find((h) => h.id === 'head');
+    check('화살표를 누르면 골라지고 두 끝에 핸들', (await selNow()) === 'arrow' && hs2.length === 2 && ptNear(headH, H, 1) && ptNear(hs2.find((h) => h.id === 'tail'), T, 1),
+      JSON.stringify(hs2));
+    const H2 = { x: 520, y: b.y + 80 };
+    await drag(headH.x, headH.y, H2.x, H2.y);
+    const ar = (await notesNow()).find((n) => n.kind === 'arrow');
+    const ae = arrowEndsOf(ar);
+    check('머리 핸들을 끌면 머리만 옮겨짐', ptNear(ae.head, H2) && ptNear(ae.tail, T), `tail=${fmtPt(ae.tail)} head=${fmtPt(ae.head)}`);
+
+    // 6) 방향키로 1px·Shift 10px 옮기기, Ctrl+Z 한 번에 묶여 풀림
+    const before = arrowEndsOf((await notesNow()).find((n) => n.kind === 'arrow'));
+    await key('ArrowRight');
+    await key('ArrowRight', SHIFT);
+    const moved = arrowEndsOf((await notesNow()).find((n) => n.kind === 'arrow'));
+    await key('z', CTRL);
+    const back = arrowEndsOf((await notesNow()).find((n) => n.kind === 'arrow'));
+    check('고른 화살표를 방향키로 옮김 (1px + Shift 10px), Ctrl+Z 한 번에 되돌림',
+      Math.abs(moved.head.x - before.head.x - 11) < 0.6 && ptNear(back.head, before.head, 0.6) && ptNear(back.tail, before.tail, 0.6),
+      `before=${fmtPt(before.head)} moved=${fmtPt(moved.head)} back=${fmtPt(back.head)}`);
+
+    // 7) Delete 로 지우고 Ctrl+Z 로 되살림. Esc 는 고르기만 풀고, 한 번 더 누르면 닫힘
+    await key('0');
+    const P = { x: 760, y: b.y + 60 };
+    await click(P.x, P.y);
+    await click(P.x, P.y); // 그린 번호를 누르면 골라진다 (새 번호가 생기지 않음)
+    const one = (await notesNow()).filter((n) => n.kind === 'badge').length;
+    const selB = await selNow();
+    await key('Delete');
+    const gone = (await notesNow()).filter((n) => n.kind === 'badge').length;
+    await key('z', CTRL);
+    const again = (await notesNow()).filter((n) => n.kind === 'badge').length;
+    check('번호를 누르면 골라지고(새로 생기지 않음) Delete 로 지움, Ctrl+Z 로 되살림', one === 1 && selB === 'badge' && gone === 0 && again === 1, { one, selB, gone, again });
+    await click(P.x, P.y);
+    await key('Escape');
+    const stillOn = await iso('window.__cleanShot.state.active && !window.__cleanShot.state.sel');
+    check('고른 것이 있을 때 Esc 는 고르기만 풀고 피커는 켜진 채', stillOn);
+
+    // 8) 고른 글상자를 한 번 더 누르면 글을 고침, Ctrl+Z 로 이전 글
+    await key('t');
+    const Lp = { x: 1000, y: b.y + 30 };
+    await click(Lp.x, Lp.y);
+    await cdp.send('Input.insertText', { text: '처음' }, pageS);
+    await key('Enter');
+    let lb = (await notesNow()).find((n) => n.kind === 'label');
+    const lc = { x: lb.view.x + lb.view.w / 2, y: lb.view.y + lb.view.h / 2 };
+    await click(lc.x, lc.y);            // 고르기
+    const editA = await iso('!!window.__cleanShot.state.noteEdit');
+    await click(lc.x, lc.y);            // 한 번 더 → 고치기
+    const editB = await iso('!!window.__cleanShot.state.noteEdit');
+    await cdp.send('Input.insertText', { text: ' 다음' }, pageS);
+    await key('Escape');                 // Esc 도 쓰기를 끝낸다 (글은 남김)
+    lb = (await notesNow()).find((n) => n.kind === 'label');
+    const t1 = lb.text;
+    await key('z', CTRL);
+    const t2 = (await notesNow()).find((n) => n.kind === 'label').text;
+    check('고른 글상자를 한 번 더 누르면 고쳐 쓰고(Esc 로 끝내도 글은 남음), Ctrl+Z 로 이전 글', !editA && editB && t1 === '처음 다음' && t2 === '처음', { editA, editB, t1, t2 });
+    // 빈 글상자는 남지 않는다
+    await click(Lp.x, Lp.y + 200);
+    await key('Escape');
+    check('아무것도 쓰지 않은 글상자는 없어짐', (await notesNow()).filter((n) => n.kind === 'label').length === 1);
+    await key('Escape');
+    await key('Escape');
+    check('Esc 를 더 누르면 닫힘', !(await iso('window.__cleanShot.state.active')));
+
+    // 9) 가리기 박스를 끌어 옮기면 캡처 PNG 의 새 자리가 검정, 원래 자리는 그대로. 고른 표시(점선)는 찍히지 않음
+    await sleep(300);
+    await activate();
+    await key('5');
+    const fsr = await rectMain('#fixedSecret');
+    await click(center(fsr).x, center(fsr).y);
+    await drag(center(fsr).x, center(fsr).y, center(fsr).x - 400, center(fsr).y);
+    const mv = (await masks())[0];
+    const selbox = await uiRect('.selbox');
+    check('가리기 박스를 끌어 옮김 (-400)', near(mv, { x: fsr.x - 400, y: fsr.y, w: fsr.w, h: fsr.h }), `${fmt(mv)} vs ${fmt({ x: fsr.x - 400, y: fsr.y, w: fsr.w, h: fsr.h })}`);
+    const shot = await captureAndRead();
+    if (!shot.img) { check('옮긴 가리기 캡처 PNG', false, 'no file'); return; }
+    const black = blackRatio(shot.img, ...Object.values(scaled(mv)));
+    const orig = pixel(shot.img, Math.round((fsr.x + fsr.w - 6) * DPR), Math.round((fsr.y + fsr.h - 6) * DPR)); // 글자 없는 모서리
+    const dash = pixel(shot.img, Math.round((selbox.x - 4) * DPR), Math.round((selbox.y + selbox.h / 2) * DPR));
+    check('캡처 PNG: 옮긴 자리가 검정이고 원래 자리는 빨강 그대로', black > 0.999 && orig[0] > 200 && orig[1] < 40, `black=${black.toFixed(4)} orig=${orig}`);
+    check('캡처 PNG: 고른 표시(파란 점선)는 찍히지 않음', sameRgb(dash, [200, 200, 200]), `${dash} at ${fmt(selbox)}`);
+    await sleep(900);
+  },
+
+  /* 전체 페이지 캡처에 주석: 이음매에 걸친 강조에 가짜 줄이 없음, 아래쪽 번호는 제자리에 한 번, 머리글 안 강조는 첫 장에만,
+     스포트라이트는 구멍이 없는 장도 어둡게 */
+  async fullPageNotes() {
+    await freshPage(FULL_URL());
+    const L = await fullLayout();
+    await activate();
+    // 머리글 안 요소 강조 (첫 장에만 나와야 한다)
+    await key('7');
+    const hs = await rectMain('#hdrSecret');
+    await click(center(hs).x, center(hs).y);
+    // 툴바를 위로 옮기고, 첫 장과 둘째 장의 이음매(문서 y = 화면 높이 - 1)에 걸친 강조를 끈다
+    await key('Tab');
+    await main('scrollTo(0, 100)');
+    await sleep(200);
+    const vh = L.vh;
+    await drag(900, vh - 160, 1100, vh - 60, SHIFT);
+    const seam = { x: 900, y: vh - 60, w: 200, h: 100 }; // 문서 좌표
+    // 아래쪽 띠 30 위에 번호
+    await key('0');
+    await main(`document.getElementById('band30').scrollIntoView({ block: 'center' })`);
+    await sleep(200);
+    const b30 = await rectMain('#band30');
+    const sy30 = await main('scrollY');
+    await click(600, b30.y + 50);
+    const badgeDoc = { x: 600, y: b30.y + 50 + sy30 };
+    await main('scrollTo(0, 0)');
+    await sleep(200);
+    const nn = await notesNow();
+    check('전체 페이지 주석 준비: 강조 2개와 번호 1개', nn.filter((n) => n.kind === 'box').length === 2 && nn.filter((n) => n.kind === 'badge').length === 1, nn.map((n) => n.kind));
+
+    const shot = await fullShot(() => key('Enter', SHIFT));
+    if (!shot.img) { check('주석 넣은 전체 페이지 PNG', false, `파일 없음 ${JSON.stringify(shot.toasts)}`); return; }
+    const img = shot.img;
+    const at = (x, y) => pixel(img, Math.round(x * DPR), Math.round(y * DPR));
+    const exp = fullExpect(L);
+    check('전체 페이지 안내에 "주석은 넣지 않습니다" 류 문구가 없음', !shot.toasts.some((t) => /넣지 않습니다/.test(t)), shot.toasts);
+
+    // 이음매에 걸친 강조: 안쪽 세로줄에는 위·아래 테두리 말고 빨간 줄이 없다 (잘린 자리에 가짜 테두리를 긋지 않음)
+    const inside = columnErrors(img, seam.x + 100, DPR, (y) => {
+      if (y >= seam.y - 2 && y < seam.y + 5) return null;
+      if (y >= seam.y + seam.h - 5 && y < seam.y + seam.h + 2) return null;
+      return exp(y);
+    });
+    check('이음매에 걸친 강조: 안쪽 세로줄 전체가 문서와 같음 (이음매에 가짜 테두리 없음)', inside.length === 0, inside.slice(0, 4));
+    const edge = columnErrors(img, seam.x + 1, DPR, (y) => (y >= seam.y + 6 && y < seam.y + seam.h - 6 ? NOTE_RED : null));
+    check('이음매에 걸친 강조: 왼쪽 테두리가 이음매를 지나 끊기지 않음', edge.length === 0, edge.slice(0, 4));
+    check('이음매에 걸친 강조: 위·아래 테두리가 문서 자리에', sameRgb(at(seam.x + 100, seam.y + 1), NOTE_RED) && sameRgb(at(seam.x + 100, seam.y + seam.h - 2), NOTE_RED),
+      [at(seam.x + 100, seam.y + 1), at(seam.x + 100, seam.y + seam.h - 2)]);
+
+    // 아래쪽 번호: 제자리에 한 번
+    const fill = at(badgeDoc.x - 8, badgeDoc.y + 6);
+    check('아래쪽 번호: 문서 제자리에 찍힘', fill[0] > 200 && fill[1] < 110 && fill[2] < 110, `${fill} at ${fmtPt(badgeDoc)}`);
+    const colB = columnErrors(img, badgeDoc.x - 8, DPR, (y) => (Math.abs(y - badgeDoc.y) < 19 ? null : exp(y)));
+    check('아래쪽 번호: 다른 장에 되풀이되지 않음 (그 세로줄 나머지가 문서와 같음)', colB.length === 0, colB.slice(0, 4));
+
+    // 머리글 안 강조: 맨 위에 한 번, 아래 장들에는 없음
+    check('머리글 안 요소 강조: 맨 위에 찍힘', sameRgb(at(hs.x - 2, hs.y + hs.h / 2), NOTE_RED), at(hs.x - 2, hs.y + hs.h / 2));
+    // 이 세로줄은 페이지의 빨간 #deep 도 지난다 (가리지 않았으므로 빨강 그대로)
+    const colH = columnErrors(img, hs.x - 2, DPR, (y) => (y >= L.deep.y && y < L.deep.y + L.deep.h ? [255, 0, 0] : exp(y)));
+    check('머리글 안 요소 강조: 다음 장들에 되풀이되지 않음', colH.length === 0, colH.slice(0, 4));
+    await sleep(900);
+
+    // 스포트라이트: 구멍(띠 5)만 밝고, 구멍이 없는 장(띠 25)도 어둡게
+    await freshPage(FULL_URL());
+    const L2 = await fullLayout();
+    await activate();
+    await key('8');
+    const b5 = await rectMain('#band5');
+    await click(1000, b5.y + 50);
+    const shot2 = await fullShot(() => key('Enter', SHIFT));
+    if (!shot2.img) { check('스포트라이트 전체 페이지 PNG', false, `파일 없음 ${JSON.stringify(shot2.toasts)}`); return; }
+    const at2 = (x, y) => pixel(shot2.img, Math.round(x * DPR), Math.round(y * DPR));
+    const half = (got, c) => !!got && got.slice(0, 3).every((v, i) => Math.abs(v - c[i] / 2) <= 3);
+    const in5 = at2(1000, L2.bands[5].y + 50);
+    const out25 = at2(1000, L2.bands[25].y + 50);
+    const out1 = at2(1000, L2.bands[1].y + 50);
+    check('전체 페이지 스포트라이트: 구멍은 그대로, 같은 장 바깥(띠 1)과 구멍이 없는 장(띠 25)은 어둡게',
+      sameRgb(in5, L2.bands[5].c) && half(out1, L2.bands[1].c) && half(out25, L2.bands[25].c),
+      { in5, c5: L2.bands[5].c, out1, c1: L2.bands[1].c, out25, c25: L2.bands[25].c });
     await sleep(900);
   },
 
