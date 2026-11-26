@@ -17,6 +17,7 @@ import { prepareRequest } from './prepare.js';
 import { findInCollections } from './model.js';
 import { parseCurl } from './curl-parser.js';
 import { curlOptsOf, parseExtraArgs } from './curl-runner.js';
+import { vault } from './secrets.js';
 
 const MOD = isMac() ? '⌘' : 'Ctrl';
 let sidebar;
@@ -40,6 +41,12 @@ async function boot() {
   if ((app.store.notes || []).includes('timeout')) {
     toast(`기본 타임아웃을 60초로 바꿨습니다. 응답을 더 오래 기다려야 하면 설정에서 늘리거나 0(무제한)으로 두세요.`, 'info', 8000);
   }
+  // 비밀 변수 보관함이 잠겨 있으면 알린다 (그 변수를 쓰는 요청을 보낼 때 비밀번호를 묻는다)
+  if (vault.locked && countSecretRows()) toast('비밀 변수가 잠겨 있습니다. 그 변수를 쓰는 요청을 보낼 때 비밀번호를 묻습니다.', 'info', 6000);
+  vault.onChange(() => {
+    app.ui.refreshVars && app.ui.refreshVars();
+    for (const t of app.tabs) if (t.type !== 'request' && app.ui.refreshView) app.ui.refreshView(t);
+  });
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.pendingImport && changes.pendingImport.newValue) handlePendingImport();
@@ -49,6 +56,7 @@ async function boot() {
   const flushAll = () => {
     app.store.pending.add('workspace');
     app.store.flush();
+    vault.flushNow();
   };
   window.addEventListener('pagehide', flushAll);
   document.addEventListener('visibilitychange', () => {
@@ -495,6 +503,57 @@ function envMenu() {
   openMenu(dom.envBtn, items, { alignRight: true, minWidth: 220 });
 }
 
+/* ---------------- 비밀 변수 보관함 ---------------- */
+function countSecretRows() {
+  return app.secretCount();
+}
+
+// 잠긴 보관함의 비밀번호를 묻고 연다. 열었으면 true (취소하면 false). names: 이 요청이 쓰는 잠긴 변수 (안내용)
+function askVaultPassword(names = []) {
+  return new Promise((resolve) => {
+    let result = false;
+    const input = h('input.input', { type: 'password', autocomplete: 'current-password', autofocus: true, 'aria-label': '비밀 변수 비밀번호' });
+    const err = h('div.field-err');
+    const okBtn = h('button.btn.btn-primary', '잠금 해제');
+    const submit = async () => {
+      if (!input.value) return input.focus();
+      okBtn.disabled = true;
+      err.textContent = '확인하는 중…';
+      const ok = await vault.unlock(input.value);
+      okBtn.disabled = false;
+      if (!ok) {
+        err.textContent = '비밀번호가 맞지 않습니다.';
+        input.select();
+        return;
+      }
+      result = true;
+      m.close();
+    };
+    okBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) submit();
+    });
+    const m = openModal({
+      title: '비밀 변수 잠금 해제',
+      subtitle: names.length ? `이 요청이 쓰는 비밀 변수: ${names.map((n) => `{{${n}}}`).join(', ')}` : '',
+      width: 440,
+      body: h('div',
+        h('label.field', h('span.field-label', '비밀번호'), input),
+        err,
+        h('div.muted', '비밀 변수 보관함을 만들 때 정한 비밀번호입니다. 연 상태는 브라우저를 닫을 때까지 유지됩니다(설정에서 언제든 다시 잠글 수 있습니다).')),
+      footer: [h('button.btn', { onclick: () => m.close() }, '취소'), okBtn],
+      onClose: () => resolve(result),
+    });
+  });
+}
+
+// 변수 표 위의 띠: 보관함이 잠겨 있고 이 표에 비밀 변수가 있으면 잠금 해제 단추
+function vaultBanner(vars, rerender) {
+  if (!vault.locked || !(vars || []).some((v) => v && v.secret)) return null;
+  return h('div.vault-banner', icon('lock', 14), '비밀 변수가 잠겨 있어 값을 보거나 고칠 수 없습니다.',
+    h('button.btn.btn-sm', { onclick: async () => { if (await app.unlockSecrets()) rerender && rerender(); } }, '잠금 해제'));
+}
+
 // SSH 비밀번호 입력 (취소하면 null)
 function askSshPassword(env, ssh) {
   return new Promise((resolve) => {
@@ -578,22 +637,31 @@ function applySplitAll() {
 }
 
 /* ---------------- cURL 복사 ---------------- */
+// 클립보드로 나가는 명령에는 비밀 변수의 값 대신 {{이름}} 을 넣는다 (메신저·티켓에 붙여 넣어 새지 않게).
+// 값까지 넣은 명령은 코드 창의 "비밀 값 넣기"를 켜고 복사한다.
+function maskedNote(scope, text) {
+  const names = [...scope.entries()].filter(([, e]) => e.secret).map(([k]) => k).filter((k) => text.includes(`{{${k}}}`));
+  return names.length ? ` · 비밀 변수 ${names.map((n) => `{{${n}}}`).join(', ')} 는 값 대신 이름으로 넣었습니다` : '';
+}
 async function copyAsCurl(tab) {
   try {
-    const p = await app.buildPrepared(tab, { engine: 'curl' });
-    const ok = await copyText(app.curlCommandFor(tab, p));
-    toast(ok ? 'cURL 명령을 복사했습니다.' : '복사 실패', ok ? 'success' : 'error');
+    const p = await app.buildPrepared(tab, { engine: 'curl', mask: true });
+    const text = app.curlCommandFor(tab, p);
+    const ok = await copyText(text);
+    toast(ok ? 'cURL 명령을 복사했습니다' + maskedNote(app.getScope(tab, { mask: true }), text) : '복사 실패', ok ? 'success' : 'error', 4000);
   } catch (e) {
     toast('복사 실패: ' + e.message, 'error');
   }
 }
 async function copyRequestAsCurl(request, itemId = null) {
   const inh = app.getInheritedAuth(itemId);
-  const p = prepareRequest(request, { scope: app.getScope(itemId ? { type: 'request', itemId } : null), inheritedAuth: inh ? inh.auth : null, defaults: app.settings, forCurl: true });
+  const scope = app.getScope(itemId ? { type: 'request', itemId } : null, { mask: true });
+  const p = prepareRequest(request, { scope, inheritedAuth: inh ? inh.auth : null, defaults: app.settings, forCurl: true });
   // 탭의 cURL 복사와 같게 cURL 탭 옵션(-k, --ntlm 같은 추가 인자 등)을 반영
   const curl = curlOptsOf(request);
-  const ok = await copyText(generateCode('curl', p, { curl: { ...curl, extraArgs: parseExtraArgs(curl.extra).args } }));
-  toast(ok ? 'cURL 명령을 복사했습니다.' : '복사 실패', ok ? 'success' : 'error');
+  const text = generateCode('curl', p, { curl: { ...curl, extraArgs: parseExtraArgs(curl.extra).args } });
+  const ok = await copyText(text);
+  toast(ok ? 'cURL 명령을 복사했습니다' + maskedNote(scope, text) : '복사 실패', ok ? 'success' : 'error', 4000);
 }
 function copyItemAsCurl(itemId) {
   const hit = findInCollections(app.state.collections, itemId);
@@ -755,6 +823,8 @@ function wireUi() {
     copyRequestAsCurl: (req, itemId = null) => copyRequestAsCurl(req, itemId && findInCollections(app.state.collections, itemId) ? itemId : null),
     askSshPassword,
     askTrustHostKey,
+    askVaultPassword,
+    vaultBanner,
     applyTheme,
     applySplitAll,
   };

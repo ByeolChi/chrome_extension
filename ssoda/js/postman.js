@@ -62,7 +62,7 @@ export function importPostmanCollection(pm) {
   col.description = descText(pm.info?.description);
   col.auth = pm.auth ? convertAuthIn(pm.auth, warnings) : newAuth('none');
   if (col.auth.type === 'inherit') col.auth.type = 'none';
-  col.variables = (pm.variable || []).map((v) => kvRow(String(v.key ?? v.id ?? ''), valueToString(v.value), v.disabled !== true));
+  col.variables = (pm.variable || []).map((v) => kvRow(String(v.key ?? v.id ?? ''), valueToString(v.value), v.disabled !== true, v.type === 'secret' ? { secret: true } : {}));
   col.items = convertItems(pm.item || [], warnings);
   if (pm.event && pm.event.length) warnings.push('Pre-request / Test 스크립트는 지원하지 않아 제외되었습니다.');
   return { collection: col, warnings: dedupe(warnings) };
@@ -281,7 +281,7 @@ export function exportPostmanCollection(col) {
   };
   if (col.auth && col.auth.type !== 'none' && col.auth.type !== 'inherit') out.auth = convertAuthOut(col.auth);
   if (col.variables && col.variables.length) {
-    out.variable = col.variables.map((v) => ({ key: v.key, value: v.value, type: 'string', ...(v.enabled ? {} : { disabled: true }) }));
+    out.variable = col.variables.map((v) => ({ key: v.key, value: v.secret ? '' : v.value, type: 'string', ...(v.enabled ? {} : { disabled: true }) }));
   }
   return out;
 }
@@ -387,7 +387,7 @@ function convertAuthOut(a) {
 /* ---------------- Environment ---------------- */
 export function importPostmanEnvironment(pe) {
   const env = newEnvironment(pe.name || (pe._postman_variable_scope === 'globals' ? 'Globals' : '가져온 환경'));
-  env.variables = (pe.values || []).map((v) => kvRow(String(v.key ?? ''), valueToString(v.value), v.enabled !== false));
+  env.variables = (pe.values || []).map((v) => kvRow(String(v.key ?? ''), valueToString(v.value), v.enabled !== false, v.type === 'secret' ? { secret: true } : {}));
   return env;
 }
 
@@ -395,7 +395,7 @@ export function exportPostmanEnvironment(env) {
   return {
     id: uuidv4(),
     name: env.name,
-    values: (env.variables || []).map((v) => ({ key: v.key, value: v.value, type: 'default', enabled: !!v.enabled })),
+    values: (env.variables || []).map((v) => ({ key: v.key, value: v.secret ? '' : v.value, type: v.secret ? 'secret' : 'default', enabled: !!v.enabled })),
     _postman_variable_scope: 'environment',
     _postman_exported_at: new Date().toISOString(),
     _postman_exported_using: 'Ssoda',

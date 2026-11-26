@@ -302,10 +302,13 @@ export class RequestView {
 
   async copyCommand(shell, multiline) {
     try {
-      const p = await app.buildPrepared(this.tab, { engine: 'curl' });
+      const p = await app.buildPrepared(this.tab, { engine: 'curl', mask: true });
       const cmd = app.curlCommandFor(this.tab, p, { shell, multiline });
       const ok = await copyText(cmd);
-      toast(ok ? `cURL 명령을 복사했습니다 (${shell === 'cmd' ? 'Windows cmd' : 'bash'}).` : '복사 실패', ok ? 'success' : 'error');
+      const scope = app.getScope(this.tab, { mask: true });
+      const hid = [...scope.entries()].filter(([k, e]) => e.secret && cmd.includes(`{{${k}}}`)).map(([k]) => `{{${k}}}`);
+      const note = hid.length ? ` 비밀 변수 ${hid.join(', ')} 는 값 대신 이름으로 넣었습니다.` : '';
+      toast(ok ? `cURL 명령을 복사했습니다 (${shell === 'cmd' ? 'Windows cmd' : 'bash'}).${note}` : '복사 실패', ok ? 'success' : 'error', note ? 4500 : 2600);
     } catch (e) {
       toast('명령 생성 실패: ' + e.message, 'error');
     }
@@ -504,8 +507,9 @@ export class RequestView {
     } catch (e) {
       /* ignore */
     }
+    // 화면에 보이는 자동 헤더(인증 탭이 만드는 Authorization 등)이므로 비밀 변수는 {{이름}} 으로
     const p = prepareRequest(tab.draft, {
-      scope: app.getScope(tab), inheritedAuth: inh ? inh.auth : null, jarCookies: jar, defaults: app.settings, forCurl: app.engineOf(tab) === 'curl',
+      scope: app.getScope(tab, { mask: true }), inheritedAuth: inh ? inh.auth : null, jarCookies: jar, defaults: app.settings, forCurl: app.engineOf(tab) === 'curl',
     });
     const userKeys = new Set(d_keys(tab.draft.headers));
     const auto = p.headers.filter((x) => !userKeys.has(x.key.toLowerCase()) || x.key.toLowerCase() === 'cookie').map((x) => ({ ...x, note: autoNote(x.key) }));
@@ -693,7 +697,7 @@ export class RequestView {
   async updateCookiePreview() {
     if (!this.cookiePreview) return;
     try {
-      const p = await app.buildPrepared(this.tab);
+      const p = await app.buildPrepared(this.tab, { mask: true }); // 화면에 보이므로 비밀 변수는 {{이름}}
       const c = p.headers.find((x) => x.key.toLowerCase() === 'cookie');
       clear(this.cookiePreview);
       this.cookiePreview.append(h('div.field-label', '전송될 Cookie 헤더'), h('code.cookie-line', c ? c.value : '(없음)'));
@@ -819,7 +823,7 @@ export class RequestView {
   async updateCurlPreview() {
     if (!this.curlPre) return;
     try {
-      const p = await app.buildPrepared(this.tab, { engine: 'curl' });
+      const p = await app.buildPrepared(this.tab, { engine: 'curl', mask: true }); // 화면에 보이므로 비밀 변수는 {{이름}}
       const cmd = app.curlCommandFor(this.tab, p);
       this.curlPre.innerHTML = highlight(cmd, 'shell');
     } catch (e) {

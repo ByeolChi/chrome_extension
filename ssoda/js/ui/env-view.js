@@ -83,16 +83,20 @@ export class EnvironmentView {
       keyPlaceholder: '변수 이름',
       valuePlaceholder: '값',
       description: false,
+      secrets: app.secretRows(),
       onChange: () => this._save(),
     });
-    this.el.append(
+    // DOM 의 append 는 null 을 "null" 글자로 넣으므로 없는 것(잠김 띠)은 뺀다
+    this.el.append(...[
       h('div.ev-head', nameEl, actions),
       h('div.ev-info', icon('info', 14),
         this.isGlobals
           ? '글로벌 변수는 모든 요청에서 사용됩니다. 우선순위: 환경 > 컬렉션 > 글로벌'
-          : '이 환경이 활성화되면 {{변수명}} 으로 URL·헤더·Body·인증에서 사용할 수 있습니다.'),
-      h('div.ev-table', table.el)
-    );
+          : '이 환경이 활성화되면 {{변수명}} 으로 URL·헤더·Body·인증에서 사용할 수 있습니다.',
+        ' 토큰·비밀번호는 행 끝의 🔒 로 비밀로 표시하세요 — 값이 가려지고 백업·내보내기·히스토리에서 빠집니다.'),
+      app.ui.vaultBanner ? app.ui.vaultBanner(env.variables, () => this.build()) : null,
+      h('div.ev-table', table.el),
+    ].filter(Boolean));
     if (!this.isGlobals) this.el.insertBefore(this.sshSection(env), this.el.lastChild);
   }
 

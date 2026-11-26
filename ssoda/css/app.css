@@ -526,6 +526,21 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 .kv-del { opacity: 0; width: 24px; height: 24px; margin: 0 auto; }
 .kv-row:hover .kv-del, .kv-del:focus { opacity: 1; }
 .kv-act { justify-content: center; }
+/* 비밀 변수 (변수 표) */
+.kv-table.with-secret .kv-row { grid-template-columns: 32px minmax(120px, 1fr) minmax(140px, 1.3fr) 60px; }
+.kv-table.with-secret.with-desc .kv-row { grid-template-columns: 32px minmax(120px, 1fr) minmax(140px, 1.3fr) minmax(100px, .9fr) 60px; }
+.kv-table.with-secret .kv-del { margin: 0; }
+.kv-lock { width: 24px; height: 24px; opacity: 0; }
+.kv-row:hover .kv-lock, .kv-lock:focus, .kv-lock.on { opacity: 1; }
+.kv-lock.on { color: var(--accent); }
+.kv-secret { display: flex; align-items: center; width: 100%; min-width: 0; }
+.kv-secret .kv-input { flex: 1; font-family: var(--mono); }
+.kv-secret .kv-input:disabled { cursor: not-allowed; }
+.kv-eye { width: 24px; height: 24px; flex: none; margin-right: 4px; opacity: .55; }
+.kv-eye.on { opacity: 1; color: var(--primary); }
+.bulk-note { display: flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 12px; }
+.vault-banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin: 0 0 10px; background: var(--warn-soft); color: var(--warn); border-radius: var(--radius); font-size: 12px; }
+.vault-banner .btn { margin-left: auto; }
 .kv-type { display: inline-flex; align-items: center; gap: 2px; border: 0; background: transparent; color: var(--text-3); font-size: 11px; padding: 2px 4px; cursor: pointer; border-radius: 3px; margin-right: 4px; flex: none; }
 .kv-type:hover { background: var(--bg-hover); color: var(--text); }
 .file-cell { display: flex; align-items: center; gap: 8px; padding: 0 8px; min-width: 0; overflow: hidden; }
@@ -1113,3 +1128,9 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 /* 가져오기: 주소에서 바로 */
 .import-url-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .import-url-row .import-url { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; }
+.field-err { min-height: 18px; color: var(--danger); font-size: 12px; margin: 4px 0 6px; }
+.cp-secret { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-2); cursor: pointer; user-select: none; }
+.vault-sec { display: flex; flex-direction: column; gap: 8px; }
+.vault-status { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.vault-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.vi-backdrop mark.var-locked { background: rgba(234, 179, 8, 0.24); box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.24); }

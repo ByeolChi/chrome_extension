@@ -8,6 +8,10 @@ import { formatJson } from '../json-format.js';
 import { isEventStream, parseSse } from '../sse.js';
 import { describeAssert } from '../checks.js';
 import { app } from '../app.js';
+import { vault, redactSecrets, MASK } from '../secrets.js';
+
+// 화면에 보이는 요청 글(명령·보낸 머리글)에서 비밀 변수의 값을 가린다
+const redact = (text) => redactSecrets(text, vault.secretValues());
 
 const LIVE_ROWS = 1000; // 받는 중에 화면에 두는 이벤트 수 (오래된 것부터 뺌. 전체는 끝난 뒤 결과에 남음)
 const MAX_EVENT_ROWS = 5000; // 끝난 응답의 Events 보기에 그리는 최대 수
@@ -181,7 +185,7 @@ export class ResponseView {
         wrap.appendChild(h('div.ck-row',
           mark(x.ok),
           h('div.ck-main',
-            h('div.ck-desc', h('b', x.name), x.ok ? ' = ' : '', x.ok ? h('span.ck-val', x.value.length > 300 ? x.value.slice(0, 300) + '…' : x.value) : ''),
+            h('div.ck-desc', h('b', x.name), x.ok ? ' = ' : '', x.ok ? h('span.ck-val', x.secret ? MASK + ' (비밀 변수)' : x.value.length > 300 ? x.value.slice(0, 300) + '…' : x.value) : ''),
             h('div.ck-sub', x.ok ? `${x.savedTo || ''}에 저장` : x.error, x.note ? h('span.ck-note', ' · ' + x.note) : null))));
       });
     }
@@ -525,14 +529,14 @@ export class ResponseView {
       add(`# SSH 터널${s.label ? ' (' + s.label + ')' : ''}: ${s.user}@${s.host}:${s.port}` +
         (s.failed ? ' - 연결 실패' : ` · 연결 ${formatMs(s.connectMs || 0)}`) + '\n', s.failed ? 'term-err' : 'term-info');
       add(`$ ssh -N -D 127.0.0.1:${s.socksPort || 1080} -p ${s.port} ${s.user}@${s.host}\n`, 'term-cmd');
-      String(s.log || '').split(/\r?\n/).filter((l) => l.trim()).forEach((l) => add(l + '\n', s.failed ? 'term-err' : 'term-info'));
+      redact(String(s.log || '')).split(/\r?\n/).filter((l) => l.trim()).forEach((l) => add(l + '\n', s.failed ? 'term-err' : 'term-info'));
       if (s.failed) {
         if (r.error) add(`\n${r.error.message}\n`, 'term-err');
       } else {
-        add(`$ curl --socks5-hostname 127.0.0.1:${s.socksPort} ` + String(t.command || 'curl').replace(/^curl\s+/, '') + '\n', 'term-cmd');
+        add(`$ curl --socks5-hostname 127.0.0.1:${s.socksPort} ` + redact(String(t.command || 'curl').replace(/^curl\s+/, '')) + '\n', 'term-cmd');
       }
-    } else add('$ ' + (t.command || 'curl') + '\n', 'term-cmd');
-    const stderr = String(t.stderr || '');
+    } else add('$ ' + redact(t.command || 'curl') + '\n', 'term-cmd');
+    const stderr = redact(String(t.stderr || '')); // curl -v 의 "> Authorization: …" 같은 보낸 머리글도 가린다
     stderr.split('\n').forEach((line, i, arr) => {
       if (i === arr.length - 1 && line === '') return;
       const cls = line.startsWith('> ') || line === '>' ? 'term-req' : line.startsWith('< ') || line === '<' ? 'term-res' : line.startsWith('* ') ? 'term-info' : line.startsWith('curl: ') ? 'term-err' : null;
@@ -554,7 +558,13 @@ export class ResponseView {
       h('div.flex1'),
       !t.verbose ? h('span.muted.term-tip', '요청/응답 상세를 보려면 cURL 탭에서 -v 를 켜세요') : null,
       h('button.btn.btn-sm', { onclick: () => copyText(pre.textContent).then(() => toast('터미널 출력을 복사했습니다.', 'success')) }, icon('copy', 13), '출력 복사'),
-      h('button.btn.btn-sm', { onclick: () => copyText(t.command || '').then(() => toast('명령을 복사했습니다.', 'success')) }, icon('copy', 13), '명령 복사')));
+      h('button.btn.btn-sm', {
+        onclick: () => {
+          const cmd = redact(t.command || '');
+          const hid = cmd !== (t.command || '');
+          copyText(cmd).then(() => toast(hid ? '명령을 복사했습니다 · 비밀 값은 가렸습니다 (값까지 든 명령은 코드 창의 "비밀 값 넣기")' : '명령을 복사했습니다.', 'success', hid ? 4500 : 2600));
+        },
+      }, icon('copy', 13), '명령 복사')));
     box.appendChild(pre);
     return box;
   }
@@ -716,8 +726,9 @@ function safeUrl(u) {
   }
 }
 
+// 타임라인의 보낸 머리글: 비밀 변수의 값(Basic 인증 안에 싼 것 포함)을 가린다
 function maskValue(name, value) {
-  return value;
+  return redact(value);
 }
 
 function emptyIllustration() {

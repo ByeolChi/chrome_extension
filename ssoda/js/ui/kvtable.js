@@ -8,7 +8,9 @@ const MAX_FILE = 20 * 1024 * 1024;
 
 export class KVTable {
   /**
-   * opts: { rows: () => array, onChange, keyPlaceholder, valuePlaceholder, description, files, bulk, keyList, title, onStructure }
+   * opts: { rows: () => array, onChange, keyPlaceholder, valuePlaceholder, description, files, bulk, keyList, title, onStructure, secrets }
+   * secrets: 변수 표에서 행을 비밀로 둘 수 있게 한다 (app.secretRows()). 비밀 행의 값은 행에 없고 보관함에 있어
+   *   { get(row), set(row, v), locked(), toggle(row, on), remove(row) } 로 읽고 쓴다.
    */
   constructor(opts) {
     this.opts = Object.assign({ keyPlaceholder: 'Key', valuePlaceholder: 'Value', description: true, bulk: true }, opts);
@@ -44,7 +46,7 @@ export class KVTable {
       this.el.appendChild(this.renderBulk());
       return;
     }
-    const table = h('div.kv-table' + (this.opts.description ? '.with-desc' : '') + (this.opts.files ? '.with-type' : ''));
+    const table = h('div.kv-table' + (this.opts.description ? '.with-desc' : '') + (this.opts.files ? '.with-type' : '') + (this.opts.secrets ? '.with-secret' : ''));
     table.appendChild(
       h(
         'div.kv-row.kv-head',
@@ -106,6 +108,8 @@ export class KVTable {
     let valueCell;
     if (this.opts.files && row.type === 'file') {
       valueCell = this.fileCell(row);
+    } else if (this.opts.secrets && row.secret) {
+      valueCell = this.secretCell(row);
     } else {
       const valIn = varInput({
         value: row.value,
@@ -160,15 +164,60 @@ export class KVTable {
       : null;
 
     const del = h('button.icon-btn.kv-del', { title: '삭제', onclick: () => this.removeRow(row) }, icon('x', 14));
+    const S = this.opts.secrets;
+    const lock = S
+      ? h('button.icon-btn.kv-lock' + (row.secret ? '.on' : ''), {
+          type: 'button',
+          title: row.secret ? '비밀 해제 — 값을 보이고 백업·내보내기에도 넣습니다' : '비밀로 표시 — 값을 가리고 백업·내보내기·히스토리에서 뺍니다',
+          'aria-pressed': row.secret ? 'true' : 'false',
+          onclick: () => {
+            if (S.toggle(row, !row.secret)) {
+              this.render();
+              this.changed(true);
+            }
+          },
+        }, icon('lock', 14))
+      : null;
     const rowEl = h(
-      'div.kv-row' + (row.enabled ? '' : '.disabled'),
+      'div.kv-row' + (row.enabled ? '' : '.disabled') + (row.secret && S ? '.secret' : ''),
       h('div.kv-cell.kv-check', cb),
       h('div.kv-cell.kv-key', keyIn.el, typeToggle),
       h('div.kv-cell.kv-val', valueCell),
       this.opts.description ? h('div.kv-cell.kv-desc', desc) : null,
-      h('div.kv-cell.kv-act', del)
+      h('div.kv-cell.kv-act', lock, del)
     );
     return rowEl;
+  }
+
+  /* 비밀 행의 값: 가린 입력칸(눈 단추로 잠깐 보기). 보관함이 잠겨 있으면 못 고친다 */
+  secretCell(row) {
+    const S = this.opts.secrets;
+    const locked = S.locked();
+    const inp = h('input.kv-input.kv-secret-input', {
+      type: 'password',
+      value: locked ? '' : S.get(row) ?? '',
+      placeholder: locked ? '잠김 · 설정의 비밀 변수에서 잠금 해제' : '비밀 값',
+      disabled: locked,
+      autocomplete: 'new-password',
+      spellcheck: 'false',
+      'aria-label': `${row.key || '변수'} 비밀 값`,
+      dataset: { row: row.id, field: 'value' },
+    });
+    inp.addEventListener('input', () => {
+      S.set(row, inp.value);
+      this.changed(false);
+    });
+    const eye = h('button.icon-btn.kv-eye', {
+      type: 'button',
+      title: '값 보기',
+      disabled: locked,
+      onclick: (e) => {
+        e.preventDefault();
+        inp.type = inp.type === 'password' ? 'text' : 'password';
+        eye.classList.toggle('on', inp.type === 'text');
+      },
+    }, icon('eye', 14));
+    return h('div.kv-secret', inp, eye);
   }
 
   fileCell(row) {
@@ -254,6 +303,7 @@ export class KVTable {
   removeRow(row) {
     const i = this.rows.indexOf(row);
     if (i >= 0) this.rows.splice(i, 1);
+    if (row.secret && this.opts.secrets) this.opts.secrets.remove(row); // 보관함의 값도 지운다
     this.render();
     this.changed(true);
   }
@@ -265,8 +315,9 @@ export class KVTable {
   }
 
   renderBulk() {
+    const secrets = this.rows.filter((r) => r.secret).length;
     const text = this.rows
-      .filter((r) => r.type !== 'file')
+      .filter((r) => r.type !== 'file' && !r.secret)
       .map((r) => `${r.enabled ? '' : '//'}${r.key}:${r.value}`)
       .join('\n');
     const ta = h('textarea.bulk-ta', { spellcheck: 'false', placeholder: 'Key:Value 형식으로 한 줄에 하나씩 입력\n// 로 시작하면 비활성화됩니다' });
@@ -276,12 +327,13 @@ export class KVTable {
     });
     this._bulkTa = ta;
     setTimeout(() => ta.focus(), 0);
-    return h('div.bulk-wrap', ta);
+    return h('div.bulk-wrap', ta, secrets ? h('div.muted.bulk-note', icon('lock', 12), ` 비밀 변수 ${secrets}개는 여기에 보이지 않고 그대로 둡니다.`) : null);
   }
 
   applyBulk(text, silent) {
     const files = this.rows.filter((r) => r.type === 'file');
-    const old = this.rows.filter((r) => r.type !== 'file');
+    const secretRows = this.rows.filter((r) => r.secret); // Bulk 글에 없던 비밀 행은 그대로 둔다
+    const old = this.rows.filter((r) => r.type !== 'file' && !r.secret);
     const parsed = String(text)
       .split('\n')
       .filter((l) => l.trim() !== '')
@@ -306,7 +358,7 @@ export class KVTable {
         };
       });
     const arr = this.rows;
-    arr.splice(0, arr.length, ...parsed, ...files);
+    arr.splice(0, arr.length, ...parsed, ...secretRows, ...files);
     this.changed(true);
     if (!silent) this.render();
   }

@@ -1,6 +1,7 @@
 // {{변수}} 강조 + 자동완성 입력창
 import { h, escapeHtml } from '../util.js';
 import { DYNAMIC_VARIABLES } from '../variables.js';
+import { MASK } from '../secrets.js';
 
 let getScopeFn = () => new Map();
 export function setScopeProvider(fn) {
@@ -17,7 +18,8 @@ function renderBackdrop(text, scope) {
         if (i % 2 === 0) return escapeHtml(p);
         const name = p.slice(2, -2).trim();
         const ok = DYNAMIC_VARIABLES.includes(name) || (scope && scope.has(name));
-        return `<mark class="${ok ? 'var-ok' : 'var-bad'}">${escapeHtml(p)}</mark>`;
+        const locked = !ok && scope && scope.locked && scope.locked.has(name); // 잠긴 비밀 변수 — 보낼 때 비밀번호를 묻는다
+        return `<mark class="${ok ? 'var-ok' : locked ? 'var-locked' : 'var-bad'}">${escapeHtml(p)}</mark>`;
       })
       .join('') + ' '
   );
@@ -33,7 +35,9 @@ function closeAc() {
 }
 
 function showAc(input, prefix, scope, onPick) {
-  const names = [...scope.keys()].map((k) => ({ name: k, value: scope.get(k).value, source: scope.get(k).source }));
+  // 비밀 변수는 값을 가리고, 잠긴 비밀 변수도 이름은 보여 준다
+  const names = [...scope.keys()].map((k) => ({ name: k, value: scope.get(k).secret ? MASK : scope.get(k).value, source: scope.get(k).source }));
+  for (const k of scope.locked || []) names.push({ name: k, value: '잠김', source: 'locked' });
   DYNAMIC_VARIABLES.forEach((d) => names.push({ name: d, value: '동적 변수', source: 'dynamic' }));
   const list = names.filter((n) => n.name.toLowerCase().includes(prefix.toLowerCase())).slice(0, 30);
   if (!list.length) return closeAc();
@@ -55,7 +59,7 @@ function showAc(input, prefix, scope, onPick) {
           onPick(n.name);
         },
       },
-      h('span.var-ac-src.src-' + n.source, n.source === 'environment' ? 'E' : n.source === 'collection' ? 'C' : n.source === 'globals' ? 'G' : '$'),
+      h('span.var-ac-src.src-' + n.source, n.source === 'environment' ? 'E' : n.source === 'collection' ? 'C' : n.source === 'globals' ? 'G' : n.source === 'locked' ? '🔒' : '$'),
       h('span.var-ac-name', n.name),
       h('span.var-ac-val', n.value)
     );
@@ -136,7 +140,12 @@ export function varInput({ value = '', placeholder = '', onInput, className = ''
       const parts = [];
       v.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_, n) => {
         const hit = scope.get(n);
-        parts.push(`{{${n}}} = ${hit ? hit.value + `  (${hit.source === 'environment' ? '환경' : hit.source === 'collection' ? '컬렉션' : '글로벌'})` : DYNAMIC_VARIABLES.includes(n) ? '(동적 변수)' : '(정의되지 않음)'}`);
+        const where = hit ? (hit.source === 'environment' ? '환경' : hit.source === 'collection' ? '컬렉션' : hit.source === 'data' ? '데이터' : '글로벌') : '';
+        const shown = hit ? (hit.secret ? `${MASK}  (${where} · 비밀)` : `${hit.value}  (${where})`)
+          : DYNAMIC_VARIABLES.includes(n) ? '(동적 변수)'
+          : scope.locked && scope.locked.has(n) ? '(잠긴 비밀 변수 — 보낼 때 비밀번호를 묻습니다)'
+          : '(정의되지 않음)';
+        parts.push(`{{${n}}} = ${shown}`);
         return _;
       });
       input.title = parts.join('\n');

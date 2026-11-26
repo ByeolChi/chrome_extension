@@ -157,6 +157,8 @@ export class RunnerView {
       ssh = await app.sshConfigFor(env); // 비밀번호를 처음 한 번만 묻는다
       if (!ssh) return;
     }
+    // 비밀 변수 보관함이 잠겨 있으면 처음에 한 번 묻는다 (요청마다 묻지 않게)
+    if (app.getScope({ type: 'collection', refId: hit.collection.id }).locked.size && !(await app.unlockSecrets())) return;
     const ctrl = new AbortController();
     this.ctrl = ctrl;
     app.controllers.set(this.tab.id, ctrl); // 탭을 닫으면 멈춘다
