@@ -527,7 +527,7 @@ export class ResponseView {
       // SSH 터널: 터미널에서 직접 재현할 수 있는 형태로 표시
       const s = t.ssh;
       add(`# SSH 터널${s.label ? ' (' + s.label + ')' : ''}: ${s.user}@${s.host}:${s.port}` +
-        (s.failed ? ' - 연결 실패' : ` · 연결 ${formatMs(s.connectMs || 0)}`) + '\n', s.failed ? 'term-err' : 'term-info');
+        (s.failed ? ' - 연결 실패' : s.reused ? ' · 열어 둔 연결을 다시 씀' : ` · 연결 ${formatMs(s.connectMs || 0)}`) + '\n', s.failed ? 'term-err' : 'term-info');
       add(`$ ssh -N -D 127.0.0.1:${s.socksPort || 1080} -p ${s.port} ${s.user}@${s.host}\n`, 'term-cmd');
       redact(String(s.log || '')).split(/\r?\n/).filter((l) => l.trim()).forEach((l) => add(l + '\n', s.failed ? 'term-err' : 'term-info'));
       if (s.failed) {

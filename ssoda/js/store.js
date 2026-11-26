@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS = {
   curlPath: '', // curl 실행 파일 경로 (비우면 자동 탐색)
   curlShell: 'bash', // bash | cmd (명령어 표시 형식)
   curlMultiline: true, // 줄바꿈으로 정렬
+  sshKeepMinutes: 10, // SSH 연결 유지 시간(분): 마지막 요청 뒤 이만큼 열어 두고 다시 씀 (도우미 2.0), 0 = 요청마다 새로 접속
   settingsRev: 2, // 저장된 설정의 형식 판 (migrateSettings 참고)
 };
 

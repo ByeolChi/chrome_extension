@@ -7,11 +7,20 @@
 # server, so curl runs through that server. The password is handed to ssh through SSH_ASKPASS
 # (OpenSSH 8.4+) from a temporary file that is deleted as soon as the tunnel is up.
 # Only the extension ID listed in the host manifest (allowed_origins) can start this host.
+#
+# Two ways to talk:
+#  - One request per start (Ssoda 1.x, and the version check): the helper answers one request and exits.
+#  - Session (helper 2.0): the first message is {"type":"ping","session":true}. The helper answers with
+#    "session":true and keeps running while the Ssoda tab is open. Every message then carries an "id",
+#    requests run side by side, {"type":"cancel","id"} stops one, and an SSH tunnel stays open for
+#    "keepMs" after its last request, so the next request to the same server uses it again.
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -20,7 +29,7 @@ import tempfile
 import threading
 import time
 
-HOST_VERSION = '1.3.2'
+HOST_VERSION = '2.0.0'
 NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,40}$')
 STDIN = sys.stdin.buffer
 STDOUT = sys.stdout.buffer
@@ -124,21 +133,22 @@ def port_open(port):
         return False
 
 
-def start_tunnel(cfg, work):
-    """Open an SSH tunnel with a SOCKS5 proxy on 127.0.0.1:<free port>."""
+def prepare_tunnel(cfg, folder):
+    """Files and arguments for an ssh tunnel with a SOCKS5 proxy on 127.0.0.1:<free port>.
+    Returns (argv, env, port, password file, ssh path, target)."""
     ssh = find_ssh()
     if not ssh:
         raise RuntimeError('ssh not found. Install the OpenSSH client.')
     t = ssh_target(cfg)
-    pw = os.path.join(work, 'SSH_PW')
+    pw = os.path.join(folder, 'SSH_PW')
     with open(os.open(pw, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w', encoding='utf-8') as f:
         f.write(str(cfg.get('password') or ''))
-    askpass = os.path.join(work, 'askpass.sh')
+    askpass = os.path.join(folder, 'askpass.sh')
     with open(askpass, 'w') as f:
         f.write("#!/bin/sh\nexec cat '%s'\n" % pw.replace("'", "'\\''"))
     os.chmod(askpass, 0o700)
     # Empty config file: the user's ~/.ssh/config must not change how the tunnel is opened
-    conf = os.path.join(work, 'ssh_config')
+    conf = os.path.join(folder, 'ssh_config')
     open(conf, 'w').close()
     port = free_port()
     # The path is quoted for OpenSSH: unquoted, the space in "~/Library/Application Support/Ssoda" splits it into two
@@ -155,6 +165,12 @@ def start_tunnel(cfg, work):
         argv += ['-o', 'HostKeyAlgorithms=+ssh-rsa', '-o', 'KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1']
     argv.append(t['host'])
     env = dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE='force', DISPLAY=os.environ.get('DISPLAY') or ':0')
+    return argv, env, port, pw, ssh, t
+
+
+def start_tunnel(cfg, work):
+    """Open an SSH tunnel with a SOCKS5 proxy on 127.0.0.1:<free port>."""
+    argv, env, port, pw, ssh, t = prepare_tunnel(cfg, work)
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             env=env, cwd=work, start_new_session=True)
     err_chunks = []
@@ -293,11 +309,15 @@ def send_ssh_error(tun):
 
 
 def host_fingerprint(tun):
-    keygen = os.path.join(os.path.dirname(tun['ssh']), 'ssh-keygen')
+    return fingerprint_of(tun['ssh'], tun['target'])
+
+
+def fingerprint_of(ssh, target):
+    keygen = os.path.join(os.path.dirname(ssh), 'ssh-keygen')
     if not os.path.isfile(keygen) or not os.path.isfile(KNOWN_HOSTS):
         return ''
     try:
-        r = subprocess.run([keygen, '-l', '-F', tun['target']['key'], '-f', KNOWN_HOSTS], stdin=subprocess.DEVNULL,
+        r = subprocess.run([keygen, '-l', '-F', target['key'], '-f', KNOWN_HOSTS], stdin=subprocess.DEVNULL,
                            capture_output=True, timeout=15)
         lines = r.stdout.decode('utf-8', 'replace').splitlines()
         return '\n'.join(x.strip() for x in lines if x.strip() and not x.startswith('#'))
@@ -333,17 +353,18 @@ def watch_stdin():
         pass
 
 
-def run_request(msg, work):
+def curl_command(msg, folder):
+    """Check the request and build curl's arguments. Returns (curl, argv, header file, body file)."""
     curl = find_curl(msg.get('curlPath'))
     if not curl:
         raise RuntimeError('curl not found. Install curl or set the curl path in Ssoda settings.')
-    hdr = os.path.join(work, 'CS_HDR')
-    body_path = os.path.join(work, 'CS_BODY')
+    hdr = os.path.join(folder, 'CS_HDR')
+    body_path = os.path.join(folder, 'CS_BODY')
     mapping = {'__CS_HDR__': hdr, '__CS_BODY__': body_path}
     for name in msg.get('files') or []:
         if not NAME_RE.match(str(name)):
             raise ValueError('invalid file name')
-        mapping['__CS_%s__' % name] = os.path.join(work, name)
+        mapping['__CS_%s__' % name] = os.path.join(folder, name)
     assert_safe_args(msg.get('args') or [])
     # Only http/https, also after redirects: no file://, and no gopher:// or dict:// to services on this PC
     argv = ['--proto', '=http,https', '--proto-redir', '=http,https']
@@ -352,12 +373,49 @@ def run_request(msg, work):
         for k, v in mapping.items():
             s = s.replace(k, v)
         argv.append(s)
+    if msg.get('ssh'):
+        assert_no_routing_args(argv)
+    return curl, argv, hdr, body_path
+
+
+def send_result(curl, returncode, timed_out, elapsed, out, err, hdr, body_path, ssh_meta=None, rid=None):
+    hdr_bytes = b''
+    if os.path.isfile(hdr):
+        with open(hdr, 'rb') as f:
+            hdr_bytes = f.read(262144)
+    body = b''
+    if os.path.isfile(body_path):
+        with open(body_path, 'rb') as f:
+            body = f.read()
+    extra = {'id': rid} if rid else {}
+    meta = {
+        'type': 'result',
+        'exitCode': returncode if returncode >= 0 else 128 - returncode,
+        'timedOut': timed_out,
+        'elapsedMs': elapsed,
+        'bodySize': len(body),
+        'stdoutB64': b64(out[:60000]),
+        'stderrB64': b64(err[-300000:]),
+        'headersB64': b64(hdr_bytes),
+        'pathB64': b64(curl),
+    }
+    if ssh_meta:
+        meta['ssh'] = ssh_meta
+    meta.update(extra)
+    send(meta)
+    chunk = 524288
+    for off in range(0, len(body), chunk):
+        send(dict(extra, type='body', data=b64(body[off:off + chunk])))
+    send(dict(extra, type='end'))
+
+
+def run_request(msg, work):
+    curl, argv, hdr, body_path = curl_command(msg, work)
     timeout = (msg.get('timeoutMs') or 0) / 1000.0 or None
     tun = None
     ssh_log = ''
     env = None
     if msg.get('ssh'):
-        assert_no_routing_args(argv)
         tun = start_tunnel(msg['ssh'], work)
         if not tun['ok']:
             send_ssh_error(tun)
@@ -387,101 +445,593 @@ def run_request(msg, work):
         if tun:
             ssh_log = stop_tunnel(tun)
     elapsed = int((time.time() - started) * 1000)
-    hdr_bytes = b''
-    if os.path.isfile(hdr):
-        with open(hdr, 'rb') as f:
-            hdr_bytes = f.read(262144)
-    body = b''
-    if os.path.isfile(body_path):
-        with open(body_path, 'rb') as f:
-            body = f.read()
-    err = err[-300000:]
-    out = out[:60000]
-    meta = {
-        'type': 'result',
-        'exitCode': proc.returncode if proc.returncode >= 0 else 128 - proc.returncode,
-        'timedOut': timed_out,
-        'elapsedMs': elapsed,
-        'bodySize': len(body),
-        'stdoutB64': b64(out),
-        'stderrB64': b64(err),
-        'headersB64': b64(hdr_bytes),
-        'pathB64': b64(curl),
-    }
+    ssh_meta = None
     if tun:
-        meta['ssh'] = {'port': tun['port'], 'connectMs': tun['ms'], 'logB64': b64(ssh_log), 'pathB64': b64(tun['ssh'])}
-    send(meta)
-    chunk = 524288
-    for off in range(0, len(body), chunk):
-        send({'type': 'body', 'data': b64(body[off:off + chunk])})
-    send({'type': 'end'})
+        ssh_meta = {'port': tun['port'], 'connectMs': tun['ms'], 'logB64': b64(ssh_log), 'pathB64': b64(tun['ssh'])}
+    send_result(curl, proc.returncode, timed_out, elapsed, out, err, hdr, body_path, ssh_meta)
 
 
-def main():
-    work = tempfile.mkdtemp(prefix='ssoda-')
+def pong(msg, session=False):
+    curl = None
+    ver = ''
+    try:
+        curl = find_curl(msg.get('curlPath'))
+    except ValueError as e:
+        # A wrong curl path must not stop a session: SSH key checks do not need curl, and each request reports it
+        if not session:
+            raise
+        ver = 'error: %s' % e
+    if curl:
+        try:
+            r = subprocess.run([curl, '--version'], stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+            ver = r.stdout.decode('utf-8', 'replace').splitlines()[0].strip()
+        except Exception as e:  # noqa: BLE001
+            ver = 'error: %s' % e
+    ssh = find_ssh()
+    ssh_ver = ''
+    if ssh:
+        try:
+            r = subprocess.run([ssh, '-V'], stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+            ssh_ver = (r.stderr + r.stdout).decode('utf-8', 'replace').strip().splitlines()[0]
+        except Exception as e:  # noqa: BLE001
+            ssh_ver = 'error: %s' % e
+    p = {'type': 'pong', 'hostVersion': HOST_VERSION, 'platform': sys.platform,
+         'curlB64': b64(ver), 'pathB64': b64(curl or ''), 'sshB64': b64(ssh_ver), 'sshPathB64': b64(ssh or '')}
+    if session:
+        p['session'] = True
+    return p
+
+
+def one_shot(msg, work):
+    """One request per start (Ssoda 1.x, version check): answer one request, then exit."""
+    while msg is not None:
+        t = msg.get('type')
+        if t == 'ping':
+            send(pong(msg))
+            return
+        elif t == 'file':
+            name = str(msg.get('name', ''))
+            if not NAME_RE.match(name):
+                raise ValueError('invalid file name')
+            with open(os.path.join(work, name), 'ab') as f:
+                f.write(base64.b64decode(msg.get('data') or ''))
+        elif t == 'run':
+            threading.Thread(target=watch_stdin, daemon=True).start()
+            run_request(msg, work)
+            return
+        elif t == 'sshTest':
+            threading.Thread(target=watch_stdin, daemon=True).start()
+            tun = start_tunnel(msg.get('ssh') or {}, work)
+            if not tun['ok']:
+                send_ssh_error(tun)
+            else:
+                log = stop_tunnel(tun)
+                send({'type': 'sshOk', 'connectMs': tun['ms'], 'logB64': b64(log),
+                      'fingerprintB64': b64(host_fingerprint(tun)), 'pathB64': b64(tun['ssh'])})
+            return
+        elif t == 'sshScan':
+            keys, fp, err = scan_host_keys(msg.get('ssh') or {}, work)
+            send({'type': 'sshScanned', 'keysB64': b64(keys), 'fingerprintsB64': b64(fp), 'errB64': b64(err)})
+            return
+        elif t == 'sshTrust':
+            send({'type': 'sshTrusted', 'added': trust_host_keys(msg.get('ssh') or {}, msg.get('keys'))})
+            return
+        elif t == 'sshForget':
+            send({'type': 'sshForgot', 'removed': forget_host(msg.get('ssh') or {})})
+            return
+        msg = read_msg()
+
+
+# ---------------- session (helper 2.0) ----------------
+ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,40}$')
+
+
+def tunnel_key(cfg):
+    """Same server, user, password and legacy setting -> same tunnel. The password is kept only as a hash."""
+    t = ssh_target(cfg)
+    pw = hashlib.sha256(str(cfg.get('password') or '').encode('utf-8')).hexdigest()
+    return '%s@%s|%s|%s' % (t['user'], t['key'], bool(cfg.get('legacy')), pw)
+
+
+def keep_of(value, default):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(n, 86400000))
+
+
+class Tunnel:
+    """An ssh -D tunnel kept between requests. Its fields are read and written under Session.lock."""
+
+    def __init__(self, sess, cfg, key, seq):
+        self.sess, self.key, self.seq = sess, key, seq
+        self.dir = os.path.join(sess.work, 't%d' % seq)
+        os.mkdir(self.dir)
+        argv, env, self.port, self.pw, self.ssh, self.target = prepare_tunnel(cfg, self.dir)
+        self.state = 'starting'   # starting -> ready | failed; ready -> dead (ssh ended) -> closed
+        self.users = 0
+        self.retired = False      # replaced by a newer connection: close when unused
+        self.keep_ms = sess.keep_ms
+        self.idle_since = time.time()
+        self.ms = 0
+        self.err = ''
+        self.exit = None
+        self.log = ''
+        self.dropped = 0
+        self.done = threading.Event()   # set when ready or failed
+        self.started = time.time()
+        self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     env=env, cwd=self.dir, start_new_session=True)
+        self.reader = threading.Thread(target=self._read_log, daemon=True)
+        self.reader.start()
+        threading.Thread(target=self._wait_ready, daemon=True).start()
+
+    def _read_log(self):
+        """ssh's messages, line by line (each request gets the lines written while it ran)."""
+        try:
+            for raw in iter(self.proc.stderr.readline, b''):
+                line = raw.decode('utf-8', 'replace')
+                with self.sess.lock:
+                    self.log += line
+                    if len(self.log) > 300000:
+                        cut = len(self.log) - 200000
+                        self.log = self.log[cut:]
+                        self.dropped += cut
+        except Exception:  # noqa: BLE001
+            pass
+
+    def mark(self):
+        return self.dropped + len(self.log)
+
+    def since(self, mark):
+        return self.log[max(0, mark - self.dropped):]
+
+    def _wait_ready(self):
+        # The SOCKS port opens only after ssh has logged in, so a connection to it means the tunnel is ready
+        ready = False
+        while time.time() - self.started < 25:
+            if self.proc.poll() is not None or self.sess.closed:
+                break
+            if port_open(self.port):
+                ready = True
+                break
+            time.sleep(0.05)
+        try:
+            os.remove(self.pw)
+        except OSError:
+            pass
+        if not ready:
+            self.kill()
+            try:
+                self.proc.wait(3)
+            except subprocess.TimeoutExpired:
+                pass
+            self.reader.join(3)
+        with self.sess.lock:
+            if ready:
+                self.state = 'ready'
+                self.ms = int((time.time() - self.started) * 1000)
+                self.idle_since = time.time()
+            else:
+                self.state = 'failed'
+                self.exit = self.proc.returncode
+                timed_out = time.time() - self.started >= 25
+                self.err = self.log if self.log.strip() else ('ssh: connection timed out' if timed_out else '')
+        self.done.set()
+
+    def kill(self):
+        if self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+
+
+class Job:
+    def __init__(self, rid):
+        self.id = rid
+        self.cancel = threading.Event()
+        self.proc = None
+
+
+class Session:
+    """One helper for the whole Ssoda tab: requests run in their own threads, replies carry the request id."""
+
+    def __init__(self, work):
+        self.work = work
+        self.lock = threading.RLock()
+        self.jobs = {}       # id -> Job
+        self.tunnels = {}    # number -> Tunnel
+        self.seq = 0
+        self.keep_ms = 600000
+        self.failed = set()  # requests whose file upload failed: their "run" is dropped
+        self.closed = False
+        threading.Thread(target=self._reaper, daemon=True).start()
+
+    def reply(self, rid, obj):
+        obj['id'] = rid
+        try:
+            send(obj)
+        except Exception:  # noqa: BLE001  (the extension is gone; the read loop ends soon)
+            pass
+
+    def folder(self, rid):
+        d = os.path.join(self.work, 'r-' + rid)
+        if not os.path.isdir(d):
+            os.mkdir(d)
+        return d
+
+    def drop_folder(self, rid):
+        shutil.rmtree(os.path.join(self.work, 'r-' + rid), ignore_errors=True)
+
+    # ---- tunnels ----
+    def acquire(self, cfg, fresh=False):
+        """The open tunnel to this server (or the one still connecting), otherwise a new one.
+        fresh: always a new connection. Returns (tunnel, reused)."""
+        key = tunnel_key(cfg)
+        with self.lock:
+            if not fresh:
+                for t in self.tunnels.values():
+                    if t.key == key and not t.retired and (t.state == 'starting' or (t.state == 'ready' and t.proc.poll() is None)):
+                        t.users += 1
+                        return t, t.state == 'ready'
+            self.seq += 1
+            t = Tunnel(self, cfg, key, self.seq)
+            self.tunnels[t.seq] = t
+            t.users += 1
+            return t, False
+
+    def release(self, t, keep_ms):
+        """A request is done with the tunnel: when nobody uses it, it closes after keep_ms (0: right away)."""
+        with self.lock:
+            t.users -= 1
+            if t.users <= 0:
+                t.users = 0
+                t.keep_ms = keep_ms
+                t.idle_since = time.time()
+
+    def _close(self, t):
+        # called under self.lock
+        t.state = 'closed'
+        self.tunnels.pop(t.seq, None)
+        t.kill()
+
+        def cleanup():
+            try:
+                t.proc.wait(3)
+            except Exception:  # noqa: BLE001
+                pass
+            shutil.rmtree(t.dir, ignore_errors=True)
+
+        threading.Thread(target=cleanup, daemon=True).start()
+
+    def _reaper(self):
+        while not self.closed:
+            time.sleep(0.5)
+            with self.lock:
+                now = time.time()
+                for t in list(self.tunnels.values()):
+                    if t.state == 'ready' and t.proc.poll() is not None:
+                        t.state = 'dead'
+                    if t.users > 0 or t.state == 'starting':
+                        continue
+                    if t.state != 'ready' or t.retired or (now - t.idle_since) * 1000 >= t.keep_ms:
+                        self._close(t)
+
+    def set_keep(self, keep_ms):
+        with self.lock:
+            self.keep_ms = keep_ms
+            for t in self.tunnels.values():
+                t.keep_ms = keep_ms
+
+    def close_tunnels(self, host_key=None):
+        """Close unused tunnels now (all, or those to one server); busy ones close when their request ends."""
+        with self.lock:
+            for t in list(self.tunnels.values()):
+                if host_key is not None and t.target['key'] != host_key:
+                    continue
+                if t.users <= 0 and t.state != 'starting':
+                    self._close(t)
+                else:
+                    t.retired = True
+
+    # ---- requests ----
+    def start(self, kind, msg):
+        rid = msg['id']
+        with self.lock:
+            if rid in self.jobs:
+                raise ValueError('duplicate request id')
+            job = Job(rid)
+            self.jobs[rid] = job
+        fn = {'run': self._run, 'sshTest': self._test, 'sshScan': self._scan}[kind]
+        threading.Thread(target=self._guard, args=(fn, job, msg), daemon=True).start()
+
+    def _guard(self, fn, job, msg):
+        try:
+            fn(job, msg)
+        except Exception as e:  # noqa: BLE001
+            if not job.cancel.is_set():
+                self.reply(job.id, {'type': 'error', 'messageB64': b64(str(e))})
+        finally:
+            with self.lock:
+                self.jobs.pop(job.id, None)
+            self.drop_folder(job.id)
+
+    def cancel(self, rid):
+        with self.lock:
+            self.failed.discard(rid)
+            job = self.jobs.get(rid)
+        if not job:
+            self.drop_folder(rid)
+            return
+        job.cancel.set()
+        p = job.proc
+        if p is not None and p.poll() is None:
+            try:
+                p.kill()
+            except OSError:
+                pass
+        self.reply(rid, {'type': 'cancelled'})
+
+    def _wait_tunnel(self, job, t):
+        while not t.done.wait(0.1):
+            if job.cancel.is_set() or self.closed:
+                return False
+        return not job.cancel.is_set()
+
+    def _ssh_error(self, rid, t):
+        self.reply(rid, {'type': 'sshError', 'exitCode': t.exit, 'messageB64': b64(t.err), 'pathB64': b64(t.ssh)})
+
+    def _run(self, job, msg):
+        rid = job.id
+        d = self.folder(rid)
+        curl, base, hdr, body_path = curl_command(msg, d)
+        timeout = (msg.get('timeoutMs') or 0) / 1000.0 or None
+        keep_ms = keep_of(msg.get('keepMs'), self.keep_ms)
+        cfg = msg.get('ssh')
+        tun = None
+        retried = False
+        try:
+            while True:
+                argv, env, reused, log_from = base, None, False, 0
+                if cfg:
+                    tun, reused = self.acquire(cfg)
+                    with self.lock:
+                        log_from = tun.mark() if reused else 0
+                    if not self._wait_tunnel(job, tun):
+                        return
+                    if tun.state == 'failed':
+                        self._ssh_error(rid, tun)
+                        return
+                    if tun.state != 'ready':
+                        # The tunnel closed before curl started: take another one (once)
+                        if retried:
+                            self._ssh_error(rid, tun)
+                            return
+                        retried = True
+                        self.release(tun, keep_ms)
+                        tun = None
+                        continue
+                    # -q must be first: ignore .curlrc, which could set a proxy or noproxy
+                    argv = ['-q', '--socks5-hostname', '127.0.0.1:%d' % tun.port, '--noproxy', ''] + base
+                    env = {k: v for k, v in os.environ.items() if k not in PROXY_ENV}
+                for f in (hdr, body_path):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+                started = time.time()
+                proc = subprocess.Popen([curl] + argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, cwd=d, env=env)
+                job.proc = proc
+                if job.cancel.is_set():
+                    proc.kill()
+                timed_out = False
+                try:
+                    out, err = proc.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    proc.kill()
+                    out, err = proc.communicate()
+                if job.cancel.is_set():
+                    return
+                code = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+                if tun and not retried and not timed_out and code in (7, 97) and tun.proc.poll() is not None:
+                    # The kept tunnel had closed (server restart, network change), so curl could not reach the SOCKS
+                    # port and the request never left this PC: open a new connection once.
+                    retried = True
+                    self.release(tun, keep_ms)
+                    tun = None
+                    continue
+                break
+            elapsed = int((time.time() - started) * 1000)
+            ssh_meta = None
+            if tun:
+                time.sleep(0.02)  # let the log reader take ssh's last line
+                with self.lock:
+                    log = tun.since(log_from)
+                ssh_meta = {'port': tun.port, 'connectMs': 0 if reused else tun.ms, 'reused': reused,
+                            'logB64': b64(log), 'pathB64': b64(tun.ssh)}
+            send_result(curl, proc.returncode, timed_out, elapsed, out, err, hdr, body_path, ssh_meta, rid=rid)
+        finally:
+            if tun:
+                self.release(tun, keep_ms)
+
+    def _test(self, job, msg):
+        # Always a new connection, so the test checks the server, user and password as they are now.
+        # The tested connection then replaces older ones to the same server and stays for the next request.
+        keep_ms = keep_of(msg.get('keepMs'), self.keep_ms)
+        tun, _ = self.acquire(msg.get('ssh') or {}, fresh=True)
+        try:
+            if not self._wait_tunnel(job, tun):
+                return
+            if tun.state != 'ready':
+                self._ssh_error(job.id, tun)
+                return
+            with self.lock:
+                for o in self.tunnels.values():
+                    if o is not tun and o.key == tun.key:
+                        o.retired = True
+                log = tun.since(0)
+            self.reply(job.id, {'type': 'sshOk', 'connectMs': tun.ms, 'logB64': b64(log),
+                                'fingerprintB64': b64(fingerprint_of(tun.ssh, tun.target)), 'pathB64': b64(tun.ssh)})
+        finally:
+            self.release(tun, keep_ms)
+
+    def _scan(self, job, msg):
+        keys, fp, err = scan_host_keys(msg.get('ssh') or {}, self.folder(job.id))
+        self.reply(job.id, {'type': 'sshScanned', 'keysB64': b64(keys), 'fingerprintsB64': b64(fp), 'errB64': b64(err)})
+
+    def handle(self, msg):
+        t = msg.get('type')
+        if t == 'config':
+            self.set_keep(keep_of(msg.get('keepMs'), self.keep_ms))
+            return
+        if t == 'closeTunnels':
+            self.close_tunnels()
+            return
+        rid = str(msg.get('id') or '')
+        if not ID_RE.match(rid):
+            raise ValueError('invalid request id: ' + rid)
+        try:
+            if t == 'file':
+                with self.lock:
+                    if rid in self.failed:
+                        return
+                name = str(msg.get('name', ''))
+                if not NAME_RE.match(name):
+                    raise ValueError('invalid file name')
+                with open(os.path.join(self.folder(rid), name), 'ab') as f:
+                    f.write(base64.b64decode(msg.get('data') or ''))
+            elif t == 'run':
+                with self.lock:
+                    dropped = rid in self.failed
+                    self.failed.discard(rid)
+                if dropped:
+                    self.drop_folder(rid)
+                    return
+                self.start('run', msg)
+            elif t == 'cancel':
+                self.cancel(rid)
+            elif t in ('sshTest', 'sshScan'):
+                self.start(t, msg)
+            elif t == 'sshTrust':
+                self.reply(rid, {'type': 'sshTrusted', 'added': trust_host_keys(msg.get('ssh') or {}, msg.get('keys'))})
+            elif t == 'sshForget':
+                n = forget_host(msg.get('ssh') or {})
+                # The trust is gone, so the tunnels to that server close (busy ones when their request ends)
+                self.close_tunnels(ssh_target(msg.get('ssh') or {})['key'])
+                self.reply(rid, {'type': 'sshForgot', 'removed': n})
+            elif t == 'ping':
+                self.reply(rid, pong(msg, session=True))
+            else:
+                raise ValueError('unknown message type: %s' % t)
+        except Exception as e:  # noqa: BLE001
+            if t == 'file':
+                with self.lock:
+                    self.failed.add(rid)
+                self.drop_folder(rid)
+            self.reply(rid, {'type': 'error', 'messageB64': b64(str(e))})
+
+    def shutdown(self):
+        with self.lock:
+            self.closed = True
+            jobs = list(self.jobs.values())
+            tunnels = list(self.tunnels.values())
+        for j in jobs:
+            j.cancel.set()
+            p = j.proc
+            if p is not None and p.poll() is None:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+        for t in tunnels:
+            t.kill()
+        for t in tunnels:
+            try:
+                t.proc.wait(1)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def clear_stale():
+    """A helper that was stopped by force could not close its SSH tunnels. Its work folder (ssoda-s<pid>-...) is
+    left behind: when that helper is gone, stop the ssh started from that folder."""
+    if os.name != 'posix':
+        return  # never call os.kill(pid, 0) on Windows: there it ends the process
+    try:
+        tmp = tempfile.gettempdir()
+        stale = []
+        for name in os.listdir(tmp):
+            m = re.match(r'^ssoda-s(\d+)-', name)
+            if not m or int(m.group(1)) == os.getpid():
+                continue
+            path = os.path.join(tmp, name)
+            try:
+                if not os.path.isdir(path) or os.stat(path).st_uid != os.getuid():
+                    continue
+                os.kill(int(m.group(1)), 0)
+                continue  # its helper is still running
+            except ProcessLookupError:
+                stale.append(path)
+            except OSError:
+                continue
+        if not stale:
+            return
+        out = subprocess.run(['ps', 'axww', '-o', 'pid=,args='], stdin=subprocess.DEVNULL, capture_output=True, timeout=10).stdout
+        for line in out.decode('utf-8', 'replace').splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            if os.path.basename(parts[1].split(' ', 1)[0]) == 'ssh' and any(s + os.sep in parts[1] for s in stale):
+                try:
+                    os.kill(int(parts[0]), signal.SIGTERM)
+                except OSError:
+                    pass
+        for s in stale:
+            shutil.rmtree(s, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def session_main(first, work):
+    sess = Session(work)
+    sess.keep_ms = keep_of(first.get('keepMs'), sess.keep_ms)
+    send(pong(first, session=True))
+    clear_stale()
     try:
         while True:
             msg = read_msg()
             if msg is None:
                 break
-            t = msg.get('type')
-            if t == 'ping':
-                curl = find_curl(msg.get('curlPath'))
-                ver = ''
-                if curl:
-                    try:
-                        r = subprocess.run([curl, '--version'], stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-                        ver = r.stdout.decode('utf-8', 'replace').splitlines()[0].strip()
-                    except Exception as e:  # noqa: BLE001
-                        ver = 'error: %s' % e
-                ssh = find_ssh()
-                ssh_ver = ''
-                if ssh:
-                    try:
-                        r = subprocess.run([ssh, '-V'], stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-                        ssh_ver = (r.stderr + r.stdout).decode('utf-8', 'replace').strip().splitlines()[0]
-                    except Exception as e:  # noqa: BLE001
-                        ssh_ver = 'error: %s' % e
-                send({'type': 'pong', 'hostVersion': HOST_VERSION, 'platform': sys.platform,
-                      'curlB64': b64(ver), 'pathB64': b64(curl or ''), 'sshB64': b64(ssh_ver), 'sshPathB64': b64(ssh or '')})
-                break
-            elif t == 'file':
-                name = str(msg.get('name', ''))
-                if not NAME_RE.match(name):
-                    raise ValueError('invalid file name')
-                with open(os.path.join(work, name), 'ab') as f:
-                    f.write(base64.b64decode(msg.get('data') or ''))
-            elif t == 'run':
-                threading.Thread(target=watch_stdin, daemon=True).start()
-                run_request(msg, work)
-                break
-            elif t == 'sshTest':
-                threading.Thread(target=watch_stdin, daemon=True).start()
-                tun = start_tunnel(msg.get('ssh') or {}, work)
-                if not tun['ok']:
-                    send_ssh_error(tun)
-                else:
-                    log = stop_tunnel(tun)
-                    send({'type': 'sshOk', 'connectMs': tun['ms'], 'logB64': b64(log),
-                          'fingerprintB64': b64(host_fingerprint(tun)), 'pathB64': b64(tun['ssh'])})
-                break
-            elif t == 'sshScan':
-                keys, fp, err = scan_host_keys(msg.get('ssh') or {}, work)
-                send({'type': 'sshScanned', 'keysB64': b64(keys), 'fingerprintsB64': b64(fp), 'errB64': b64(err)})
-                break
-            elif t == 'sshTrust':
-                send({'type': 'sshTrusted', 'added': trust_host_keys(msg.get('ssh') or {}, msg.get('keys'))})
-                break
-            elif t == 'sshForget':
-                send({'type': 'sshForgot', 'removed': forget_host(msg.get('ssh') or {})})
-                break
+            sess.handle(msg)
+    finally:
+        sess.shutdown()
+
+
+def main():
+    work = None
+    try:
+        first = read_msg()
+        if first is None:
+            return
+        if first.get('type') == 'ping' and first.get('session') is True:
+            # The folder name carries this helper's process ID (see clear_stale)
+            work = tempfile.mkdtemp(prefix='ssoda-s%d-' % os.getpid())
+            session_main(first, work)
+        else:
+            work = tempfile.mkdtemp(prefix='ssoda-')
+            one_shot(first, work)
     except Exception as e:  # noqa: BLE001
         try:
             send({'type': 'error', 'messageB64': b64(str(e))})
         except Exception:
             pass
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if work:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == '__main__':
