@@ -166,8 +166,20 @@ const KEYS = {
   Delete: { code: 'Delete', vk: 46 }, Backspace: { code: 'Backspace', vk: 8 },
   z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' }, b: { code: 'KeyB', vk: 66, text: 'b' },
   c: { code: 'KeyC', vk: 67, text: 'c' }, 'ㅊ': { code: 'KeyC', vk: 67, text: 'ㅊ' },
-  t: { code: 'KeyT', vk: 84, text: 't' }, 'ㅅ': { code: 'KeyT', vk: 84, text: 'ㅅ' }
+  t: { code: 'KeyT', vk: 84, text: 't' }, 'ㅅ': { code: 'KeyT', vk: 84, text: 'ㅅ' },
+  ' ': { code: 'Space', vk: 32, text: ' ' }
 };
+/* 누른 채로 두기·떼기 (Space 페이지 조작) */
+async function keyDown(k) {
+  const d = KEYS[k];
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: k, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk, text: d.text, unmodifiedText: d.text }, pageS);
+  await sleep(60);
+}
+async function keyUp(k) {
+  const d = KEYS[k];
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk }, pageS);
+  await sleep(60);
+}
 async function key(k, modifiers = 0) {
   const d = KEYS[k];
   const base = { key: k, code: d.code, windowsVirtualKeyCode: d.vk, nativeVirtualKeyCode: d.vk, modifiers };
@@ -189,7 +201,18 @@ async function freshPage(url = `http://127.0.0.1:${WEB}/main.html`) {
   mainFrameId = tree.frameTree.frame.id;
 }
 
-const OUT_KEYS = ['outFormat', 'outScale', 'nameTemplate', 'askWhere', 'stamp'];
+const OUT_KEYS = ['outFormat', 'outScale', 'nameTemplate', 'askWhere', 'stamp', 'hideScrollbars', 'keepAfter'];
+
+/* 피커를 닫는다. 정리한 것이 있으면 Esc 를 두 번 눌러야 닫히므로(실수 방지) 닫힐 때까지 몇 번 누른다 */
+async function closePicker() {
+  for (let i = 0; i < 4; i++) {
+    if (!(await iso('!!(window.__cleanShot && window.__cleanShot.state.active)').catch(() => false))) return true;
+    await key('Escape');
+  }
+  return !(await iso('window.__cleanShot.state.active').catch(() => false));
+}
+/* 스크롤 막대를 뺀 문서 화면 크기 (CSS px) — 보이는 화면 캡처는 기본으로 이만큼만 저장한다 */
+const clientSize = () => main(`({ w: document.documentElement.clientWidth, h: document.documentElement.clientHeight })`);
 async function activate() {
   // 앞 시험이 저장한 설정(빈자리 제거·툴바 위치·저장 설정)이 다음 시험에 새지 않게 되돌린다
   const r = await sw(`(async () => { await chrome.storage.sync.set({ forceRemove: false, barTop: false }); await chrome.storage.sync.remove(${JSON.stringify(OUT_KEYS)}); const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await togglePicker(tab); return tab.id; })()`);
@@ -530,7 +553,7 @@ const cases = {
     await move(center(s).x, center(s).y);
     await sleep(100);
     await shot('normal');
-    await key('Escape');
+    await closePicker();
     await main(`document.getElementById('dlg').showModal()`);
     await activate();
     await key('5');
@@ -539,7 +562,7 @@ const cases = {
     await move(10, 300);
     await sleep(100);
     await shot('dialog');
-    await key('Escape');
+    await closePicker();
     await main(`document.getElementById('dlg').close()`);
     // 6 영역: 고른 부분 테두리와 바깥 어둡게
     await activate();
@@ -559,7 +582,7 @@ const cases = {
     await move(10, 300);
     await sleep(100);
     await shot('notes');
-    await key('Escape');
+    await closePicker();
     // 9 화살표·0 번호·T 글상자와 고른 화살표(두 끝 핸들), 고른 강조(8방향 핸들)
     await activate();
     const bn = await rectMain('#banner');
@@ -578,8 +601,7 @@ const cases = {
     await move(10, 330);
     await sleep(100);
     await shot('annotate');
-    await key('Escape');
-    await key('Escape');
+    await closePicker();
     // 주소·시각 띠를 붙여 저장한 그림 (띠 모양 확인용)
     await activate();
     await sw(`chrome.storage.sync.set({ stamp: true }).then(() => true)`);
@@ -761,7 +783,7 @@ const cases = {
     await click(center(l1).x, center(l1).y);
     check('최상위 링크 클릭 차단', await main(`window.__navClicks === 0 && location.pathname === '/main.html'`));
     // 닫으면 모두 원래대로
-    await key('Escape');
+    await closePicker();
     await sleep(100);
     const after = await main(`(() => { const f = document.getElementById('xoFrame'); const d = document.getElementById('sameFrame').contentDocument; return { xoStyle: f.getAttribute('style'), xoPe: getComputedStyle(f).pointerEvents, innerStyle: d.getElementById('innerSecret').getAttribute('style'), frameCursor: [...d.querySelectorAll('style')].length, topCursor: !!document.getElementById('__cleanshot_cursor__'), host: !!document.getElementById('__cleanshot_host__'), shadow: document.getElementById('shadowHost').shadowRoot.getElementById('shadowInner').getAttribute('style') }; })()`);
     check('Esc 후 iframe·shadow·커서 스타일이 모두 원래대로', after.xoStyle === null && after.xoPe === 'auto' && after.innerStyle === null && after.frameCursor === 1 && !after.topCursor && !after.host && after.shadow === 'display:inline-block;width:150px;height:40px;background:rgb(255,0,0);color:#fff', after);
@@ -805,7 +827,7 @@ const cases = {
     await key('z', CTRL);
     const after = await main(`(() => { const b = document.getElementById('bold'); const p = document.getElementById('textTarget'); return { sameBold: b === window.__refs.bold, sameText: b.firstChild === window.__refs.worldText && b.childNodes.length === 1, sameHello: p.firstChild === window.__refs.hello, text: p.textContent, ce: b.getAttribute('contenteditable') }; })()`);
     check('되돌리기 후 원래 노드 객체와 글자 그대로', after.sameBold && after.sameText && after.sameHello && after.text === 'Hello world!' && after.ce === null, after);
-    await key('Escape');
+    await closePicker();
     await main(`document.getElementById('bold').click()`);
     check('되돌린 요소의 이벤트 리스너가 살아 있음', await main(`window.__boldClicks === 1`));
     // 더 깊은 편집: 부모 문단 전체를 고쳐 쓴 뒤 되돌리기
@@ -920,7 +942,7 @@ const cases = {
         const r = ${JSON.stringify(box)};
         const d = x.getImageData(Math.round(r.x), Math.round(r.y), Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h))).data;
         let black = 0; for (let i = 0; i < d.length; i += 4) if (d[i] < 8 && d[i + 1] < 8 && d[i + 2] < 8) black++;
-        return { w: bmp.width, h: bmp.height, black: black / (d.length / 4), vw: Math.round(innerWidth * devicePixelRatio) };
+        return { w: bmp.width, h: bmp.height, black: black / (d.length / 4), vw: Math.round(document.documentElement.clientWidth * devicePixelRatio) };
       })()`);
       check('클립보드의 PNG 는 보이는 화면 크기이고 가리기가 칠해짐', !!clip && clip.w === clip.vw && clip.black > 0.999, JSON.stringify(clip));
       const off = await iso(`!(window.__cleanShot && window.__cleanShot.state.active)`);
@@ -977,7 +999,7 @@ const cases = {
     await key('z', CTRL);
     const unset = await iso(`window.__cleanShot.state.crop === null`);
     check('Ctrl+Z 로 고른 영역을 없앰', set && unset, JSON.stringify({ set, unset }));
-    await key('Escape');
+    await closePicker();
     await sleep(300);
 
     // 4) 복사도 고른 부분만
@@ -1250,7 +1272,7 @@ const cases = {
     check('아무것도 쓰지 않은 글상자는 없어짐', (await notesNow()).filter((n) => n.kind === 'label').length === 1);
     await key('Escape');
     await key('Escape');
-    check('Esc 를 더 누르면 닫힘', !(await iso('window.__cleanShot.state.active')));
+    check('작업이 있으면 Esc 를 두 번 눌러야 닫힘 (실수 방지)', !(await iso('window.__cleanShot.state.active')));
 
     // 9) 가리기 박스를 끌어 옮기면 캡처 PNG 의 새 자리가 검정, 원래 자리는 그대로. 고른 표시(점선)는 찍히지 않음
     await sleep(300);
@@ -1366,8 +1388,7 @@ const cases = {
 
     // 1) JPEG: 가리기는 그대로 검정, 가리지 않은 빨강은 빨강
     await freshPage();
-    const vw = await main('innerWidth');
-    const vh = await main('innerHeight');
+    const { w: vw, h: vh } = await clientSize(); // 보이는 화면 캡처는 기본으로 스크롤 막대를 뺀다
     await activate();
     await setOut({ outFormat: 'jpeg' });
     await key('5');
@@ -1470,7 +1491,7 @@ const cases = {
     const keep = await iso('!!(window.__cleanShot.state.active && !window.__cleanShot.state.busy && window.__cleanShot.state.masks.length === 1)');
     check('저장 위치 묻기: 창을 닫으면 저장하지 않고(대신 받기도 안 함) 알림, 정리한 상태는 그대로',
       /저장 위치 창을 닫아 저장하지 않았습니다/.test(t6) && got.length === 0 && keep, `${t6} files=${got.length} keep=${keep}`);
-    await key('Escape');
+    await closePicker();
     const decided = await sw(`(async () => { const id = await chrome.downloads.download({ url: 'data:text/plain,hi', filename: 'cleanshot/decide.txt', saveAs: false }); return downloadDecision(id, 5000); })()`);
     check('저장 위치가 정해지면 그 경로를 받음 (같은 기다리기, 창 없이)', !!decided && /decide\.txt$/.test(decided.filename || ''), JSON.stringify(decided));
     await sleep(600);
@@ -1549,9 +1570,10 @@ const cases = {
         await sleep(100);
       }
       const init = await page(`({ f: document.querySelector('input[name=outFormat]:checked').value, s: document.querySelector('input[name=outScale]:checked').value,
-        n: document.getElementById('nameTemplate').value, preview: document.getElementById('namePreview').textContent })`);
-      check('설정 화면: 기본값(PNG·화면 그대로·기본 양식)과 파일 이름 미리 보기',
-        init.f === 'png' && init.s === 'device' && init.n === 'cleanshot/{host}-{date}-{time}' && /cleanshot\/example\.com-\d{8}-\d{6}\.png/.test(init.preview), JSON.stringify(init));
+        n: document.getElementById('nameTemplate').value, preview: document.getElementById('namePreview').textContent,
+        hs: document.getElementById('hideScrollbars').checked, ka: document.getElementById('keepAfter').checked })`);
+      check('설정 화면: 기본값(PNG·화면 그대로·기본 양식·스크롤 막대 빼기 켬·이어서 찍기 끔)과 파일 이름 미리 보기',
+        init.f === 'png' && init.s === 'device' && init.n === 'cleanshot/{host}-{date}-{time}' && init.hs === true && init.ka === false && /cleanshot\/example\.com-\d{8}-\d{6}\.png/.test(init.preview), JSON.stringify(init));
       await page(`(() => {
         document.querySelector('input[name=outFormat][value=webp]').click();
         document.querySelector('input[name=outScale][value="1"]').click();
@@ -1576,7 +1598,126 @@ const cases = {
       await cdp.send('Target.activateTarget', { targetId: pageTargetId }).catch(() => {});
       await sleep(300);
     }
-    if (await iso('window.__cleanShot.state.active').catch(() => false)) await key('Escape');
+    await closePicker();
+  },
+
+  /* 작업 흐름: Esc 실수 방지(정리한 것이 있으면 두 번), 찍고 계속(연속 캡처), Space 를 누른 채 페이지 조작, 스크롤 막대 빼기 */
+  async workflow() {
+    const waitToast = async (re, n = 200) => {
+      let t = '';
+      for (let i = 0; i < n && !re.test(t); i++) { t = await toastText().catch(() => ''); await sleep(25); }
+      return t;
+    };
+    const active = () => iso('!!(window.__cleanShot && window.__cleanShot.state.active)').catch(() => false);
+
+    // 1) Esc: 정리한 것이 없으면 한 번에 닫힘
+    await freshPage();
+    await activate();
+    await key('Escape');
+    check('정리한 것이 없으면 Esc 한 번에 닫힘', !(await active()));
+
+    // 2) 정리한 것이 있으면 한 번은 알림만, 곧바로 한 번 더 누르면 모두 되돌리고 닫힘
+    await activate();
+    await key('1');
+    const bn = await rectMain('#banner');
+    await click(center(bn).x, center(bn).y);
+    await key('Escape');
+    const t1 = await waitToast(/한 번 더/);
+    const on1 = await active();
+    const hidden1 = await main(`document.getElementById('banner').style.visibility`);
+    await key('Escape');
+    await sleep(150);
+    const on2 = await active();
+    const hidden2 = await main(`document.getElementById('banner').getAttribute('style')`);
+    check('정리한 것이 있으면 Esc 한 번은 알림만(그대로 둠), 한 번 더 누르면 모두 되돌리고 닫힘',
+      on1 && hidden1 === 'hidden' && /작업 1개를 모두 되돌리고 닫으려면 Esc 를 한 번 더/.test(t1) && !on2 && hidden2 === null, { t1, on1, hidden1, on2, hidden2 });
+
+    // 3) 두 번째 Esc 가 늦으면(2.5초 넘게) 다시 알림만
+    await activate();
+    await key('1');
+    await click(center(bn).x, center(bn).y);
+    await key('Escape');
+    await sleep(2800);
+    await key('Escape');
+    const on3 = await active();
+    await key('Escape');
+    const on4 = await active();
+    check('두 번째 Esc 가 2.5초를 넘기면 다시 알림만, 곧바로 한 번 더 누르면 닫힘', on3 && !on4, { on3, on4 });
+
+    // 4) 찍고 계속: 툴바 단추로 켜면 저장한 뒤에도 정리한 상태가 남고 이어서 또 찍을 수 있음
+    await activate();
+    const kb = await uiRect('.keep');
+    await click(center(kb).x, center(kb).y);
+    const label = await iso(`${UI}.querySelector('.keep').textContent`);
+    const stored = await sw(`chrome.storage.sync.get('keepAfter')`);
+    await key('5');
+    const fsr = await rectMain('#fixedSecret');
+    await click(center(fsr).x, center(fsr).y);
+    let before = new Set(listFiles());
+    await key('Enter');
+    const f1 = await waitNewFile(before);
+    const t4 = await waitToast(/이어서 찍을 수 있습니다/);
+    await sleep(900);
+    const kept = await iso('!!(window.__cleanShot.state.active && window.__cleanShot.state.masks.length === 1 && window.__cleanShot.state.history.length === 1)');
+    before = new Set(listFiles());
+    await key('Enter');
+    const f2 = await waitNewFile(before);
+    const img2 = f2 ? decodePng(fs.readFileSync(f2)) : null;
+    const br2 = img2 ? blackRatio(img2, ...Object.values(scaled(fsr))) : 0;
+    check('찍고 계속: 툴바 단추로 켜면(설정에 남음) 저장한 뒤에도 정리한 상태가 남고, 이어서 찍은 그림에도 가리기',
+      label === '찍고 계속' && stored.keepAfter === true && !!f1 && kept && /이어서 찍을 수 있습니다/.test(t4) && !!f2 && br2 > 0.999,
+      { label, stored, f1: !!f1, kept, t4, f2: !!f2, black: br2.toFixed(4) });
+    check('찍고 계속에서도 닫으면 모두 되돌림', (await closePicker()) && (await main(`document.getElementById('fixedSecret').getAttribute('style')`)) === null);
+    await sleep(600);
+
+    // 5) Space 를 누른 채 누르면 페이지가 클릭을 받고(메뉴가 열림), 떼면 다시 막음. 연 메뉴는 Enter 로 찍힘
+    await freshPage();
+    await activate();
+    await key('3'); // 클릭만으로는 아무것도 하지 않는 도구 (기본 도구 지우기는 단추를 숨겨 버린다)
+    const dd = await rectMain('#dd');
+    await click(center(dd).x, center(dd).y);
+    const blocked = await main(`({ clicks: window.__ddClicks, open: !document.getElementById('ddMenu').hidden })`);
+    await keyDown(' ');
+    const during = await iso(`({ pass: !!window.__cleanShot.state.pass, cursor: document.getElementById('__cleanshot_cursor__') ? document.getElementById('__cleanshot_cursor__').textContent : null })`);
+    const xoDuring = await main(`document.getElementById('xoFrame').style.pointerEvents`);
+    await click(center(dd).x, center(dd).y);
+    await keyUp(' ');
+    const after = await main(`({ clicks: window.__ddClicks, open: !document.getElementById('ddMenu').hidden, y: scrollY })`);
+    const passAfter = await iso('!!window.__cleanShot.state.pass');
+    const xoAfter = await main(`document.getElementById('xoFrame').style.pointerEvents`);
+    check('Space 를 누르지 않으면 페이지 클릭을 막음', blocked.clicks === 0 && !blocked.open, blocked);
+    check('Space 를 누르는 동안 페이지가 클릭을 받아 메뉴가 열리고(페이지는 스크롤되지 않음), 도구 커서·다른 출처 iframe 막기를 풂',
+      during.pass && during.cursor === '' && xoDuring === '' && after.clicks === 1 && after.open && after.y === 0, { during, xoDuring, after });
+    check('Space 를 떼면 다시 막음 (iframe 막기·도구 커서 되돌림)', !passAfter && xoAfter === 'none', { passAfter, xoAfter });
+    const mr = await rectMain('#ddMenu');
+    before = new Set(listFiles());
+    await key('Enter');
+    const f5 = await waitNewFile(before, /\.png$/);
+    const img5 = f5 ? decodePng(fs.readFileSync(f5)) : null;
+    const px5 = img5 ? pixel(img5, Math.round((mr.x + mr.w / 2) * DPR), Math.round((mr.y + mr.h / 2) * DPR)) : null;
+    check('연 메뉴는 Enter 로 찍어도 닫히지 않고 그림에 남음', !!px5 && sameRgb(px5, [255, 128, 0]), px5);
+    await sleep(900);
+
+    // 6) 스크롤 막대: 기본으로 빼고 찍음, 설정을 끄면 화면 그대로
+    await freshPage();
+    const cs = await clientSize();
+    const iw = await main('innerWidth');
+    await activate();
+    before = new Set(listFiles());
+    await key('Enter');
+    const fa = await waitNewFile(before, /\.png$/);
+    const ia = fa ? decodePng(fs.readFileSync(fa)) : null;
+    await sleep(900);
+    await activate();
+    await sw(`chrome.storage.sync.set({ hideScrollbars: false }).then(() => true)`);
+    before = new Set(listFiles());
+    await key('Enter');
+    const fb = await waitNewFile(before, /\.png$/);
+    const ib = fb ? decodePng(fs.readFileSync(fb)) : null;
+    check('스크롤 막대: 기본으로 빼고 찍음(너비 = 문서 화면), 설정을 끄면 화면 그대로(막대 포함)',
+      cs.w < iw && !!ia && ia.width === Math.round(cs.w * DPR) && !!ib && ib.width === Math.round(iw * DPR),
+      { client: cs.w, inner: iw, a: ia && ia.width, b: ib && ib.width });
+    await sleep(900);
   },
 
   /* 3 저장 실패 시 대체 경로 */
@@ -1632,8 +1773,8 @@ const cases = {
     rects.push({ x: 700, y: 120, w: 100, h: 40 });
     const shot = await captureAndRead();
     if (!shot.img) { check('캡처 파일', false, 'no file'); return; }
-    const vw = await main('innerWidth');
-    check(`PNG 크기 = 화면 × DPR(${DPR})`, shot.img.width === Math.round(vw * DPR), `${shot.img.width}x${shot.img.height} vw=${vw}`);
+    const vw = (await clientSize()).w; // 스크롤 막대를 뺀 화면 (기본 설정)
+    check(`PNG 크기 = 스크롤 막대를 뺀 화면 × DPR(${DPR})`, shot.img.width === Math.round(vw * DPR), `${shot.img.width}x${shot.img.height} vw=${vw}`);
     rects.forEach((r, i) => {
       const br = blackRatio(shot.img, ...Object.values(scaled(r)));
       check(`가린 영역 ${i + 1} 이 PNG 에서 검정`, br > 0.999, `${fmt(r)} black=${br.toFixed(4)}`);
@@ -1790,7 +1931,7 @@ const cases = {
     check('멈춘 뒤 피커는 켜진 채 다시 쓸 수 있음', await iso('window.__cleanShot.state.active && !window.__cleanShot.state.busy && !window.__cleanShot.state.full'));
     const w = await swFull();
     check('멈춘 뒤 service worker 가 쌓던 이미지를 버리고 배지를 지움', w.runs === 0 && w.badge === '', w);
-    await key('Escape');
+    await closePicker();
   },
 
   /* 찍는 사이 탭이 활성 탭이 아니게 되면(시험에서는 확인 함수를 바꿔 흉내) 멈추고 저장하지 않는다 */
@@ -1812,7 +1953,7 @@ const cases = {
     } finally {
       await sw(`stillActive = self.__origStill`);
     }
-    await key('Escape');
+    await closePicker();
   },
 
   /* 실제로 다른 탭을 열었다 닫아도, 다른 탭 화면(자홍색)이 저장된 이미지에 섞이지 않는다 */
@@ -1843,7 +1984,7 @@ const cases = {
     check('다른 탭을 연 동안 그 탭 화면이 이미지에 섞이지 않음', magenta === 0, { files: files.map((f) => path.basename(f)), magenta });
     const w = await swFull();
     check('다른 탭 시험 뒤 service worker 정리', w.runs === 0 && w.badge === '', w);
-    if (await iso('window.__cleanShot.state.active').catch(() => false)) await key('Escape');
+    await closePicker();
   },
 
   /* 너무 긴 페이지: 캔버스 한도(시험에서 1500px 로 줄임)까지만 저장하고 알린다 */

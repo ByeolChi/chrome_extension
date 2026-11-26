@@ -27,6 +27,9 @@
   #pop { position: fixed; inset: auto; left: 700px; top: 620px; margin: 0; padding: 10px; border: 2px solid #333; background: #fff; }
   #popSecret { width: 160px; height: 40px; }
   #link1 { margin-left: 40px; }
+  /* 클릭으로 여닫는 메뉴 — Space 를 누른 채 페이지 조작 시험 */
+  #dd { position: absolute; left: 900px; top: 490px; width: 120px; height: 32px; }
+  #ddMenu { position: absolute; left: 900px; top: 526px; width: 160px; height: 60px; background: rgb(255, 128, 0); }
 </style>
 </head>
 <body>
@@ -52,6 +55,8 @@
     <p id="textTarget">Hello <b id="bold">world</b>!</p>
   </div>
   <a id="link1" href="/nav-target.html">a link that must not navigate</a>
+  <button id="dd" type="button">menu</button>
+  <div id="ddMenu" hidden></div>
   <div id="stickywrap">
     <div id="sticky"><div id="stickySecret" class="secret">sticky secret</div></div>
   </div>
@@ -89,6 +94,17 @@
     worldText: bold.firstChild
   };
   document.getElementById('link1').addEventListener('click', () => { window.__navClicks++; });
+  // 메뉴: 단추를 누르면 열리고, 바깥을 누르면 닫힌다 (흔한 드롭다운)
+  window.__ddClicks = 0;
+  document.getElementById('dd').addEventListener('click', (e) => {
+    window.__ddClicks++;
+    const m = document.getElementById('ddMenu');
+    m.hidden = !m.hidden;
+    e.stopPropagation();
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest || !e.target.closest('#dd, #ddMenu')) document.getElementById('ddMenu').hidden = true;
+  });
 </script>
 </body>
 </html>

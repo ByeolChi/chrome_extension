@@ -21,10 +21,12 @@ test('settings.js 를 서비스 워커·설정 화면이 싣고, 배포 zip 에 
 });
 
 test('기본값과 값 고르기: 모르는 값은 기본값, 아는 값은 그대로', () => {
-  assert.deepEqual(CS.normalize(null), { outFormat: 'png', outScale: 'device', nameTemplate: 'cleanshot/{host}-{date}-{time}', askWhere: false, stamp: false });
-  assert.deepEqual(CS.normalize({ outFormat: 'gif', outScale: 3, nameTemplate: '   ', askWhere: 'yes', stamp: 1 }), CS.normalize(null));
-  assert.deepEqual(CS.normalize({ outFormat: 'webp', outScale: 2, nameTemplate: '  a/{title} ', askWhere: true, stamp: true }),
-    { outFormat: 'webp', outScale: '2', nameTemplate: 'a/{title}', askWhere: true, stamp: true });
+  assert.deepEqual(CS.normalize(null), {
+    outFormat: 'png', outScale: 'device', nameTemplate: 'cleanshot/{host}-{date}-{time}', askWhere: false, stamp: false, hideScrollbars: true, keepAfter: false
+  });
+  assert.deepEqual(CS.normalize({ outFormat: 'gif', outScale: 3, nameTemplate: '   ', askWhere: 'yes', stamp: 1, hideScrollbars: 0, keepAfter: 'y' }), CS.normalize(null));
+  assert.deepEqual(CS.normalize({ outFormat: 'webp', outScale: 2, nameTemplate: '  a/{title} ', askWhere: true, stamp: true, hideScrollbars: false, keepAfter: true }),
+    { outFormat: 'webp', outScale: '2', nameTemplate: 'a/{title}', askWhere: true, stamp: true, hideScrollbars: false, keepAfter: true });
   assert.equal(CS.normalize({ nameTemplate: 'x'.repeat(500) }).nameTemplate.length, 200);
   assert.equal(CS.normalize({ outFormat: 'toString' }).outFormat, 'png'); // 객체의 물려받은 이름은 형식이 아니다
 });
