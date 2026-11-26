@@ -21,15 +21,32 @@ const isDynamic = (k) => Object.prototype.hasOwnProperty.call(DYNAMIC, k);
 /**
  * 스코프 우선순위: environment > collection > globals
  * layers: [{name:'environment', vars:[...]}, {name:'collection', ...}, {name:'globals', ...}]
+ * secret(row): 비밀 변수 행(secret: true)의 값. 행에는 값이 없고 보관함(secrets.js)에 있다.
+ *   undefined 를 돌려주면 잠겨 있어 모르는 것이다 — 그 이름은 map.locked 에 넣고, 더 낮은 곳의 같은 이름도 쓰지 않는다
+ *   (잠긴 운영 토큰 대신 글로벌의 다른 토큰이 조용히 나가지 않게).
+ * 비밀 변수 항목에는 secret: true 가 붙는다 (자동완성·풍선 도움말에서 값을 가린다).
  */
-export function buildScope(layers) {
+export function buildScope(layers, { secret } = {}) {
   const map = new Map();
+  map.locked = new Set();
   // 낮은 우선순위부터 덮어쓰기
   for (let i = layers.length - 1; i >= 0; i--) {
     const layer = layers[i];
     for (const v of layer.vars || []) {
       if (!v || v.enabled === false || !v.key) continue;
-      map.set(String(v.key).trim(), { value: String(v.value ?? ''), source: layer.name });
+      const name = String(v.key).trim();
+      if (v.secret) {
+        const val = secret ? secret(v) : String(v.value ?? '');
+        if (val === undefined) {
+          map.delete(name);
+          map.locked.add(name);
+          continue;
+        }
+        map.set(name, { value: String(val), source: layer.name, secret: true });
+      } else {
+        map.set(name, { value: String(v.value ?? ''), source: layer.name });
+      }
+      map.locked.delete(name);
     }
   }
   return map;

@@ -7,6 +7,7 @@ import {
   isDescendant, requestSignature, normalizeRequest, normalizeSsh,
 } from './model.js';
 import { buildScope, resolveString } from './variables.js';
+import { vault, looksSecretName, stripLiteralSecrets } from './secrets.js';
 import { prepareRequest } from './prepare.js';
 import { sendRequest, getBrowserCookies, initHttpEngine } from './http.js';
 import {
@@ -65,7 +66,8 @@ export const app = {
     return hit ? hit.collection : null;
   },
 
-  getScope(tab = this.activeTab()) {
+  // mask: 비밀 변수를 값 대신 {{이름}} 으로 둔다 (코드 창·cURL 복사처럼 화면이나 클립보드로 나가는 곳)
+  getScope(tab = this.activeTab(), { mask = false } = {}) {
     const env = this.activeEnv();
     const col = tab && tab.type === 'request' ? this.collectionOfTab(tab) : tab && tab.type === 'collection' ? this.findCollection(tab.refId) : null;
     return buildScope([
@@ -74,7 +76,81 @@ export const app = {
       { name: 'environment', vars: env ? env.variables : [] },
       { name: 'collection', vars: col ? col.variables : [] },
       { name: 'globals', vars: store.state.globals.variables },
-    ]);
+    ], {
+      // 비밀 변수의 값은 보관함에 있다. 잠겨 있으면 undefined (그 이름은 scope.locked)
+      secret: (v) => (vault.locked ? undefined : mask ? `{{${String(v.key).trim()}}}` : vault.get(v.id) ?? ''),
+    });
+  },
+
+  /* ---------------- 비밀 변수 ---------------- */
+  // 변수 행과 보관함을 맞추고(secrets.js 의 reconcile) 바뀐 곳을 저장한다
+  reconcileSecrets() {
+    const r = vault.reconcile(store.state);
+    r.changed.forEach((k) => store.changed(k));
+    if (r.waiting) this.ui.toast && this.ui.toast(`비밀 변수 보관함이 잠겨 있어 비밀 값 ${r.waiting}개를 아직 옮기지 못했습니다. 잠금을 풀면 옮깁니다.`, 'info', 5000);
+    return r;
+  },
+
+  // 비밀 변수 보관함이 잠겨 있는데 이 요청이 비밀 변수를 쓰면 비밀번호를 묻는다. 계속해도 되면 true
+  async ensureSecretsFor(tab) {
+    if (!vault.locked) return true;
+    const scope = this.getScope(tab);
+    if (!scope.locked.size) return true;
+    const inh = this.getInheritedAuth(this.contextIdOf(tab));
+    const p = prepareRequest(tab.draft, { scope, inheritedAuth: inh ? inh.auth : null, defaults: this.settings });
+    const need = p.unresolved.filter((n) => scope.locked.has(n));
+    if (!need.length) return true;
+    return this.unlockSecrets(need);
+  },
+
+  // 비밀번호를 물어 보관함을 연다 (취소하면 false). names: 이 요청이 쓰는 잠긴 변수 이름 (안내용)
+  async unlockSecrets(names = []) {
+    if (!vault.locked) return true;
+    const ok = this.ui.askVaultPassword ? await this.ui.askVaultPassword(names) : false;
+    if (ok) this.afterUnlock();
+    return ok;
+  },
+
+  // 비밀로 표시한 변수 행 수 (환경·글로벌·컬렉션)
+  secretCount() {
+    const st = store.state;
+    const lists = [st.globals.variables, ...st.environments.map((e) => e.variables), ...st.collections.map((c) => c.variables || [])];
+    return lists.reduce((n, l) => n + (l || []).filter((v) => v && v.secret).length, 0);
+  },
+
+  // 변수 표(KVTable 의 secrets 옵션): 비밀 행의 값은 행이 아니라 보관함에서 읽고 쓴다
+  secretRows() {
+    return {
+      locked: () => vault.locked,
+      get: (row) => (vault.locked ? undefined : vault.get(row.id) ?? ''),
+      set: (row, v) => {
+        if (!vault.locked) vault.set(row.id, v);
+      },
+      toggle: (row, on) => {
+        if (vault.locked) {
+          this.ui.toast && this.ui.toast('비밀 변수 보관함이 잠겨 있습니다. 설정 → 비밀 변수에서 잠금을 푸세요.', 'error', 4000);
+          return false;
+        }
+        if (on) {
+          vault.set(row.id, row.value ?? '');
+          row.value = '';
+          row.secret = true;
+        } else {
+          row.value = vault.get(row.id) ?? '';
+          vault.delete(row.id);
+          delete row.secret;
+        }
+        return true;
+      },
+      remove: (row) => vault.delete(row.id),
+    };
+  },
+
+  // 잠금을 푼 뒤: 잠겨 있는 동안 행에 남은 비밀 값을 보관함으로 옮기고 화면을 새로
+  afterUnlock() {
+    this.reconcileSecrets();
+    this.ui.refreshVars && this.ui.refreshVars();
+    for (const t of this.tabs) if (t.type !== 'request' && this.ui.refreshView) this.ui.refreshView(t);
   },
 
   // 상위 폴더/컬렉션에서 상속되는 인증 정보
@@ -190,6 +266,10 @@ export const app = {
     const tab = this.newRequestTab(clone(entry.request), entry.name || suggestName(entry.request.method, entry.request.url), {
       contextId: entry.itemId || entry.contextId || null,
     });
+    // 직접 쓴 토큰·비밀번호는 히스토리에 남기지 않았다 (addHistory)
+    if (entry.redacted && entry.redacted.length && this.ui.toast) {
+      this.ui.toast(`히스토리에는 ${entry.redacted.join(', ')}을(를) 남기지 않았습니다. 다시 넣거나, 비밀 변수({{이름}})로 바꿔 두면 다음부터 그대로 보낼 수 있습니다.`, 'info', 6000);
+    }
     return tab;
   },
 
@@ -308,9 +388,10 @@ export const app = {
     });
   },
 
-  async buildPrepared(tab, { engine } = {}) {
+  // mask: 비밀 변수를 {{이름}} 으로 둔 요청 (코드 창·cURL 복사)
+  async buildPrepared(tab, { engine, mask = false } = {}) {
     const forCurl = (engine || this.engineOf(tab)) === 'curl';
-    const scope = this.getScope(tab);
+    const scope = this.getScope(tab, { mask });
     const inh = this.getInheritedAuth(this.contextIdOf(tab));
     const base = prepareRequest(tab.draft, { scope, inheritedAuth: inh ? inh.auth : null, defaults: this.settings });
     let jarCookies = [];
@@ -351,6 +432,9 @@ export const app = {
       if (!ssh) return;
       if (this.controllers.has(tab.id)) return;
     }
+    // 비밀 변수가 잠겨 있으면 비밀번호를 묻는다
+    if (!(await this.ensureSecretsFor(tab))) return;
+    if (this.controllers.has(tab.id)) return;
     // 히스토리에는 보낸 시점의 요청을 남긴다 (응답을 기다리는 동안 편집한 내용이 섞이지 않게)
     const sentDraft = clone(tab.draft);
     const view = this.views.get(tab.id);
@@ -615,11 +699,25 @@ export const app = {
         else c.note = '컬렉션에 저장된 요청이 아니어서 글로벌에 저장했습니다.';
       }
       if (!vars) [vars, where, key] = [store.state.globals.variables, '글로벌', 'globals'];
-      const row = vars.find((v) => v.key === c.name && v.enabled !== false) || vars.find((v) => v.key === c.name);
-      if (row) {
+      let row = vars.find((v) => v.key === c.name && v.enabled !== false) || vars.find((v) => v.key === c.name);
+      if (!row) {
+        // 토큰·비밀번호처럼 보이는 이름이면 처음부터 비밀 변수로 (값을 가리고 백업·내보내기에서 뺀다)
+        row = kvRow(c.name, '', true, { description: 'Tests 탭에서 꺼낸 값', ...(looksSecretName(c.name) ? { secret: true } : {}) });
+        vars.push(row);
+      }
+      row.enabled = true;
+      if (row.secret) {
+        if (vault.locked) {
+          c.ok = false;
+          c.error = `비밀 변수 보관함이 잠겨 있어 ${where}의 비밀 변수에 저장하지 못했습니다`;
+          continue;
+        }
+        vault.set(row.id, c.value);
+        row.value = '';
+        c.secret = true;
+      } else {
         row.value = c.value;
-        row.enabled = true;
-      } else vars.push(kvRow(c.name, c.value, true, { description: 'Tests 탭에서 꺼낸 값' }));
+      }
       c.savedTo = where;
       changed.add(key);
     }
@@ -638,6 +736,8 @@ export const app = {
       if (f.file) f.file = { name: f.file.name, missing: true };
     });
     if (req.body.binary) req.body.binary = null;
+    // 인증 칸·인증 머리글에 직접 쓴 비밀(토큰·비밀번호·쿠키)은 남기지 않는다. {{변수}} 는 그대로 두므로 비밀 변수를 쓰면 다시 보낼 수 있다
+    const redacted = stripLiteralSecrets(req);
     const entry = {
       id: uid('his'),
       ts: Date.now(),
@@ -651,6 +751,7 @@ export const app = {
       size: result.ok ? result.size.body : 0,
       engine: result.engine || 'browser',
     };
+    if (redacted.length) entry.redacted = redacted;
     if (result.checks && !result.checks.skipped && result.checks.asserts.length) entry.checks = { passed: result.checks.passed, failed: result.checks.failed };
     const h = store.state.history;
     h.unshift(entry);
@@ -810,6 +911,7 @@ export const app = {
     if (!col) return;
     const json = exportPostmanCollection(col);
     download(`${safeFile(col.name)}.postman_collection.json`, JSON.stringify(json, null, 2));
+    this.noteSecretsLeftOut(col.variables);
   },
 
   /* ---------------- 환경 ---------------- */
@@ -835,6 +937,7 @@ export const app = {
     for (const t of [...this.tabs]) if (t.type === 'environment' && t.refId === id) this.closeTab(t.id, { force: true });
     store.changed('environments');
     store.changed('activeEnvId');
+    this.reconcileSecrets(); // 지운 환경의 비밀 값도 보관함에서 지운다
     this.ui.renderEnvSelector && this.ui.renderEnvSelector();
   },
 
@@ -846,6 +949,7 @@ export const app = {
     c.name = env.name + ' 복사본';
     store.state.environments.push(c);
     store.changed('environments');
+    this.reconcileSecrets(); // 복사본의 비밀 변수는 새 id 로 값을 따로 갖는다
   },
 
   exportEnvironment(id) {
@@ -854,6 +958,13 @@ export const app = {
     const json = exportPostmanEnvironment(env);
     if (id === 'globals') json._postman_variable_scope = 'globals';
     download(`${safeFile(env.name)}.postman_environment.json`, JSON.stringify(json, null, 2));
+    this.noteSecretsLeftOut(env.variables);
+  },
+
+  // 내보낸 것에 비밀 변수가 있었으면 값은 넣지 않았다고 알린다
+  noteSecretsLeftOut(vars) {
+    const n = (vars || []).filter((v) => v && v.secret).length;
+    if (n && this.ui.toast) this.ui.toast(`비밀 변수 ${n}개는 값 없이 내보냈습니다 (이름만 들어 있습니다).`, 'info', 4500);
   },
 
   /* ---------------- 가져오기 ---------------- */
@@ -869,6 +980,7 @@ export const app = {
       store.state.collections.push(r.collection);
       store.state.workspace.expanded[r.collection.id] = true;
       store.changed('collections');
+      this.reconcileSecrets();
       this.saveWorkspace();
       this.ui.showSidebar && this.ui.showSidebar('collections');
       const from = r.source === 'openapi' ? 'OpenAPI 문서에서 ' : r.source === 'har' ? 'HAR 에서 ' : '';
@@ -878,6 +990,7 @@ export const app = {
     if (r.kind === 'environment') {
       store.state.environments.push(r.environment);
       store.changed('environments');
+      this.reconcileSecrets();
       this.ui.showSidebar && this.ui.showSidebar('environments');
       return { kind: 'environment', warnings: [], message: `환경 "${r.environment.name}"을(를) 가져왔습니다.` };
     }
@@ -924,6 +1037,7 @@ export const app = {
 
   async init() {
     await store.load();
+    await vault.load();
     await initHttpEngine();
     // 예전에 저장된 SSH 비밀번호(평문) 삭제
     let dirty = false;
@@ -938,6 +1052,7 @@ export const app = {
       await store.flush();
     }
     setInterval(() => this.purgeSshSecrets(), 60 * 1000);
+    this.reconcileSecrets();
     // 저장된 탭 정규화
     for (const t of this.tabs) {
       if (t.type === 'request') t.draft = normalizeRequest(t.draft);

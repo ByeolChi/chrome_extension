@@ -88,9 +88,15 @@ export class CollectionView {
         keyPlaceholder: '변수 이름',
         valuePlaceholder: '값',
         description: false,
+        secrets: app.secretRows(),
         onChange: () => this._save(),
       });
-      pane.append(h('div.ev-info', icon('info', 14), '컬렉션 변수는 이 컬렉션의 요청에서만 사용됩니다. 같은 이름의 환경 변수가 있으면 환경 변수가 우선합니다.'), table.el);
+      // DOM 의 append 는 null 을 "null" 글자로 넣으므로 없는 것(잠김 띠)은 뺀다
+      pane.append(...[
+        h('div.ev-info', icon('info', 14), '컬렉션 변수는 이 컬렉션의 요청에서만 사용됩니다. 같은 이름의 환경 변수가 있으면 환경 변수가 우선합니다. 🔒 로 비밀로 표시하면 값이 가려지고 백업·내보내기에서 빠집니다.'),
+        app.ui.vaultBanner ? app.ui.vaultBanner(item.variables, () => this.build()) : null,
+        table.el,
+      ].filter(Boolean));
     }
     this.el.append(
       h('div.ev-head', h('div.cv-kind', icon(isCollection ? 'collections' : 'folder', 18)), nameIn),

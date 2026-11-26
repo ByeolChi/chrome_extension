@@ -8,6 +8,7 @@ import { detectOS, downloadInstaller } from '../helper-installer.js';
 import { versionAtLeast, LATEST_HOST_VERSION } from '../curl-runner.js';
 import { sanitizeBackupData, curlSettingsSummary } from '../backup-check.js';
 import { app } from '../app.js';
+import { vault, MASK, PBKDF2_ITER } from '../secrets.js';
 
 /**
  * 백업 복원 확인. 형식을 검사·정리하고, cURL 실행 설정(추가 인자, -k)이 있는 요청과 SSH 환경을 보여 준 뒤 묻는다.
@@ -30,9 +31,18 @@ async function confirmRestore(raw) {
           h('p', h('b', `SSH 터널을 쓰는 환경 ${ssh.length}개`)),
           h('ul', ssh.slice(0, MAX).map((s) => h('li', h('span', s.name), h('code', s.server)))))
       : null,
+    secretRowsIn(data)
+      ? h('p.muted', `비밀 변수 ${secretRowsIn(data)}개는 이름만 들어 있습니다. 이 브라우저의 보관함에 같은 변수의 값이 없으면 복원한 뒤 다시 넣어야 합니다.`)
+      : null,
     h('p', '계속할까요?'));
   const ok = await confirmDialog({ title: '백업 복원', message: msg, okText: '복원', danger: true });
   return ok ? data : null;
+}
+
+// 백업 데이터 속 비밀 변수 행 수
+function secretRowsIn(data) {
+  const lists = [(data.globals && data.globals.variables) || [], ...(data.environments || []).map((e) => e.variables || []), ...(data.collections || []).map((c) => c.variables || [])];
+  return lists.reduce((n, l) => n + l.filter((v) => v && v.secret).length, 0);
 }
 
 const MOD = isMac() ? '⌘' : 'Ctrl';
@@ -284,6 +294,8 @@ export function openSettings() {
       toast('복원 실패: ' + e.message, 'error');
     }
   });
+  const vaultBox = h('div.vault-sec');
+  renderVaultBox(vaultBox);
   const body = h('div.settings',
     h('div.set-sec', '일반'),
     row('테마', null, select('theme', [['system', '시스템 설정 따르기'], ['light', '라이트'], ['dark', '다크']], () => app.ui.applyTheme())),
@@ -299,14 +311,24 @@ export function openSettings() {
     row('응답 쿠키 자동 저장', '응답의 Set-Cookie를 쿠키 관리자에 저장하고 같은 도메인 요청에 자동으로 보냅니다', toggle('autoSaveCookies')),
     row('히스토리 기록', null, toggle('historyEnabled')),
     row('최대 히스토리 개수', null, num('historyLimit', '300')),
+    h('div.set-sec', '비밀 변수'),
+    vaultBox,
     h('div.set-sec', '데이터'),
     h('div.set-data',
-      h('button.btn', { title: 'SSH 비밀번호는 저장하지 않으므로 백업에도 들어가지 않습니다', onclick: () => download(`ssoda-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(app.backupData(), null, 2)) }, icon('download', 14), '전체 백업 내보내기'),
+      h('button.btn', {
+        title: 'SSH 비밀번호와 비밀 변수의 값은 백업에 들어가지 않습니다',
+        onclick: () => {
+          download(`ssoda-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(app.backupData(), null, 2));
+          const n = app.secretCount();
+          if (n) toast(`비밀 변수 ${n}개는 값 없이(이름만) 백업했습니다.`, 'info', 4500);
+        },
+      }, icon('download', 14), '전체 백업 내보내기'),
       h('button.btn', { onclick: () => restoreIn.click() }, icon('upload', 14), '백업에서 복원'),
       h('button.btn.btn-danger-ghost', {
         onclick: async () => {
-          if (await confirmDialog({ title: '모든 데이터 삭제', message: '컬렉션, 환경, 히스토리, 쿠키, 설정이 모두 삭제됩니다. 되돌릴 수 없습니다.', okText: '모두 삭제', danger: true })) {
+          if (await confirmDialog({ title: '모든 데이터 삭제', message: '컬렉션, 환경, 비밀 변수, 히스토리, 쿠키, 설정이 모두 삭제됩니다. 되돌릴 수 없습니다.', okText: '모두 삭제', danger: true })) {
             await app.store.clearAll();
+            await vault.reset();
             location.reload();
           }
         },
@@ -315,6 +337,76 @@ export function openSettings() {
     h('div.set-about', `Ssoda v${chrome?.runtime?.getManifest ? chrome.runtime.getManifest().version : '1.0.0'} · 데이터는 이 브라우저(chrome.storage.local)에만 저장됩니다.`)
   );
   const m = openModal({ title: '설정', width: 640, body, footer: [h('button.btn', { onclick: () => { Object.assign(s, DEFAULT_SETTINGS, { theme: s.theme }); app.store.changed('settings'); m.close(); openSettings(); } }, '기본값으로'), h('div.flex1'), h('button.btn.btn-primary', { onclick: () => m.close() }, '완료')] });
+}
+
+/* ---------------- 비밀 변수 보관함 (설정) ---------------- */
+function renderVaultBox(box) {
+  clear(box);
+  const n = app.secretCount();
+  const status = vault.locked
+    ? [icon('lock', 14), `비밀번호로 암호화해 저장 중 · 잠김 (비밀 변수 ${n}개)`]
+    : vault.encrypted
+      ? [icon('lock', 14), `비밀번호로 암호화해 저장 중 · 열림 (비밀 변수 ${n}개) — 브라우저를 닫으면 다시 잠깁니다`]
+      : [icon('info', 14), `비밀 변수 ${n}개 · 비밀번호 없음 — 값은 화면에서 가려지고 백업·내보내기·히스토리에서 빠지지만, 이 PC 의 브라우저 프로필에는 암호화하지 않고 저장됩니다`];
+  const btn = (label, fn, cls = '') => h('button.btn.btn-sm' + cls, { onclick: async () => { try { await fn(); } catch (e) { toast(e.message, 'error', 4000); } renderVaultBox(box); } }, label);
+  const actions = h('div.vault-actions');
+  if (vault.locked) {
+    actions.append(
+      btn('잠금 해제', () => app.unlockSecrets()),
+      btn('보관함 비우기 (비밀번호를 잊었을 때)', async () => {
+        if (!(await confirmDialog({ title: '비밀 변수 보관함 비우기', message: `비밀 변수 ${n}개의 값이 모두 지워집니다(변수 이름은 남습니다). 되돌릴 수 없습니다.`, okText: '비우기', danger: true }))) return;
+        await vault.reset();
+        app.afterUnlock();
+        toast('보관함을 비웠습니다. 비밀 변수의 값을 다시 넣으세요.', 'info', 4000);
+      }, '.btn-danger-ghost'));
+  } else if (vault.encrypted) {
+    actions.append(
+      btn('지금 잠그기', async () => { await vault.lock(); toast('비밀 변수를 잠갔습니다.', 'success'); }),
+      btn('비밀번호 바꾸기', async () => { const pw = await askNewVaultPassword(true); if (pw) { await vault.setPassword(pw); toast('비밀번호를 바꿨습니다.', 'success'); } }),
+      btn('비밀번호 없애기', async () => {
+        if (!(await confirmDialog({ title: '비밀번호 없애기', message: '비밀 변수의 값을 암호화하지 않고 저장합니다. 화면·백업·내보내기·히스토리에서는 계속 빠집니다.', okText: '없애기' }))) return;
+        await vault.removePassword();
+        toast('비밀번호를 없앴습니다.', 'success');
+      }));
+  } else {
+    actions.append(btn('비밀번호로 암호화', async () => {
+      const pw = await askNewVaultPassword(false);
+      if (!pw) return;
+      await vault.setPassword(pw);
+      toast('비밀 변수를 비밀번호로 암호화해 저장했습니다.', 'success');
+    }, '.btn-primary'));
+  }
+  box.append(h('div.vault-status', ...status), actions,
+    h('div.muted', '변수 표의 행 끝 🔒 로 비밀로 표시합니다. 비밀 변수의 값은 변수와 따로 보관되어, 전체 백업·Postman 내보내기·히스토리·코드 창·cURL 복사에 들어가지 않습니다.'));
+}
+
+// 새 비밀번호 (두 번 입력). 취소하면 null
+function askNewVaultPassword(changing) {
+  return new Promise((resolve) => {
+    let result = null;
+    const a = h('input.input', { type: 'password', autocomplete: 'new-password', 'aria-label': '새 비밀번호' });
+    const b = h('input.input', { type: 'password', autocomplete: 'new-password', 'aria-label': '새 비밀번호 확인' });
+    const err = h('div.field-err');
+    const submit = () => {
+      if (a.value.length < 8) { err.textContent = '8글자 이상으로 정하세요.'; return a.focus(); }
+      if (a.value !== b.value) { err.textContent = '두 칸이 다릅니다.'; return b.focus(); }
+      result = a.value;
+      m.close();
+    };
+    [a, b].forEach((x) => x.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) submit(); }));
+    const m = openModal({
+      title: changing ? '비밀번호 바꾸기' : '비밀 변수를 비밀번호로 암호화',
+      width: 460,
+      body: h('div',
+        h('label.field', h('span.field-label', '새 비밀번호'), a),
+        h('label.field', h('span.field-label', '한 번 더'), b),
+        err,
+        h('div.muted', `비밀 변수의 값을 이 비밀번호로 암호화해 저장합니다(AES-GCM, PBKDF2-SHA256 ${PBKDF2_ITER.toLocaleString()}번). 연 상태는 브라우저를 닫을 때까지 유지되고, 다시 열면 그 변수를 쓸 때 묻습니다. 비밀번호를 잊으면 비밀 값을 되찾을 수 없습니다(보관함을 비우고 다시 넣어야 합니다).`)),
+      footer: [h('button.btn', { onclick: () => m.close() }, '취소'), h('button.btn.btn-primary', { onclick: submit }, changing ? '바꾸기' : '암호화')],
+      onClose: () => resolve(result),
+    });
+    setTimeout(() => a.focus(), 40);
+  });
 }
 
 /* ---------------- 쿠키 관리자 ---------------- */
@@ -489,7 +581,7 @@ export function envQuickLook(anchor) {
     h('div.ql-sec',
       h('div.ql-head', h('b', title), onEdit ? h('button.link-btn', { onclick: onEdit }, '편집') : null),
       vars && vars.length
-        ? h('div.ql-table', vars.map((v) => h('div.ql-row' + (v.enabled ? '' : '.disabled'), h('span.ql-k', v.key), h('span.ql-v', v.value))))
+        ? h('div.ql-table', vars.map((v) => h('div.ql-row' + (v.enabled ? '' : '.disabled'), h('span.ql-k', v.secret ? '🔒 ' + v.key : v.key), h('span.ql-v', v.secret ? (vault.locked ? '잠김' : MASK) : v.value))))
         : h('div.muted.ql-empty', '변수가 없습니다.'));
   popover(anchor, h('div.ql',
     env ? section(env.name, env.variables, () => { app.openEnvironment(env.id); document.body.click(); }) : h('div.ql-sec', h('div.ql-head', h('b', '활성 환경 없음')), h('div.muted.ql-empty', '오른쪽 위 드롭다운에서 환경을 선택하세요.')),

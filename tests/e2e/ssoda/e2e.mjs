@@ -537,7 +537,11 @@ await check('Tests: 로그인 응답의 토큰·19자리 ID 를 변수로 꺼내
     const r2 = await app.send(me, { engine: 'browser' });
     return {
       checks: { passed: res.checks.passed, failed: res.checks.failed, caps: res.checks.captures.map((c) => [c.name, c.ok, c.value ?? c.error, c.savedTo || '', c.note || '']) },
-      env: { token: get(envNow.variables, 'token'), orderId: get(envNow.variables, 'orderId'), second: get(envNow.variables, 'second') },
+      // token 은 이름이 비밀 같아 비밀 변수로 저장된다 — 값은 행이 아니라 보관함에 있어 스코프로 읽는다
+      env: {
+        token: (app.getScope(me).get('token') || {}).value, tokenSecret: !!(envNow.variables.find((v) => v.key === 'token') || {}).secret,
+        tokenRow: get(envNow.variables, 'token'), orderId: get(envNow.variables, 'orderId'), second: get(envNow.variables, 'second'),
+      },
       globals: { reqId: get(app.store.state.globals.variables, 'reqId'), sess: get(app.store.state.globals.variables, 'sess') },
       badge, text, histText, history: app.store.state.history.find((h) => /\/login$/.test(h.request.url))?.checks,
       me: JSON.parse(new TextDecoder().decode(r2.body)),
@@ -546,9 +550,9 @@ await check('Tests: 로그인 응답의 토큰·19자리 ID 를 변수로 꺼내
   assert(r.checks.passed === 5 && r.checks.failed === 1, JSON.stringify(r.checks));
   assert(JSON.stringify(r.checks.caps.map((c) => c.slice(0, 3))) === JSON.stringify([['token', true, 'tok-xyz'], ['orderId', true, '1234567890123456789'], ['reqId', true, 'r-7'], ['sess', true, 's-1'], ['second', true, 'lee'], ['nothing', false, '응답에서 값을 찾지 못했습니다']]), JSON.stringify(r.checks.caps));
   assert(r.checks.caps[0][3] === '환경 "E2E-tests"' && r.checks.caps[2][3] === '글로벌' && /컬렉션에 저장된 요청이 아니어서 글로벌/.test(r.checks.caps[3][4]), JSON.stringify(r.checks.caps));
-  assert(r.env.token === 'tok-xyz' && r.env.orderId === '1234567890123456789' && r.env.second === 'lee' && r.globals.reqId === 'r-7' && r.globals.sess === 's-1', JSON.stringify({ env: r.env, globals: r.globals }));
+  assert(r.env.token === 'tok-xyz' && r.env.tokenSecret && r.env.tokenRow === '' && r.env.orderId === '1234567890123456789' && r.env.second === 'lee' && r.globals.reqId === 'r-7' && r.globals.sess === 's-1', JSON.stringify({ env: r.env, globals: r.globals }));
   assert(/ck-bad/.test(r.badge) && /\(5\/6\)/.test(r.badge), r.badge);
-  assert(/변수로 꺼낸 값 · 5\/6/.test(r.text) && /token = tok-xyz/.test(r.text) && /확인 · 5\/6 통과/.test(r.text) && /찾은 값: "tok-xyz"/.test(r.text), r.text.slice(0, 400));
+  assert(/변수로 꺼낸 값 · 5\/6/.test(r.text) && /token = •+ \(비밀 변수\)/.test(r.text) && /확인 · 5\/6 통과/.test(r.text) && /찾은 값: "tok-xyz"/.test(r.text), r.text.slice(0, 400));
   assert(r.history && r.history.passed === 5 && r.history.failed === 1, JSON.stringify(r.history));
   assert(/ck-bad/.test(r.histText) && /5\/6/.test(r.histText), '히스토리 목록의 확인 결과: ' + r.histText);
   assert(r.me.auth === 'Bearer tok-xyz' && r.me.id === '1234567890123456789', JSON.stringify(r.me));
@@ -763,6 +767,229 @@ await check('기본 타임아웃 60초: 예전 설정의 0(무제한)은 다시 
   assert(fresh.timeout === 60000 && fresh.rev === 2, JSON.stringify(fresh));
   assert(first.timeout === 60000 && first.stored.timeout === 60000 && first.stored.settingsRev === 2 && first.toast, JSON.stringify({ ...first, stored: { timeout: first.stored.timeout, rev: first.stored.settingsRev } }));
   assert(second.timeout === 60000 && !second.toast, JSON.stringify(second));
+});
+
+/* ---------------- 비밀 변수 ---------------- */
+const SECRET = 'tok-SECRET-9b7c1e';
+// 환경 "비밀시험" 에 token 을 만들고 환경 화면의 🔒 단추로 비밀로 표시한다
+await check('비밀 변수: 🔒 로 표시하면 값은 보관함으로 옮겨지고(환경 저장값에는 없음) 가린 칸에 보임', async () => {
+  const r = await ev(page, async (secret) => {
+    const app = window.csApp;
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    const env = app.createEnvironment('비밀시험');
+    env.variables.push({ id: 'kv_secret_test', key: 'token', value: secret, enabled: true, description: '' });
+    app.setActiveEnv(env.id);
+    app.openEnvironment(env.id);
+    await new Promise((r) => setTimeout(r, 300));
+    const tab = app.tabs.find((t) => t.type === 'environment' && t.refId === env.id);
+    const el = app.views.get(tab.id).el;
+    const row = [...el.querySelectorAll('.kv-row')].find((x) => [...x.querySelectorAll('input')].some((i) => i.value === 'token'));
+    row.querySelector('.kv-lock').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const row2 = [...el.querySelectorAll('.kv-row')].find((x) => [...x.querySelectorAll('input')].some((i) => i.value === 'token'));
+    const inp = row2.querySelector('.kv-secret-input');
+    app.store.changed('environments');
+    await app.store.flush();
+    await vault.flushNow();
+    const st = await chrome.storage.local.get(['environments', 'vault']);
+    return {
+      secret: env.variables[0].secret === true, rowValue: env.variables[0].value, inType: inp && inp.type, inValue: inp && inp.value,
+      envStored: JSON.stringify(st.environments).includes(secret), vaultStored: JSON.stringify(st.vault).includes(secret), envId: env.id,
+    };
+  }, SECRET);
+  assert(r.secret && r.rowValue === '' && r.inType === 'password' && r.inValue === SECRET && !r.envStored && r.vaultStored, JSON.stringify(r));
+});
+
+await check('비밀 변수로 보낸 요청: 서버는 값을 받고, 히스토리·전체 백업·Postman 내보내기에는 값이 없음', async () => {
+  seen.length = 0;
+  const r = await ev(page, async (base, secret) => {
+    const app = window.csApp;
+    const tab = app.newRequestTab({ url: base + '/auth', headers: [{ key: 'Authorization', value: 'Bearer {{token}}', enabled: true }] }, 'secret-send');
+    await new Promise((r) => setTimeout(r, 200));
+    const res = await app.send(tab, { engine: 'browser' });
+    const env = app.activeEnv();
+    const { exportPostmanEnvironment } = await import(chrome.runtime.getURL('js/postman.js'));
+    const pm = exportPostmanEnvironment(env);
+    return {
+      status: res && res.status,
+      history: JSON.stringify(app.state.history[0].request).includes(secret),
+      historyRef: app.state.history[0].request.headers[0].value,
+      backup: JSON.stringify(app.backupData()).includes(secret),
+      backupRow: JSON.stringify(app.backupData().data.environments.find((e) => e.id === env.id).variables[0]),
+      postman: pm.values.find((v) => v.key === 'token'),
+    };
+  }, BASE, SECRET);
+  const got = seen.find((s) => s.path === '/auth');
+  assert(r.status === 200 && got && got.headers.authorization === 'Bearer ' + SECRET, JSON.stringify({ r, got: got && got.headers.authorization }));
+  assert(!r.history && r.historyRef === 'Bearer {{token}}' && !r.backup && /"secret":true/.test(r.backupRow), JSON.stringify(r));
+  assert(r.postman && r.postman.value === '' && r.postman.type === 'secret', JSON.stringify(r.postman));
+});
+
+await check('코드 창·cURL 복사는 비밀 변수를 {{이름}} 으로, "비밀 값 넣기"를 켜면 값까지 · 자동완성도 가림', async () => {
+  const r = await ev(page, async (base, secret) => {
+    const app = window.csApp;
+    const tab = app.newRequestTab({ url: base + '/auth', headers: [{ key: 'Authorization', value: 'Bearer {{token}}', enabled: true }] }, 'secret-code');
+    await new Promise((r) => setTimeout(r, 200));
+    const masked = app.curlCommandFor(tab, await app.buildPrepared(tab, { engine: 'curl', mask: true }));
+    const real = app.curlCommandFor(tab, await app.buildPrepared(tab, { engine: 'curl' }));
+    const { MASK } = await import(chrome.runtime.getURL('js/secrets.js'));
+    // {{ 자동완성 목록의 값 칸
+    const url = app.views.get(tab.id).el.querySelector('.vi-input');
+    url.focus();
+    url.value = base + '/auth?x={{to';
+    url.setSelectionRange(url.value.length, url.value.length);
+    url.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const acVal = [...document.querySelectorAll('.var-ac-item')].map((x) => x.querySelector('.var-ac-val').textContent);
+    url.blur();
+    // cURL 탭의 명령 미리 보기와, 인증 탭이 만드는 자동 헤더 목록
+    const t2 = app.newRequestTab({ url: base + '/auth', auth: { type: 'bearer', bearer: { token: '{{token}}' } } }, 'secret-auth-tab');
+    await new Promise((r) => setTimeout(r, 200));
+    const v2 = app.views.get(t2.id);
+    v2.sub = 'curl';
+    v2.renderPane();
+    await new Promise((r) => setTimeout(r, 400));
+    const preview = v2.curlPre ? v2.curlPre.textContent : '';
+    const auto = (v2.computeAutoHeaders().find((x) => x.key === 'Authorization') || {}).value;
+    return {
+      masked: masked.includes('{{token}}') && !masked.includes(secret), real: real.includes(secret), acMasked: acVal.includes(MASK) && !acVal.some((v) => v.includes(secret)), acVal,
+      preview: preview.includes('{{token}}') && !preview.includes(secret), auto,
+    };
+  }, BASE, SECRET);
+  assert(r.masked && r.real && r.acMasked && r.preview && r.auto === 'Bearer {{token}}', JSON.stringify(r));
+});
+
+await check('히스토리: 직접 쓴 Authorization 값은 남기지 않고, 다시 열면 알림', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const tab = app.newRequestTab({ url: base + '/auth', headers: [{ key: 'Authorization', value: 'Bearer literal-ABCDEF-123', enabled: true }] }, 'literal');
+    await new Promise((r) => setTimeout(r, 200));
+    await app.send(tab, { engine: 'browser' });
+    const e = app.state.history[0];
+    app.openHistory(e);
+    await new Promise((r) => setTimeout(r, 200));
+    return { value: e.request.headers[0].value, redacted: e.redacted, toast: /히스토리에는 Authorization 머리글을\(를\) 남기지 않았습니다/.test(document.body.innerText) };
+  }, BASE);
+  assert(r.value === '' && JSON.stringify(r.redacted) === '["Authorization 머리글"]' && r.toast, JSON.stringify(r));
+});
+
+await check('Tests 탭에서 꺼낸 accessToken 은 처음부터 비밀 변수로 저장 (응답 화면에서도 가림)', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    const tab = app.newRequestTab({
+      method: 'POST', url: base + '/echo', body: { mode: 'raw', rawLanguage: 'json', raw: '{"accessToken":"from-response-777"}' },
+      tests: { extract: [{ name: 'accessToken', from: 'json', path: '$.accessToken', enabled: true, scope: 'env' }], assert: [] },
+    }, 'extract-secret');
+    await new Promise((r) => setTimeout(r, 200));
+    await app.send(tab, { engine: 'browser' });
+    await new Promise((r) => setTimeout(r, 300));
+    const env = app.activeEnv();
+    const row = env.variables.find((v) => v.key === 'accessToken');
+    const view = app.views.get(tab.id);
+    view.response.sub = 'tests';
+    view.response.render();
+    await new Promise((r) => setTimeout(r, 200));
+    const testsText = view.response.el.innerText;
+    return { secret: !!(row && row.secret), rowValue: row && row.value, vault: row && vault.get(row.id), shown: testsText.includes('from-response-777'), masked: /accessToken = •+ \(비밀 변수\)/.test(testsText) };
+  }, BASE);
+  assert(r.secret && r.rowValue === '' && r.vault === 'from-response-777' && !r.shown && r.masked, JSON.stringify(r));
+});
+
+await check('비밀번호로 암호화: 저장소에 평문이 없고, 앱을 다시 열어도 같은 브라우저 세션이면 묻지 않음', async () => {
+  const r1 = await ev(page, async (secret) => {
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    document.querySelector('button.top-ic[title="설정"]').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const btn = [...document.querySelectorAll('.vault-actions .btn')].find((b) => b.textContent.includes('비밀번호로 암호화'));
+    btn.click();
+    await new Promise((r) => setTimeout(r, 200));
+    const ins = [...document.querySelectorAll('.modal input[type=password]')];
+    ins.forEach((i) => { i.value = 'correct-horse-9'; });
+    [...document.querySelectorAll('.modal .btn-primary')].find((b) => b.textContent === '암호화').click();
+    for (let i = 0; i < 60 && !vault.encrypted; i++) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 300));
+    document.querySelectorAll('.modal .btn-primary').forEach((b) => b.textContent === '완료' && b.click());
+    const st = await chrome.storage.local.get('vault');
+    const sess = await chrome.storage.session.get('ssodaVaultKey');
+    return { enc: !!(st.vault && st.vault.enc), plain: JSON.stringify(st.vault).includes(secret) || JSON.stringify(st.vault).includes('from-response-777'), session: !!sess.ssodaVaultKey };
+  }, SECRET);
+  await ev(page, () => setTimeout(() => location.reload(), 50));
+  await sleep(700);
+  await waitApp(page);
+  await sleep(300);
+  seen.length = 0;
+  const r2 = await ev(page, async (base) => {
+    const app = window.csApp;
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    const tab = app.newRequestTab({ url: base + '/auth', headers: [{ key: 'Authorization', value: 'Bearer {{token}}', enabled: true }] }, 'after-reload');
+    await new Promise((r) => setTimeout(r, 200));
+    const res = await app.send(tab, { engine: 'browser' });
+    return { locked: vault.locked, encrypted: vault.encrypted, status: res && res.status, dialog: !!document.querySelector('.modal') };
+  }, BASE);
+  const got = seen.find((s) => s.path === '/auth');
+  assert(r1.enc && !r1.plain && r1.session, JSON.stringify(r1));
+  assert(r2.encrypted && !r2.locked && r2.status === 200 && !r2.dialog && got && got.headers.authorization === 'Bearer ' + SECRET, JSON.stringify({ r2, got: got && got.headers.authorization }));
+});
+
+await check('잠근 뒤 보내면 비밀번호를 묻고, 틀리면 다시 묻고, 맞으면 그 값으로 보냄 · 환경 화면은 잠김 띠', async () => {
+  seen.length = 0;
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    await vault.lock();
+    const env = app.activeEnv();
+    app.openEnvironment(env.id);
+    await new Promise((r) => setTimeout(r, 300));
+    const envTab = app.tabs.find((t) => t.type === 'environment' && t.refId === env.id);
+    const envEl = app.views.get(envTab.id).el;
+    const banner = !!envEl.querySelector('.vault-banner');
+    const disabled = [...envEl.querySelectorAll('.kv-secret-input')].every((i) => i.disabled && i.value === '');
+    const tab = app.newRequestTab({ url: base + '/auth', headers: [{ key: 'Authorization', value: 'Bearer {{token}}', enabled: true }] }, 'locked-send');
+    await new Promise((r) => setTimeout(r, 200));
+    const sending = app.send(tab, { engine: 'browser' });
+    await new Promise((r) => setTimeout(r, 300));
+    const title = (document.querySelector('.modal .modal-title') || {}).textContent || '';
+    const pw = document.querySelector('.modal input[type=password]');
+    const ok = () => [...document.querySelectorAll('.modal .btn-primary')].find((b) => b.textContent === '잠금 해제');
+    pw.value = 'wrong-password';
+    ok().click();
+    for (let i = 0; i < 60 && !/맞지 않습니다/.test(document.querySelector('.modal .field-err')?.textContent || ''); i++) await new Promise((r) => setTimeout(r, 100));
+    const wrong = document.querySelector('.modal .field-err').textContent;
+    pw.value = 'correct-horse-9';
+    ok().click();
+    const res = await sending;
+    return { banner, disabled, title, wrong, status: res && res.status, locked: vault.locked };
+  }, BASE);
+  const got = seen.find((s) => s.path === '/auth');
+  assert(r.banner && r.disabled, '잠김 띠·막힌 칸: ' + JSON.stringify(r));
+  assert(/맞지 않습니다/.test(r.wrong) && r.status === 200 && !r.locked && got && got.headers.authorization === 'Bearer ' + SECRET, JSON.stringify({ r, got: got && got.headers.authorization }));
+  return r.title;
+});
+
+await check('환경 복제: 복사본의 비밀 변수는 값이 같고 따로 바뀜 · 비밀번호 없애기 뒤 평문 보관', async () => {
+  const r = await ev(page, async (secret) => {
+    const app = window.csApp;
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    const env = app.activeEnv();
+    app.duplicateEnvironment(env.id);
+    const copy = app.state.environments[app.state.environments.length - 1];
+    const a = env.variables.find((v) => v.key === 'token');
+    const b = copy.variables.find((v) => v.key === 'token');
+    const same = vault.get(b.id) === secret && a.id !== b.id;
+    vault.set(b.id, 'copy-only-value');
+    const apart = vault.get(a.id) === secret;
+    await vault.removePassword();
+    await vault.flushNow();
+    const st = await chrome.storage.local.get('vault');
+    app.deleteEnvironment(copy.id);
+    app.deleteEnvironment(env.id);
+    await new Promise((r) => setTimeout(r, 400));
+    await vault.flushNow();
+    const after = await chrome.storage.local.get('vault');
+    return { same, apart, plainAgain: !!(st.vault && st.vault.plain) && !st.vault.enc, cleaned: !JSON.stringify(after.vault).includes(secret) };
+  }, SECRET);
+  assert(r.same && r.apart && r.plainAgain && r.cleaned, JSON.stringify(r));
 });
 
 await check('앱 탭을 하나 더 열면 먼저 열린 탭은 저장을 멈추고 안내를 띄움', async () => {
