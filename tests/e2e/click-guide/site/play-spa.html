@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><title>따라하기 시험 — 주소만 바꾸는 화면</title>
+<style>body{margin:0;font:15px sans-serif;padding:16px} button{margin:6px 6px 0 0;padding:6px 12px}</style></head><body>
+<div id="app"></div>
+<script>
+// 새 문서를 열지 않고 주소만 바꾸는 화면(SPA): [다음 화면으로]는 pushState(?view=next), [마무리 화면으로]는 해시 주소(#/done)
+let n = 0;
+let shown = null;
+function render() {
+  const view = new URLSearchParams(location.search).get('view') || '';
+  const key = view + location.hash;
+  if (key === shown) return;   // popstate·hashchange 가 함께 와도 한 번만 그린다
+  shown = key;
+  const app = document.getElementById('app');
+  if (view === 'next' && location.hash === '#/done') {
+    app.innerHTML = '<h1>마무리</h1><button id="fin">끝</button>';
+  } else if (view === 'next') {
+    app.innerHTML = '<h1>다음 화면</h1><button id="to-done">마무리 화면으로</button>';
+    document.getElementById('to-done').onclick = () => { location.hash = '#/done'; };
+  } else {
+    app.innerHTML = '<h1>첫 화면</h1><p>누른 횟수 <b id="n">' + n + '</b></p><button id="inc">하나 더</button><button id="go">다음 화면으로</button>';
+    document.getElementById('inc').onclick = () => { n++; document.getElementById('n').textContent = String(n); };
+    document.getElementById('go').onclick = () => { history.pushState({}, '', '/play-spa.html?view=next'); render(); };
+  }
+}
+addEventListener('popstate', render);
+addEventListener('hashchange', render);
+render();
+</script>
+</body></html>

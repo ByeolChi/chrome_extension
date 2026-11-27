@@ -29,6 +29,18 @@ button.big { width: 100%; padding: 11px; font-size: 14px; border-radius: 9px; }
 #recent-list button.open:hover { background: var(--bg-sunken); }
 #recent-list .name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
 #recent-list .meta { display: block; font-size: 11px; color: var(--text-faint); }
+/* 따라하기 */
+#recent-list button.play {
+  flex: none; width: 30px; height: 30px; padding: 0; border-radius: 8px; font-size: 12px;
+  color: #ff6a00; border: 1px solid color-mix(in srgb, #ff6a00 40%, transparent); background: none;
+}
+#recent-list button.play:hover:not(:disabled) { background: color-mix(in srgb, #ff6a00 12%, transparent); }
+#recent-list button.play:disabled { opacity: .35; }
+#recent .h2-hint { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 4px; }
+#playing { display: flex; align-items: center; gap: 8px; padding: 10px 12px; }
+#playing .play-line { flex: 1; min-width: 0; margin: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#playing .play-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff6a00; margin-right: 6px; vertical-align: 1px; }
+#play-error { margin: 0; }
 footer { display: flex; align-items: center; padding: 0 2px; }
 
 #target-tab { margin: 9px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

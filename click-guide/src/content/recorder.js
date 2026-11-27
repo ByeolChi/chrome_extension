@@ -57,12 +57,9 @@
   const FRAME_TAG = Math.random().toString(36).slice(2, 8);
   function newClientId() { return FRAME_TAG + '-' + (++clientSeq); }
 
-  const INTERACTIVE = [
-    'a[href]', 'button', 'input', 'select', 'textarea', 'summary', 'label',
-    '[role="button"]', '[role="link"]', '[role="tab"]', '[role="menuitem"]',
-    '[role="checkbox"]', '[role="radio"]', '[role="switch"]', '[role="option"]',
-    '[onclick]', '[data-testid]', '[tabindex]:not([tabindex="-1"])'
-  ].join(',');
+  // 누를 수 있는 요소: 녹화·따라하기 공용 모듈(cues.js)의 목록을 쓴다
+  const INTERACTIVE = (globalThis.ClickGuideCues && globalThis.ClickGuideCues.INTERACTIVE)
+    || 'a[href],button,input,select,textarea,summary,label,[role="button"],[role="link"],[onclick]';
 
   const SENSITIVE_RE = /pass|pwd|passwd|secret|token|card|cvc|cvv|ssn|security|otp|비밀번호|암호|주민|계좌|카드|보안/i;
 
@@ -179,108 +176,13 @@
   /* 요소 메타데이터 추출                                                 */
   /* ------------------------------------------------------------------ */
 
-  function textOf(el, max = 120) {
-    if (!el) return '';
-    let t = '';
-    try { t = (el.innerText || el.textContent || ''); } catch (_) { t = ''; }
-    t = t.replace(/\s+/g, ' ').trim();
-    return t.length > max ? '' : t;   // 너무 길면 라벨로 부적절
-  }
-
-  function labelFromAriaLabelledBy(el) {
-    const ids = (el.getAttribute && el.getAttribute('aria-labelledby') || '').trim();
-    if (!ids) return '';
-    const root = el.getRootNode ? el.getRootNode() : document;
-    return ids.split(/\s+/)
-      .map((id) => { try { return root.getElementById ? root.getElementById(id) : document.getElementById(id); } catch (_) { return null; } })
-      .filter(Boolean).map((n) => textOf(n, 80)).join(' ').trim();
-  }
-
-  function labelFromFormLabel(el) {
-    try {
-      if (el.labels && el.labels.length) return textOf(el.labels[0], 80);
-      const wrap = el.closest && el.closest('label');
-      if (wrap) return textOf(wrap, 80);
-      if (el.id) {
-        const root = el.getRootNode ? el.getRootNode() : document;
-        const q = root.querySelector ? root.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
-        if (q) return textOf(q, 80);
-      }
-    } catch (_) { /* noop */ }
-    return '';
-  }
-
-  function svgTitle(el) {
-    try {
-      const t = el.querySelector && el.querySelector('svg title, svg desc');
-      return t ? textOf(t, 60) : '';
-    } catch (_) { return ''; }
-  }
-
-  function bestLabel(el) {
-    if (!el || !el.getAttribute) return '';
-    const attr = (n) => (el.getAttribute(n) || '').trim();
-    const tag = (el.tagName || '').toLowerCase();
-    const type = (attr('type') || '').toLowerCase();
-
-    const candidates = [
-      attr('aria-label'),
-      labelFromAriaLabelledBy(el),
-      (tag === 'input' || tag === 'select' || tag === 'textarea') ? labelFromFormLabel(el) : '',
-      (tag === 'input' && ['submit', 'button', 'reset'].includes(type)) ? (el.value || '') : '',
-      textOf(el),
-      attr('title'),
-      attr('alt'),
-      (() => { try { const img = el.querySelector && el.querySelector('img[alt]'); return img ? img.getAttribute('alt') : ''; } catch (_) { return ''; } })(),
-      svgTitle(el),
-      attr('placeholder'),
-      attr('data-testid'),
-      attr('name')
-    ];
-    for (const c of candidates) {
-      const v = (c || '').replace(/\s+/g, ' ').trim();
-      if (v) return v.length > 80 ? v.slice(0, 79) + '…' : v;
-    }
-    return '';
-  }
-
-  function cssPath(el) {
-    try {
-      const parts = [];
-      let node = el;
-      let depth = 0;
-      while (node && node.nodeType === 1 && depth < 5) {
-        let sel = node.tagName.toLowerCase();
-        if (node.id) { parts.unshift(`#${CSS.escape(node.id)}`); break; }
-        const cls = (node.getAttribute('class') || '').trim().split(/\s+/).filter((c) => c && !/^(is-|has-|ng-|css-)/.test(c))[0];
-        if (cls) sel += `.${CSS.escape(cls)}`;
-        const parent = node.parentElement;
-        if (parent) {
-          const sibs = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
-          if (sibs.length > 1) sel += `:nth-of-type(${sibs.indexOf(node) + 1})`;
-        }
-        parts.unshift(sel);
-        node = node.parentElement;
-        depth++;
-      }
-      return parts.join(' > ');
-    } catch (_) { return ''; }
-  }
-
+  /* 요소 정보는 녹화·따라하기 공용 모듈(src/content/cues.js)이 만든다. 서비스 워커가 이 파일보다 먼저 싣는다.
+   * 예전 칸(tag·type·role·label·href·name·id·placeholder·selector)은 예전과 같은 규칙이고, 따라하기용 단서가 더 붙는다.
+   * 모듈이 없으면(이 파일만 따로 주입된 경우) 태그만 남긴다. */
+  const CUES = globalThis.ClickGuideCues || null;
   function elMeta(el) {
-    if (!el || !el.tagName) return { tag: 'unknown' };
-    const attr = (n) => (el.getAttribute && el.getAttribute(n)) || '';
-    return {
-      tag: el.tagName.toLowerCase(),
-      type: (attr('type') || '').toLowerCase(),
-      role: attr('role'),
-      label: bestLabel(el),
-      href: (el.tagName.toLowerCase() === 'a' && el.href) ? String(el.href).slice(0, 300) : '',
-      name: attr('name'),
-      id: el.id || '',
-      placeholder: attr('placeholder'),
-      selector: cssPath(el)
-    };
+    if (CUES) return CUES.describe(el);
+    return { tag: el && el.tagName ? el.tagName.toLowerCase() : 'unknown' };
   }
 
   function rectOf(el) {
@@ -540,6 +442,12 @@
     const shift = (r) => r && { x: r.x + off.x, y: r.y + off.y, width: r.width, height: r.height };
     payload.rect = shift(payload.rect);
     payload.redactions = (payload.redactions || []).map(shift).filter(Boolean);
+    // 따라하기가 다시 찾을 때 쓰도록, 요소가 든 iframe 의 단서를 바깥 → 안쪽 순서로 붙인다
+    if (payload.el && CUES) {
+      let index = 0;
+      try { index = [...document.querySelectorAll('iframe, frame')].indexOf(f); } catch (_) { index = 0; }
+      payload.el.frames = [CUES.frameCue(f, index), ...(Array.isArray(payload.el.frames) ? payload.el.frames : [])];
+    }
     bubbleUp(payload);
   }
 

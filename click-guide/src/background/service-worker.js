@@ -16,6 +16,8 @@ const STATE_KEY = 'cg_state';
 const BAR_HIDDEN_KEY = 'cg_barHidden';
 const BAR_POS_KEY = 'cg_barPos';
 const RECORDER_ID = 'cg-recorder';
+// 녹화 스크립트: 공용 가리기 코어 → 요소 단서(녹화·따라하기 공용) → 녹화. 이 순서로 싣는다
+const RECORDER_FILES = ['src/shared/redact-core.js', 'src/content/cues.js', 'src/content/recorder.js'];
 const EMPTY_STATE = {
   recording: false, paused: false, sessionId: null,
   stepCount: 0, tabIds: [], windowId: null, lastUrl: '', startedAt: 0
@@ -541,7 +543,7 @@ async function ensureContentScript(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ['src/shared/redact-core.js', 'src/content/recorder.js']
+      files: RECORDER_FILES
     });
     return { ok: true };
   } catch (e) {
@@ -570,7 +572,7 @@ async function registerRecorder() {
     await chrome.scripting.registerContentScripts([{
       id: RECORDER_ID,
       matches: ['<all_urls>'],
-      js: ['src/shared/redact-core.js', 'src/content/recorder.js'],
+      js: RECORDER_FILES,
       allFrames: true,
       runAt: 'document_start',
       persistAcrossSessions: false
@@ -701,13 +703,350 @@ async function stopRecording({ openEditor = true, discard = false } = {}) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 따라하기                                                             */
+/* ------------------------------------------------------------------ */
+/* 저장한 가이드를 실제 화면 위에서 한 단계씩 따라 하게 돕는다 (src/content/player.js). 대신 눌러 주지는 않는다.
+ * - 단계마다 탭의 모든 프레임에서 찾고(executeScript), 점수가 가장 높은 프레임에 테두리를 그린다.
+ * - 사용자가 그 요소를 누르면(입력·목록은 값을 바꾸면) 다음 단계로. 화면 이동 단계는 그 화면이 열리면 저절로 넘어간다.
+ * - 늦게 그려지는 화면을 위해 몇 초 동안 다시 찾고, 그래도 없으면 '못 찾음'과 녹화 화면을 보여 준다.
+ * 상태는 chrome.storage.session 에 둔다 (브라우저를 닫으면 사라지고, 콘텐츠 스크립트는 읽지 못한다). 녹화와 동시에 하지 않는다. */
+const PLAY_KEY = 'cg_play';
+const PLAYER_ID = 'cg-player';
+// 따라하기 스크립트: 공용 가리기 코어 → 요소 단서 → 따라하기
+const PLAYER_FILES = ['src/shared/redact-core.js', 'src/content/cues.js', 'src/content/player.js'];
+const FIND_FAST_MS = 500;          // 처음 몇 초는 자주 찾는다 (늦게 그려지는 화면)
+const FIND_SLOW_MS = 1500;         // '못 찾음'을 알린 뒤에도 가끔 다시 찾는다 (사용자가 메뉴를 열면 나타나는 것 등)
+const NOT_FOUND_AFTER_MS = 4000;
+
+let play;                          // 지금 따라하기 { sessionId, tabId, index, token, name, total } (undefined: 아직 안 읽음)
+let playSteps = null;              // { sessionId, list }
+let playTimer = null;
+let playShowTimer = null;
+let playNotFound = '';             // '못 찾음'을 알린 단계의 표식
+let playGen = 0;                   // 보여 주기 차례: 새로 시작하면 이전 찾기는 멈춘다 (테두리가 깜빡이지 않게)
+
+async function getPlay() {
+  if (play !== undefined) return play;
+  try {
+    const g = await chrome.storage.session.get(PLAY_KEY);
+    play = g[PLAY_KEY] || null;
+  } catch (_) { play = null; }
+  return play;
+}
+
+async function setPlay(p) {
+  play = p || null;
+  try {
+    if (play) await chrome.storage.session.set({ [PLAY_KEY]: play });
+    else await chrome.storage.session.remove(PLAY_KEY);
+  } catch (_) { /* noop */ }
+}
+
+function newToken() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+async function playStepsOf(sessionId) {
+  if (playSteps && playSteps.sessionId === sessionId) return playSteps.list;
+  const list = await db.getSteps(sessionId);
+  playSteps = { sessionId, list };
+  return list;
+}
+
+/* 같은 화면인지: 경로·해시 라우팅(#/…)·쿼리가 같으면 같다.
+ * 호스트는 보지 않는다(개발 서버에서 녹화한 가이드를 운영 서버에서 따라 할 수 있게).
+ * 쿼리 중 매번 바뀌는 값(토큰·세션·시각·긴 숫자·긴 무작위 글자)은 뺀다. */
+const VOLATILE_PARAM = /^(_|t|ts|time|timestamp|nonce|state|code|token|access_token|id_token|session|sessionid|sid|jsessionid|phpsessid|cb|cachebust|rnd|rand|random|v|ver)$/i;
+function routeOf(href) {
+  const u = new URL(href);
+  const hashRoute = /^#!?\//.test(u.hash) ? u.hash.replace(/^#!?/, '') : '';
+  const stable = [];
+  for (const [k, v] of u.searchParams) {
+    if (VOLATILE_PARAM.test(k) || /\d{9,}/.test(v) || /^[A-Za-z0-9_-]{24,}$/.test(v)) continue;
+    stable.push(`${k}=${v}`);
+  }
+  stable.sort();
+  return `${u.pathname.replace(/\/+$/, '')}|${hashRoute}|${stable.join('&')}`;
+}
+function sameRoute(a, b) {
+  try { return routeOf(a) === routeOf(b); } catch (_) { return false; }
+}
+
+async function injectPlayer(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: PLAYER_FILES });
+    return true;
+  } catch (_) { return false; }
+}
+
+async function playerAlive(tabId) {
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { type: 'PLAY_PING' }, { frameId: 0 });
+    return !!(r && r.ok);
+  } catch (_) { return false; }
+}
+
+/* 따라하는 동안에는 새로 여는 문서·iframe 에도 따라하기 스크립트를 싣는다 (따라하는 탭이 아니면 스크립트는 아무것도 하지 않음) */
+async function registerPlayer() {
+  try {
+    const got = await chrome.scripting.getRegisteredContentScripts({ ids: [PLAYER_ID] });
+    if (got && got.length) return;
+    await chrome.scripting.registerContentScripts([{
+      id: PLAYER_ID,
+      matches: ['<all_urls>'],
+      js: PLAYER_FILES,
+      allFrames: true,
+      runAt: 'document_idle',
+      persistAcrossSessions: false
+    }]);
+  } catch (e) {
+    console.warn('[ClickGuide] 따라하기 스크립트 등록 실패:', e);
+  }
+}
+
+async function unregisterPlayer() {
+  try { await chrome.scripting.unregisterContentScripts({ ids: [PLAYER_ID] }); } catch (_) { /* 등록되어 있지 않음 */ }
+}
+
+let playWatchOn = false;
+/* 새 문서: 따라하기 스크립트가 실리면서 PLAY_HELLO 를 보내고, 그때 지금 단계를 보여 준다. 여기서는 스크립트가 있는지만 본다.
+ * 같은 문서 안 화면 전환(SPA: pushState·해시 주소)은 여기서 가려낼 수 없다 — 크롬은 그때도 새 문서처럼
+ * { status: 'loading', url } 다음 { status: 'complete' } 를 보낸다(Chromium 131 실험). 따라하기 스크립트가 PLAY_ROUTE 로 알린다 */
+function onPlayTabUpdated(tabId, info) {
+  if (!play || tabId !== play.tabId) return;
+  if (info.status === 'complete') ensurePlayer(tabId).catch(() => {});
+}
+function onPlayTabRemoved(tabId) {
+  if (play && tabId === play.tabId) stopPlayback().catch(() => {});
+}
+function ensurePlayWatch() {
+  if (playWatchOn) return;
+  playWatchOn = true;
+  chrome.tabs.onUpdated.addListener(onPlayTabUpdated);
+  chrome.tabs.onRemoved.addListener(onPlayTabRemoved);
+}
+function stopPlayWatch() {
+  if (!playWatchOn) return;
+  playWatchOn = false;
+  try { chrome.tabs.onUpdated.removeListener(onPlayTabUpdated); } catch (_) { /* noop */ }
+  try { chrome.tabs.onRemoved.removeListener(onPlayTabRemoved); } catch (_) { /* noop */ }
+}
+
+/* 따라하기 스크립트가 맨 위 프레임에 없으면 싣는다 (실리면 PLAY_HELLO 를 보낸다) */
+async function ensurePlayer(tabId) {
+  if (await playerAlive(tabId)) return true;
+  return injectPlayer(tabId);
+}
+
+/* 여러 번 불려도(인사·화면 전환이 겹침) 한 번만 보여 준다 */
+function scheduleShow() {
+  clearTimeout(playShowTimer);
+  playShowTimer = setTimeout(() => { showStep().catch(() => {}); }, 150);
+}
+
+function cardStep(step) {
+  return {
+    type: step.type || 'click',
+    title: step.title || '',
+    description: step.description || '',
+    value: step.value || '',
+    masked: !!step.masked,
+    pageTitle: step.pageTitle || ''
+  };
+}
+
+async function sendCard(p, view) {
+  try {
+    await chrome.tabs.sendMessage(p.tabId, { type: 'PLAY_CARD', view }, { frameId: 0 });
+    return true;
+  } catch (_) { return false; }
+}
+
+async function clearRings(tabId) {
+  try { await chrome.tabs.sendMessage(tabId, { type: 'PLAY_CLEAR' }); } catch (_) { /* 스크립트 없음 */ }
+}
+
+/* 모든 프레임에서 찾고 점수가 가장 높은 프레임 → { frameId, score } 또는 null */
+async function findInTab(tabId, step, token) {
+  let results = [];
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: (req) => (globalThis.__CLICKGUIDE_PLAYER__ ? globalThis.__CLICKGUIDE_PLAYER__.find(req) : null),
+      args: [{ token, cues: step.el, nrect: step.nrect || null, type: step.type || 'click' }]
+    });
+  } catch (_) { return null; }
+  let best = null;
+  for (const r of results || []) {
+    const v = r && r.result;
+    if (!v || !v.found) continue;
+    if (!best || v.score > best.score) best = { frameId: r.frameId, score: v.score };
+  }
+  return best;
+}
+
+async function showInFrame(tabId, frameId, token) {
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: (t) => (globalThis.__CLICKGUIDE_PLAYER__ ? globalThis.__CLICKGUIDE_PLAYER__.show(t) : null),
+      args: [token]
+    });
+    return r && r.result;
+  } catch (_) { return null; }
+}
+
+async function showStep() {
+  const gen = ++playGen;
+  const p = await getPlay();
+  if (!p) return;
+  clearTimeout(playTimer);
+  const steps = await playStepsOf(p.sessionId);
+  const token = p.token;
+  await clearRings(p.tabId);
+  if (gen !== playGen) return;   // 그 사이 다시 불렸다
+  if (p.index >= steps.length) {
+    await sendCard(p, { token, status: 'done', index: steps.length, total: steps.length, name: p.name, step: {} });
+    return;
+  }
+  const step = steps[p.index];
+  const base = { token, index: p.index, total: steps.length, name: p.name, step: cardStep(step), hasShot: !!step.shotId };
+  if (step.type === 'note') { await sendCard(p, { ...base, status: 'note' }); return; }
+  let tab = null;
+  try { tab = await chrome.tabs.get(p.tabId); } catch (_) { tab = null; }
+  if (step.type === 'navigate') {
+    // 그 화면이 이미 열려 있으면 저절로 다음 단계로
+    if (tab && step.url && sameRoute(tab.url, step.url)) { await advancePlay(token, 1); return; }
+    await sendCard(p, { ...base, status: 'navigate' });
+    return;
+  }
+  if (!step.el || !step.el.tag || step.el.tag === 'unknown') {
+    playNotFound = token;
+    await sendCard(p, { ...base, status: 'notfound', offPage: !!(tab && step.url && !sameRoute(tab.url, step.url)) });
+    return;
+  }
+  if (playNotFound !== token) await sendCard(p, { ...base, status: 'finding' });
+  findLoop(gen, token, step, base, Date.now()).catch(() => {});
+}
+
+async function findLoop(gen, token, step, base, startedAt) {
+  const live = () => gen === playGen && play && play.token === token;
+  const p = await getPlay();
+  if (!p || !live()) return;
+  const best = await findInTab(p.tabId, step, token);
+  if (!live()) return;
+  if (best) {
+    const r = await showInFrame(p.tabId, best.frameId, token);
+    if (!live()) return;
+    if (r && r.ok) {
+      playNotFound = '';
+      await sendCard(p, { ...base, status: 'found', inFrame: best.frameId !== 0 });
+      return;
+    }
+  }
+  const waited = Date.now() - startedAt;
+  if (waited >= NOT_FOUND_AFTER_MS && playNotFound !== token) {
+    playNotFound = token;
+    let tab = null;
+    try { tab = await chrome.tabs.get(p.tabId); } catch (_) { tab = null; }
+    if (!live()) return;
+    await sendCard(p, { ...base, status: 'notfound', offPage: !!(tab && step.url && !sameRoute(tab.url, step.url)) });
+  }
+  if (!live()) return;
+  clearTimeout(playTimer);
+  playTimer = setTimeout(() => { findLoop(gen, token, step, base, startedAt).catch(() => {}); },
+    waited < NOT_FOUND_AFTER_MS ? FIND_FAST_MS : FIND_SLOW_MS);
+}
+
+async function advancePlay(token, delta) {
+  const p = await getPlay();
+  if (!p || (token && p.token !== token)) return;
+  const steps = await playStepsOf(p.sessionId);
+  const index = Math.max(0, Math.min(steps.length, p.index + delta));
+  clearTimeout(playTimer);
+  playNotFound = '';
+  await setPlay({ ...p, index, token: newToken() });
+  await showStep();
+}
+
+/* sessionId 의 가이드를 따라한다. tabId: 그 탭에서(웹페이지가 아니면 새 탭), newTab: 가이드의 시작 화면을 새 탭으로 */
+async function startPlayback({ sessionId, tabId = null, newTab = false } = {}) {
+  const st = await getState();
+  if (st.recording) return { ok: false, error: '녹화하는 중에는 따라하기를 시작할 수 없습니다. 녹화를 마친 뒤 다시 시작해 주세요.' };
+  const ses = sessionId ? await db.getSession(sessionId) : null;
+  if (!ses) return { ok: false, error: '가이드를 찾지 못했습니다.' };
+  playSteps = null;
+  const steps = await playStepsOf(sessionId);
+  if (!steps.length) return { ok: false, error: '단계가 없는 가이드입니다.' };
+  const startUrl = (steps.find((s) => s.url) || {}).url || ses.startUrl || '';
+  let tab = null;
+  if (!newTab && tabId != null) {
+    try { tab = await chrome.tabs.get(tabId); } catch (_) { tab = null; }
+    if (tab && await unrecordableReason(tab)) tab = null;   // 웹페이지가 아니면 시작 화면을 새 탭으로
+  }
+  let openUrl = '';
+  if (!tab && (!startUrl || !(await isRecordableUrl(startUrl)))) return { ok: false, error: '가이드의 시작 화면 주소를 열 수 없습니다.' };
+  if (await getPlay()) await stopPlayback();
+  if (!tab) {
+    // 새 탭은 빈 탭으로 먼저 열고, 상태·스크립트 등록·탭 감시를 다 붙인 뒤에 시작 화면으로 보낸다.
+    // 바로 시작 화면을 열면 빨리 열리는 페이지는 그 사이에 다 열려, 스크립트가 실리지 않고 카드도 뜨지 않는다
+    tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+    openUrl = startUrl;
+  }
+  await setPlay({ sessionId, tabId: tab.id, index: 0, token: newToken(), name: ses.name || '제목 없는 가이드', total: steps.length, startedAt: Date.now() });
+  playSteps = { sessionId, list: steps };
+  playNotFound = '';
+  await registerPlayer();
+  ensurePlayWatch();
+  if (openUrl) {
+    // 새 문서에는 등록한 스크립트가 실리면서 PLAY_HELLO 를 보내고, 그때 첫 단계를 보여 준다
+    await chrome.tabs.update(tab.id, { url: openUrl });
+    return { ok: true, tabId: tab.id };
+  }
+  // 지금 탭: 다 열려 있으면 지금 싣는다 (열리는 중이면 등록한 스크립트나 탭 감시가 싣는다)
+  let fresh = tab;
+  try { fresh = await chrome.tabs.get(tab.id); } catch (_) { fresh = tab; }
+  if (fresh.status === 'complete' && !(await injectPlayer(tab.id))) {
+    await stopPlayback();
+    return { ok: false, error: '이 탭에는 따라하기 화면을 띄울 수 없습니다. 페이지를 새로고침한 뒤 다시 시작해 주세요.' };
+  }
+  return { ok: true, tabId: tab.id };
+}
+
+async function stopPlayback() {
+  const p = await getPlay();
+  clearTimeout(playTimer);
+  clearTimeout(playShowTimer);
+  await setPlay(null);
+  playSteps = null;
+  playNotFound = '';
+  stopPlayWatch();
+  await unregisterPlayer();
+  if (p) { try { await chrome.tabs.sendMessage(p.tabId, { type: 'PLAY_END' }); } catch (_) { /* 스크립트 없음 */ } }
+}
+
+function bytesToB64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+/* 따라하는 탭에서 온 메시지인지 */
+async function fromPlayTab(sender) {
+  const p = await getPlay();
+  return !!(p && sender && sender.tab && sender.tab.id === p.tabId) ? p : null;
+}
+
+/* ------------------------------------------------------------------ */
 /* 메시지 처리                                                          */
 /* ------------------------------------------------------------------ */
 
 /* 콘텐츠 스크립트(웹페이지 쪽)가 보낼 수 있는 메시지. 나머지는 확장 페이지에서만 받는다. */
 const CONTENT_MESSAGES = new Set([
   'GET_STATE', 'CAPTURE_STEP', 'PAGE_LOADED', 'CORRECT_RECT', 'FRAME_UP', 'REMEASURE', 'REDACT_RECTS',
-  'PAUSE', 'RESUME', 'STOP', 'SET_BAR_HIDDEN', 'SET_BAR_POS'
+  'PAUSE', 'RESUME', 'STOP', 'SET_BAR_HIDDEN', 'SET_BAR_POS',
+  // 따라하기 (따라하는 탭에서 온 것만 처리한다)
+  'PLAY_HELLO', 'PLAY_CTRL', 'PLAY_DONE', 'PLAY_LOST', 'PLAY_SHOT', 'PLAY_ROUTE'
 ]);
 // 녹화 바의 버튼이 보내는 메시지 — 녹화 대상 탭에서 온 것만 받는다
 const BAR_MESSAGES = new Set(['PAUSE', 'RESUME', 'STOP', 'SET_BAR_HIDDEN', 'SET_BAR_POS']);
@@ -753,6 +1092,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: false, error: '녹화할 웹페이지 탭을 찾지 못했습니다. 일반 웹페이지를 열고 다시 시도해 주세요.' });
           return;
         }
+        if (await getPlay()) await stopPlayback();   // 따라하기와 녹화는 함께 하지 않는다
         const r = await startRecording(tab);
         sendResponse({
           ok: true, sessionId: r.session ? r.session.id : null, attached: r.attached,
@@ -1057,6 +1397,89 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      /* ---- 따라하기: 확장 페이지(팝업·편집기)에서 ---- */
+      case 'PLAY_START': {
+        sendResponse(await startPlayback({ sessionId: msg.sessionId, tabId: msg.tabId != null ? msg.tabId : null, newTab: !!msg.newTab }));
+        return;
+      }
+      case 'PLAY_STOP': {
+        await stopPlayback();
+        sendResponse({ ok: true });
+        return;
+      }
+      case 'PLAY_STATUS': {
+        const p = await getPlay();
+        sendResponse(p ? { playing: true, sessionId: p.sessionId, name: p.name, index: p.index, total: p.total, tabId: p.tabId } : { playing: false });
+        return;
+      }
+
+      /* ---- 따라하기: 따라하는 탭의 콘텐츠 스크립트에서 ---- */
+      case 'PLAY_HELLO': {
+        const p = await fromPlayTab(sender);
+        // 따라하는 탭에 새 문서가 열렸다(또는 스크립트를 새로 실었다): 지금 단계를 보여 준다
+        if (p && sender.frameId === 0) scheduleShow();
+        sendResponse({ playing: !!p });
+        return;
+      }
+      case 'PLAY_DONE': {
+        const p = await fromPlayTab(sender);
+        if (p && msg.token === p.token) await advancePlay(p.token, 1);
+        sendResponse({ ok: !!p });
+        return;
+      }
+      case 'PLAY_LOST': {
+        const p = await fromPlayTab(sender);
+        if (p && msg.token === p.token) await showStep();   // 다시 찾는다
+        sendResponse({ ok: !!p });
+        return;
+      }
+      case 'PLAY_ROUTE': {
+        // 따라하는 탭에서 새 문서 없이 주소만 바뀌었다(SPA). 화면 이동 단계면 그 화면이 열렸는지 다시 본다
+        // (다른 단계는 그대로: 표시한 요소가 사라지면 PLAY_LOST 가 오고, 못 찾은 단계는 계속 다시 찾고 있다)
+        const p = await fromPlayTab(sender);
+        if (p && sender.frameId === 0) {
+          const step = (await playStepsOf(p.sessionId))[p.index];
+          if (step && step.type === 'navigate') scheduleShow();
+        }
+        sendResponse({ ok: !!p });
+        return;
+      }
+      case 'PLAY_CTRL': {
+        const p = await fromPlayTab(sender);
+        if (!p) { sendResponse({ ok: false }); return; }
+        const a = msg.action;
+        if (a === 'stop') await stopPlayback();
+        else if (a === 'next' && msg.token === p.token) await advancePlay(p.token, 1);
+        else if (a === 'prev' && msg.token === p.token) await advancePlay(p.token, -1);
+        else if (a === 'restart') { await setPlay({ ...p, index: 0, token: newToken() }); playNotFound = ''; await showStep(); }
+        else if (a === 'retry' && msg.token === p.token) { playNotFound = ''; await setPlay({ ...p, token: newToken() }); await showStep(); }
+        else if (a === 'goto' && msg.token === p.token) {
+          // 지금 단계의 화면(녹화할 때 주소)을 연다. 다른 주소로는 보내지 않는다
+          const steps = await playStepsOf(p.sessionId);
+          const step = steps[p.index];
+          if (step && step.url && await isRecordableUrl(step.url)) await chrome.tabs.update(p.tabId, { url: step.url });
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+      case 'PLAY_SHOT': {
+        // 지금 단계의 녹화 화면 (편집기에서 더 가린 곳은 카드가 칠한다)
+        const p = await fromPlayTab(sender);
+        if (!p || msg.token !== p.token) { sendResponse({ ok: false }); return; }
+        const steps = await playStepsOf(p.sessionId);
+        const step = steps[p.index];
+        const blob = step && step.shotId ? await db.getShot(step.shotId) : null;
+        if (!blob) { sendResponse({ ok: false }); return; }
+        sendResponse({
+          ok: true,
+          mime: blob.type || 'image/jpeg',
+          b64: bytesToB64(new Uint8Array(await blob.arrayBuffer())),
+          nrect: step.highlight !== false ? step.nrect || null : null,
+          redactions: Array.isArray(step.redactions) ? step.redactions : []
+        });
+        return;
+      }
+
       default:
         sendResponse({ ok: false, error: 'unknown message' });
     }
@@ -1102,6 +1525,10 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({ [STATE_KEY]: { ...EMPTY_STATE } });
   stopTabWatch();
   await unregisterRecorder();
+  // 확장을 다시 불러오면 따라하던 탭의 스크립트는 끊기므로 따라하기도 끝낸다
+  await setPlay(null);
+  stopPlayWatch();
+  await unregisterPlayer();
   try { await chrome.action.setBadgeText({ text: '' }); } catch (_) { /* noop */ }
 });
 
@@ -1110,6 +1537,9 @@ chrome.runtime.onStartup.addListener(async () => {
   await chrome.storage.local.set({ [STATE_KEY]: { ...EMPTY_STATE } });
   stopTabWatch();
   await unregisterRecorder();
+  await setPlay(null);
+  stopPlayWatch();
+  await unregisterPlayer();
 });
 
 // 예전 버전이 storage.local 에 둔 AI API 키를 비밀 보관소(확장 출처의 IndexedDB)로 옮긴다. 옮길 것이 없으면 아무것도 하지 않는다.
@@ -1121,3 +1551,6 @@ chrome.storage.local.get(STATE_KEY).then((g) => {
   const s = g && g[STATE_KEY];
   if (s && s.recording) ensureTabWatch();
 }).catch(() => {});
+
+// 따라하는 중에 서비스 워커가 다시 떴다면 탭 감시를 이어서 붙인다
+getPlay().then((p) => { if (p) ensurePlayWatch(); }).catch(() => {});

@@ -19,11 +19,17 @@ test('CleanShot: 피커보다 공용 코어를 먼저 주입하고, 워커도 �
   assert.match(bg, /INJECT_FILES\s*=\s*\['shared\/redact-core\.js',\s*'picker\.js'\]/);
 });
 
-test('ClickGuide: 녹화 스크립트보다 공용 코어를 먼저 싣는 곳이 두 군데(주입·등록)', () => {
+test('ClickGuide: 녹화·따라하기 스크립트보다 공용 코어와 요소 단서를 먼저 싣고, 주입·등록이 같은 목록을 씀', () => {
   const sw = read('click-guide/src/background/service-worker.js');
-  const lists = sw.match(/\['src\/shared\/redact-core\.js',\s*'src\/content\/recorder\.js'\]/g) || [];
-  assert.equal(lists.length, 2);
-  assert.doesNotMatch(sw, /\['src\/content\/recorder\.js'\]/, '공용 코어 없이 녹화 스크립트만 싣는 곳이 남아 있음');
+  // 공용 가리기 코어 → 요소 단서(cues.js, 녹화·따라하기 공용) → 녹화 / 따라하기
+  assert.match(sw, /const RECORDER_FILES = \['src\/shared\/redact-core\.js',\s*'src\/content\/cues\.js',\s*'src\/content\/recorder\.js'\];/);
+  assert.match(sw, /const PLAYER_FILES = \['src\/shared\/redact-core\.js',\s*'src\/content\/cues\.js',\s*'src\/content\/player\.js'\];/);
+  assert.equal((sw.match(/files: RECORDER_FILES/g) || []).length, 1, '녹화 스크립트 주입(executeScript)');
+  assert.equal((sw.match(/js: RECORDER_FILES/g) || []).length, 1, '녹화 스크립트 등록(registerContentScripts)');
+  assert.equal((sw.match(/files: PLAYER_FILES/g) || []).length, 1, '따라하기 스크립트 주입');
+  assert.equal((sw.match(/js: PLAYER_FILES/g) || []).length, 1, '따라하기 스크립트 등록');
+  // 목록을 거치지 않고 녹화·따라하기 스크립트를 따로 싣는 곳이 없어야 한다
+  assert.equal((sw.match(/'src\/content\/(recorder|player)\.js'/g) || []).length, 2);
 });
 
 test('배포 zip 에 공용 코드 사본이 들어감 (build-zip.ps1 포함 목록)', () => {
