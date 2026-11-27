@@ -9,6 +9,8 @@
  *   stamp        boolean                            그림 아래에 페이지 주소와 찍은 시각을 적은 띠
  *   hideScrollbars boolean (기본 켬)                 보이는 화면을 찍을 때 페이지의 스크롤 막대 자리를 빼고 저장
  *   keepAfter    boolean                            찍은 뒤에도 정리한 상태를 두고 이어서 찍기 (툴바의 "찍고 계속", picker.js 가 읽는다)
+ *   autoClean    boolean                            선택 모드를 켤 때 한 번에 정리(쿠키 배너·채팅 버튼·앱 설치 배너·공지 팝업)를 바로 (picker.js 가 읽는다)
+ * 사이트별 레시피는 설정이 아니라 기기에만 두는 데이터라 chrome.storage.local 에 있다 (recipes.js 참고).
  */
 
 (() => {
@@ -21,7 +23,8 @@
     askWhere: false,
     stamp: false,
     hideScrollbars: true,
-    keepAfter: false
+    keepAfter: false,
+    autoClean: false
   });
 
   const FORMATS = Object.freeze({
@@ -48,6 +51,7 @@
     o.stamp = v.stamp === true;
     o.hideScrollbars = v.hideScrollbars !== false; // 기본 켬 — 끈다고 저장했을 때만 끈다
     o.keepAfter = v.keepAfter === true;
+    o.autoClean = v.autoClean === true;
     return o;
   }
 

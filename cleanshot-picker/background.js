@@ -9,7 +9,8 @@ importScripts('shared/redact-core.js', 'settings.js');
 const RC = globalThis.RedactCore;
 const CS = globalThis.CleanShotSettings;
 
-const INJECT_FILES = ['shared/redact-core.js', 'picker.js'];
+/* 피커보다 먼저: 공용 가리기 코어, 한 번에 정리·사이트별 레시피(recipes.js — 설정 화면도 같은 파일을 쓴다) */
+const INJECT_FILES = ['shared/redact-core.js', 'recipes.js', 'picker.js'];
 const INJECTABLE = /^(https?|file):/i;
 
 /* captureVisibleTab 은 초당 2회 제한이 있다. 안전하게 550ms 간격을 둔다. */

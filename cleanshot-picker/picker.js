@@ -27,6 +27,12 @@
     return;
   }
   const { styleOf, parentOf, frameOf, contentBox, docOffset, viewSize, rectOf, intersect, clipVisible } = RC;
+  /* 한 번에 정리의 판정·내장 목록과 사이트별 레시피 저장값(recipes.js). 설정 화면도 같은 파일을 쓴다. */
+  const R = globalThis.CleanShotRecipes;
+  if (!R) {
+    console.error('[CleanShot] 한 번에 정리·레시피 모듈(recipes.js)이 실리지 않았습니다.');
+    return;
+  }
 
   /* ============================================================ 상수와 상태 */
 
@@ -344,6 +350,9 @@
           <button class="undo" disabled title="Ctrl+Z">되돌리기</button>
           <button class="reset" disabled>전체 복원</button>
           <span class="sep"></span>
+          <button class="clean" title="쿠키 배너·채팅 버튼·앱 설치 배너·공지 팝업을 한 번에 숨깁니다 (Q)">정리<span class="num">Q</span></button>
+          <button class="recipe" title="지운 것·요소째 가린 것·고친 글과 정리를 이 사이트 레시피로 저장합니다. 다음에 켜면 바로 적용됩니다 (설정에서 끄거나 지움)">레시피 저장</button>
+          <span class="sep"></span>
           <button class="shot primary" title="보이는 화면 (Enter)">캡처</button>
           <button class="full" title="페이지 전체 (Shift+Enter)">전체</button>
           <button class="copy" title="보이는 화면을 클립보드에 복사 (C)">복사</button>
@@ -378,6 +387,8 @@
     mode: root.querySelector('.mode'),
     undo: root.querySelector('.undo'),
     reset: root.querySelector('.reset'),
+    clean: root.querySelector('.clean'),
+    recipe: root.querySelector('.recipe'),
     shot: root.querySelector('.shot'),
     full: root.querySelector('.full'),
     copy: root.querySelector('.copy'),
@@ -395,6 +406,8 @@
   ui.mode.addEventListener('click', toggleMode);
   ui.undo.addEventListener('click', undo);
   ui.reset.addEventListener('click', () => { restoreAll(); paintBar(); reposition(); });
+  ui.clean.addEventListener('click', () => cleanUp());
+  ui.recipe.addEventListener('click', () => saveRecipe());
   ui.shot.addEventListener('click', () => captureViewport());
   ui.full.addEventListener('click', () => captureFullPage());
   ui.copy.addEventListener('click', () => captureViewport('', { copy: true }));
@@ -515,7 +528,8 @@
     paintMode();
     paintBar();
     keepAlive('active');
-    toast('지울 요소를 클릭하세요 · 1~9·0·T 로 도구 전환', 2200);
+    toast('지울 요소를 클릭하세요 · 1~9·0·T 로 도구 전환 · Q 한 번에 정리', 2200);
+    autoApply(); // 이 사이트의 레시피·켤 때 정리 (툴바를 먼저 띄운 뒤)
   }
 
   /* 선택 모드가 열려 있는 동안 service worker 를 깨워 둔다.
@@ -776,9 +790,32 @@
 
   /* ============================================================ 작업 스택 */
 
-  function push(kind, el, undoFn, mergeable) {
-    state.history.push({ kind, el, undo: undoFn, t: Date.now(), mergeable: !!mergeable });
+  /* info: 레시피로 저장할 때 쓰는 값 (지우기의 빈자리 제거 여부, 고친 글, 묶은 작업의 분류별 개수 등) */
+  function push(kind, el, undoFn, mergeable, info) {
+    state.history.push({ kind, el, undo: undoFn, t: Date.now(), mergeable: !!mergeable, info: info || null });
     paintBar();
+  }
+
+  /* fn 안에서 쌓인 작업들을 kind 작업 하나로 묶는다 — Ctrl+Z 한 번에 모두 되돌린다 (한 번에 정리, 켤 때 적용한 레시피).
+     묶은 작업 수를 돌려준다. 하나도 없으면 아무것도 쌓지 않는다. */
+  function groupOps(kind, fn, info) {
+    const outer = state.history;
+    const inner = [];
+    state.history = inner;
+    try {
+      fn();
+    } catch (err) {
+      console.warn(`[CleanShot] ${kind} 도중 멈춤:`, err); // 그때까지 한 것은 아래에서 묶어 되돌릴 수 있게 둔다
+    } finally {
+      state.history = outer;
+    }
+    if (!inner.length) { paintBar(); return 0; }
+    push(kind, null, () => {
+      for (let i = inner.length - 1; i >= 0; i--) {
+        try { inner[i].undo(); } catch (_) { /* 나머지는 계속 되돌린다 */ }
+      }
+    }, false, { ...(info || {}), ops: inner });
+    return inner.length;
   }
 
   /* 방향키 미세 조정은 짧은 시간 안에 이어지면 한 작업으로 묶는다.
@@ -1041,19 +1078,22 @@
 
   /* ============================================================ 1 지우기 */
 
-  function hideEl(el) {
-    if (!usable(el)) return;
+  /* opts.remove 가 있으면 빈자리 남김·제거 설정 대신 그 값을 쓴다 (한 번에 정리는 늘 제거, 레시피는 저장할 때의 방식).
+     숨겼으면 true */
+  function hideEl(el, opts = {}) {
+    if (!usable(el)) return false;
 
     const pos = styleOf(el).position;
     const outOfFlow = pos === 'fixed' || pos === 'sticky' || pos === 'absolute';
-    const removeSpace = state.forceRemove || outOfFlow;
+    const removeSpace = (opts.remove === undefined ? state.forceRemove : !!opts.remove) || outOfFlow;
     const restore = snapStyle(el);
 
     if (removeSpace) el.style.setProperty('display', 'none', 'important');
     else el.style.setProperty('visibility', 'hidden', 'important');
 
-    push('hide', el, restore);
+    push('hide', el, restore, false, { remove: removeSpace });
     setCandidate(null);
+    return true;
   }
 
   /* ============================================================ 2 이동 */
@@ -1267,11 +1307,12 @@
     try { el.blur(); } catch (_) { /* 무시 */ }
 
     if (!changed) return;
+    // 레시피에는 고쳐 쓴 글(innerText — 줄바꿈이 남는다)을 남긴다
     push('text', el, () => {
       restoreTree(tree);
       if (ce === null) el.removeAttribute('contenteditable');
       else el.setAttribute('contenteditable', ce);
-    });
+    }, false, { text: String(el.innerText || '') });
   }
 
   /* 편집 전의 자식 노드 목록과 글자 값을 노드 객체째 기억한다.
@@ -1315,12 +1356,13 @@
    * 캡처할 때는 이 사각형을 service worker 로 보내 PNG 에 한 번 더 직접 칠한다.
    */
 
-  function addMask(anchor, size) {
+  /* opts.fromRecipe: 레시피를 적용해 만든 가리기 (다시 레시피로 저장할 때 겹쳐 넣지 않는다) */
+  function addMask(anchor, size, opts = {}) {
     const box = document.createElement('div');
     box.className = 'mask';
     ui.masks.appendChild(box);
 
-    const m = { kind: 'mask', box, anchor, size, view: null, last: null };
+    const m = { kind: 'mask', box, anchor, size, view: null, last: null, fromRecipe: !!opts.fromRecipe };
     state.masks.push(m);
     layoutMasks();
 
@@ -1331,12 +1373,14 @@
     });
   }
 
-  function maskElement(el) {
-    if (!usable(el)) return;
+  /* 가렸으면 true (보이지 않는 요소는 가리지 않는다) */
+  function maskElement(el, opts = {}) {
+    if (!usable(el)) return false;
     const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return;
+    if (r.width <= 0 || r.height <= 0) return false;
     setCandidate(null);
-    addMask({ el }, null);
+    addMask({ el }, null, opts);
+    return true;
   }
 
   /* 스크롤 영역이면 내용이 움직이므로 박스도 스크롤 위치를 따라가야 한다 */
@@ -2098,6 +2142,491 @@
     }
   }
 
+  /* ============================================================ 한 번에 정리 (Q)
+   * 쿠키 배너·채팅 버튼·앱 설치 배너·"오늘 하루 보지 않기" 공지 팝업을 찾아 작업 하나로 숨긴다(빈자리까지, display:none).
+   * 찾는 곳은 넷이다. 판정 규칙은 recipes.js 에 있다(classify·popupContainer·isBackdrop — node 에서 단위 시험).
+   *   내장 목록     — 동의 관리·채팅·앱 배너 도구가 만드는 요소 (R.VENDORS)
+   *   떠 있는 요소  — fixed·sticky 요소의 크기·자리·글·이름·단추
+   *   맨 위 띠      — 문서 맨 위에서 내용을 밀어내는 넓고 낮은 요소 (body 의 자식·손자)
+   *   공지 팝업     — "오늘 하루 보지 않기" 글을 품은 띄운 요소. 팝업이나 쿠키 창을 숨길 때는 그 뒤의 반투명 가림막도
+   * 문서와 그 안 shadow root 를 본다(같은 출처 iframe 안은 보지 않는다). 이미 숨긴 것과 보이지 않는 것은 건너뛰고,
+   * 찾은 것끼리 겹치면 바깥 것만 숨긴다. Ctrl+Z 한 번이면 모두 돌아온다. */
+
+  const ACTIONABLE = 'a[href], button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]';
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+  function cleanUp() {
+    if (state.busy || !state.active) return;
+    endTextEdit();
+    endNoteEdit();
+    const found = findClutter();
+    const counts = countCats(found);
+    const n = groupOps('cleanup', () => { for (const f of found) hideEl(f.el, { remove: true }); }, { counts });
+    reposition();
+    if (!n) { toast('숨길 쿠키 배너·채팅 버튼·앱 설치 배너·공지 팝업을 찾지 못했습니다', 2400); return; }
+    toast(`정리했습니다 · ${R.countSummary(counts) || '가림막'} · Ctrl+Z 로 되돌리기`, 3200);
+  }
+
+  function countCats(found) {
+    const c = {};
+    for (const f of found) if (R.CATEGORIES.includes(f.cat)) c[f.cat] = (c[f.cat] || 0) + 1;
+    return c;
+  }
+
+  /** 숨길 것 [{ el, cat }] — cat 은 'cookie'·'chat'·'app'·'popup'·'backdrop' */
+  function findClutter() {
+    const roots = [document, ...RC.shadowRoots(document, { skip: (n) => n === host })];
+    const view = { w: window.innerWidth, h: window.innerHeight };
+    const picked = new Map();
+    const backdrops = [];
+    const take = (el, cat) => {
+      if (!el || el === host || picked.has(el) || !el.isConnected || isRoot(el) || holdsUI(el) || !shownNow(el)) return;
+      picked.set(el, cat);
+    };
+
+    for (const cat of Object.keys(R.VENDORS)) {
+      for (const sel of R.VENDORS[cat]) {
+        for (const r of roots) for (const el of queryAll(r, sel)) take(el, cat);
+      }
+    }
+    for (const r of roots) {
+      for (const el of r.querySelectorAll('*')) {
+        if (el === host || picked.has(el)) continue;
+        const pos = styleOf(el).position;
+        if (pos !== 'fixed' && pos !== 'sticky') continue;
+        const f = clutterInfo(el, pos, view);
+        if (!f) continue;
+        const cat = R.classify(f);
+        if (cat) take(el, cat);
+        else if (R.isBackdrop(f)) backdrops.push(el);
+      }
+    }
+    for (const el of topBands(view)) {
+      const f = clutterInfo(el, styleOf(el).position, view);
+      const cat = f && R.classify(f);
+      if (cat) take(el, cat);
+    }
+    for (const el of popupsByText(roots, view)) take(el, 'popup');
+    if ([...picked.values()].some((c) => c === 'popup' || c === 'cookie')) for (const el of backdrops) take(el, 'backdrop');
+
+    // 찾은 것끼리 겹치면 바깥 것만 (바깥 것을 숨기면 안쪽도 함께 사라진다)
+    const els = [...picked.keys()];
+    return els.filter((el) => !els.some((o) => o !== el && insideOf(o, el))).map((el) => ({ el, cat: picked.get(el) }));
+  }
+
+  function queryAll(root, sel) {
+    try { return root.querySelectorAll(sel); } catch (_) { return []; }
+  }
+
+  /* 이 오버레이를 품은 요소 (모달 dialog 가 열려 있으면 툴바를 그 안에 붙인다 — hostParent). 숨기면 툴바까지 사라진다 */
+  function holdsUI(el) {
+    return insideOf(el, host);
+  }
+
+  /* 지금 화면에 그려지는가. 크기 없는 틀 안에 떠 있는 자식만 보이는 도구도 있다(#onetrust-consent-sdk 처럼) */
+  function shownNow(el) {
+    const cs = styleOf(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return true;
+    let n = 0;
+    for (const c of el.querySelectorAll('*')) {
+      if (++n > 200) break;
+      const q = c.getBoundingClientRect();
+      if (q.width > 0 && q.height > 0 && styleOf(c).visibility !== 'hidden') return true;
+    }
+    return false;
+  }
+
+  /* 판정에 넘길 요소 정보 (recipes.js 의 classify·isBackdrop). 너무 큰 요소는 글을 읽지 않고 null */
+  function clutterInfo(el, pos, view) {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return null;
+    const count = el.getElementsByTagName('*').length;
+    if (count > 500) return null;
+    const text = norm(el.innerText);
+    if (text.length > 2000) return null;
+    const actions = [];
+    const own = el.matches(ACTIONABLE) ? actionText(el) : '';
+    if (own) actions.push(own);
+    for (const a of el.querySelectorAll(ACTIONABLE)) {
+      if (actions.length >= 12) break;
+      const t = actionText(a);
+      if (t) actions.push(t);
+    }
+    const frames = [...(el.localName === 'iframe' ? [el] : []), ...el.querySelectorAll('iframe')].slice(0, 4)
+      .map((f) => [f.id, f.getAttribute('title'), f.getAttribute('name'), hostOfSrc(f.getAttribute('src'))].filter(Boolean).join(' ')).join(' ');
+    const cs = styleOf(el);
+    return {
+      pos,
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+      view,
+      docTop: r.top + window.scrollY,
+      text: text.slice(0, 400),
+      plain: plainText(el),
+      textLen: text.length,
+      attrs: [el.id, typeof el.className === 'string' ? el.className : el.getAttribute('class'), el.getAttribute('role'),
+        el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('name')].filter(Boolean).join(' ').toLowerCase(),
+      frames: frames.toLowerCase(),
+      actions,
+      count,
+      bgAlpha: alphaOf(cs.backgroundColor) * (Number(cs.opacity) || 0)
+    };
+  }
+
+  function actionText(a) {
+    return norm(a.innerText || a.value || a.getAttribute('aria-label') || a.getAttribute('title') || '').slice(0, 40);
+  }
+
+  function hostOfSrc(src) {
+    try { return src ? new URL(src, location.href).hostname : ''; } catch (_) { return ''; }
+  }
+
+  function alphaOf(color) {
+    const m = /rgba?\(([^)]+)\)/.exec(String(color || ''));
+    if (!m) return 0;
+    const parts = m[1].split(/[\s,/]+/).filter(Boolean);
+    if (parts.length < 4) return 1;
+    const a = parts[3].endsWith('%') ? parseFloat(parts[3]) / 100 : parseFloat(parts[3]);
+    return Number.isFinite(a) ? a : 1;
+  }
+
+  /* 링크·단추 밖의 글 (쿠키 안내 문장은 여기에, 메뉴의 "쿠키 설정" 링크는 여기 들어가지 않는다) */
+  function plainText(el) {
+    const doc = el.ownerDocument;
+    const tw = doc.createTreeWalker(el, doc.defaultView.NodeFilter.SHOW_TEXT);
+    let s = '';
+    for (let n = tw.nextNode(); n && s.length < 600; n = tw.nextNode()) {
+      const p = n.parentElement;
+      if (!p || /^(script|style|noscript|template)$/.test(p.localName) || inAction(p, el)) continue;
+      s += n.data + ' ';
+    }
+    return norm(s).slice(0, 400);
+  }
+
+  function inAction(p, top) {
+    for (let c = p; c; c = c.parentElement) {
+      if (c.matches(ACTIONABLE)) return true;
+      if (c === top) break;
+    }
+    return false;
+  }
+
+  /* 문서 맨 위에서 내용을 밀어내는 넓고 낮은 띠 후보: body 의 자식·손자 */
+  function topBands(view) {
+    const out = [];
+    const b = document.body;
+    if (!b) return out;
+    const consider = (el) => {
+      if (el === host || out.length >= 60) return;
+      const pos = styleOf(el).position;
+      if (pos === 'fixed' || pos === 'sticky') return; // 떠 있는 요소는 따로 본다
+      const r = el.getBoundingClientRect();
+      if (r.top + window.scrollY < 160 && r.height > 0 && r.height <= 200 && r.width >= view.w * 0.8) out.push(el);
+    };
+    for (const c of b.children) {
+      consider(c);
+      for (const g of c.children) consider(g);
+    }
+    return out;
+  }
+
+  /* "오늘 하루 보지 않기" 같은 글을 품은 요소에서 올라가며 팝업 전체(띄운 가장 바깥 요소)를 고른다 */
+  function popupsByText(roots, view) {
+    const out = [];
+    for (const r of roots) {
+      const doc = r.nodeType === 9 ? r : r.ownerDocument;
+      const tw = doc.createTreeWalker(r, doc.defaultView.NodeFilter.SHOW_TEXT);
+      for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+        const s = n.data;
+        if (s.length > 300 || !(s.includes('않') || /show/i.test(s))) continue;
+        let at = null;
+        for (let e = n.parentElement, i = 0; e && i < 2; e = e.parentElement, i++) {
+          const t = e.textContent || '';
+          if (t.length <= 300 && R.isPopupText(t)) { at = e; break; }
+        }
+        if (!at || out.some((o) => insideOf(o, at))) continue;
+        const chain = [];
+        for (let e = at, i = 0; e && !isRoot(e) && i < 40; e = parentOf(e), i++) {
+          const rr = e.getBoundingClientRect();
+          const info = {
+            el: e,
+            f: { pos: styleOf(e).position, rect: { x: rr.left, y: rr.top, w: rr.width, h: rr.height }, view,
+              textLen: norm(e.textContent).length, count: e.getElementsByTagName('*').length }
+          };
+          chain.push(info);
+          if (info.f.textLen > 2000 || info.f.count > 500) break;
+        }
+        const k = R.popupContainer(chain.map((c) => c.f));
+        if (k >= 0) out.push(chain[k].el);
+      }
+    }
+    return out;
+  }
+
+  /* ============================================================ 사이트별 레시피
+   * 이 사이트(도메인)에서 한 일 가운데 다음에도 그대로 할 것 — 지우기·요소째 가리기·글 고침과 정리를 썼는지 — 를
+   * 요소를 찾는 선택자로 chrome.storage.local 에 저장하고(툴바 "레시피 저장"), 다음에 선택 모드를 켜면 작업 하나로 바로 적용한다.
+   * 같은 출처 iframe·shadow DOM(닫힌 것 포함) 안의 요소는 주인 요소의 선택자를 path 로 함께 남긴다.
+   * 영역으로 그린 가리기, 이동·크기, 주석은 그때 화면의 자리라 넣지 않는다. 페이지 글자는 저장하지 않는다
+   * (선택자에는 id·클래스·data-testid·name·태그 순서만 쓰고, 이름표는 태그#id.클래스). 저장값의 모양과 한도는 recipes.js.
+   * 선택자에 맞는 요소가 여럿이면 모두에 적용한다(항목마다 50개까지). 페이지 구조가 바뀌면 못 찾거나 다른 요소에 맞을 수 있어
+   * 적용한 개수와 못 찾은 개수를 알린다. */
+
+  const TEST_ATTRS = ['data-testid', 'data-test-id', 'data-test', 'data-qa', 'data-cy'];
+  const MAX_MATCH = 50;
+
+  /* 켤 때: 이 사이트의 켜 둔 레시피와 설정 "켤 때 자동으로 정리" */
+  async function autoApply() {
+    const site = R.hostKey(location.href);
+    let rec = null;
+    let autoClean = false;
+    try {
+      const [loc, sync] = await Promise.all([
+        site ? chrome.storage.local.get('recipes') : Promise.resolve({}),
+        chrome.storage.sync.get({ autoClean: false })
+      ]);
+      const store = R.normalizeStore(loc.recipes);
+      rec = site && store[site] && store[site].on ? store[site] : null;
+      autoClean = sync.autoClean === true;
+    } catch (_) {
+      return; // storage 를 못 읽으면 아무것도 하지 않는다
+    }
+    const clean = autoClean || !!(rec && rec.cleanup);
+    if (!state.active || state.busy || (!rec && !clean)) return;
+
+    let res = { done: {}, missing: 0 };
+    let found = [];
+    const n = groupOps('auto', () => {
+      if (rec) res = applyItems(rec.items);
+      if (clean) {
+        found = findClutter();
+        for (const f of found) hideEl(f.el, { remove: true });
+      }
+    }, { recipe: !!rec });
+    reposition();
+
+    const bits = [];
+    if (rec) {
+      const done = R.KINDS.filter((k) => res.done[k]).map((k) => `${R.KIND_LABELS[k]} ${res.done[k]}`).join(' · ');
+      if (done) bits.push(`레시피를 적용했습니다 · ${done}${res.missing ? ` · 못 찾음 ${res.missing}` : ''}`);
+      else if (rec.items.length) bits.push(`레시피의 요소 ${rec.items.length}개를 이 페이지에서 찾지 못했습니다`);
+      else bits.push('레시피를 적용했습니다');
+    }
+    if (clean) {
+      const c = R.countSummary(countCats(found));
+      if (c) bits.push(`${rec ? '정리' : '켤 때 정리'} · ${c}`);
+    }
+    if (!bits.length || (!rec && !n)) return; // 자동 정리만 켰고 숨길 것이 없으면 조용히
+    if (n) bits.push('Ctrl+Z 로 이번만 빼기');
+    toast(bits.join(' · '), 3600);
+  }
+
+  /* 레시피 항목을 적용한다. 항목마다 맞는 요소 모두에(50개까지). 종류별로 적용한 항목 수와 못 찾은 항목 수 */
+  function applyItems(items) {
+    const done = {};
+    let missing = 0;
+    for (const it of items) {
+      let hit = 0;
+      for (const el of resolveItem(it)) {
+        if (it.kind === 'hide' ? !holdsUI(el) && hideEl(el, { remove: it.remove }) :
+          it.kind === 'mask' ? maskElement(el, { fromRecipe: true }) :
+          it.kind === 'text' ? setText(el, it.text) : false) hit++;
+      }
+      if (hit) done[it.kind] = (done[it.kind] || 0) + 1;
+      else missing++;
+    }
+    return { done, missing };
+  }
+
+  /* 글 고침을 다시 한다. 되돌릴 때는 텍스트 도구와 같이 원래 노드 객체를 그대로 제자리에 돌려놓는다 */
+  function setText(el, text) {
+    if (!usable(el)) return false;
+    if (el.textContent === text) return true; // 이미 그 글이다
+    const tree = snapTree(el);
+    el.textContent = text;
+    push('text', el, () => restoreTree(tree), false, { text, fromRecipe: true });
+    return true;
+  }
+
+  /* 항목의 선택자에 맞는 요소. path 를 따라 같은 출처 iframe 의 문서나 shadow root 로 들어간다 */
+  function resolveItem(it) {
+    let roots = [document];
+    for (const step of it.path) {
+      const next = [];
+      for (const r of roots) {
+        for (const el of queryAll(r, step)) {
+          const inner = isFrameEl(el) ? frameDoc(el) : shadowOf(el);
+          if (inner && !next.includes(inner)) next.push(inner);
+          if (next.length >= MAX_MATCH) break;
+        }
+      }
+      roots = next;
+      if (!roots.length) return [];
+    }
+    const out = [];
+    for (const r of roots) {
+      for (const el of queryAll(r, it.sel)) {
+        if (usable(el) && !out.includes(el)) out.push(el);
+        if (out.length >= MAX_MATCH) return out;
+      }
+    }
+    return out;
+  }
+
+  /* 툴바 "레시피 저장": 지금까지 한 일을 이 사이트 레시피에 더한다 */
+  async function saveRecipe() {
+    if (state.busy || !state.active) return;
+    endTextEdit();
+    endNoteEdit();
+    const site = R.hostKey(location.href);
+    if (!site) { toast('이 페이지에는 레시피를 저장할 수 없습니다', 2400); return; }
+    const got = collectRecipe();
+    if (!got.items.length && !got.cleanup) {
+      toast(`레시피로 저장할 것이 없습니다 · 지운 것·요소째 가린 것·고친 글과 정리를 저장합니다${got.failed ? ` · 위치를 정하지 못한 ${got.failed}개` : ''}`, 3200);
+      return;
+    }
+    let res;
+    try {
+      const v = await chrome.storage.local.get('recipes');
+      const store = R.normalizeStore(v.recipes);
+      res = R.addItems(store[site], got.items, { cleanup: got.cleanup, at: Date.now() });
+      store[site] = res.recipe;
+      await chrome.storage.local.set({ recipes: R.normalizeStore(store) });
+    } catch (err) {
+      toast(`레시피를 저장하지 못했습니다 · ${(err && err.message) || err}`, 3600);
+      return;
+    }
+    const notes = [];
+    if (got.failed) notes.push(`위치를 정하지 못한 ${got.failed}개는 뺐습니다`);
+    if (got.skipped) notes.push(`영역 가리기·이동·크기·주석 ${got.skipped}개는 넣지 않습니다`);
+    if (res.full) notes.push(`항목이 ${R.LIMITS.items}개라 ${res.full}개는 넣지 못했습니다`);
+    toast(`${site} 레시피에 저장했습니다 · ${R.summary(res.recipe)}${notes.length ? ' · ' + notes.join(' · ') : ''} · 다음에 켜면 바로 적용합니다`, 4200);
+  }
+
+  /* 작업 스택과 가리기에서 레시피 항목을 모은다 */
+  function collectRecipe() {
+    const picked = [];
+    let cleanup = false;
+    let skipped = 0;
+    for (const op of state.history) {
+      if (op.kind === 'hide' && op.el) picked.push({ kind: 'hide', el: op.el, remove: !!(op.info && op.info.remove) });
+      else if (op.kind === 'text' && op.el && op.info) picked.push({ kind: 'text', el: op.el, text: op.info.text });
+      else if (op.kind === 'cleanup') cleanup = true;
+      // 가리기는 아래에서 지금 남아 있는 것으로 본다. 켤 때 적용한 것(auto)은 이미 레시피에 있고, remove 는 그린 것 지우기
+      else if (op.kind !== 'mask' && op.kind !== 'auto' && op.kind !== 'remove') skipped++;
+    }
+    for (const m of state.masks) {
+      if (m.fromRecipe) continue;
+      if (m.anchor && m.anchor.el && !m.size) picked.push({ kind: 'mask', el: m.anchor.el });
+      else skipped++;
+    }
+    const items = [];
+    let failed = 0;
+    for (const p of picked) {
+      const loc = p.el.isConnected ? locate(p.el) : null;
+      if (!loc) { failed++; continue; }
+      const it = { kind: p.kind, path: loc.path, sel: loc.sel, label: label(p.el) };
+      if (p.kind === 'hide') it.remove = p.remove;
+      if (p.kind === 'text') it.text = p.text;
+      items.push(it);
+    }
+    return { items, cleanup, skipped, failed };
+  }
+
+  /* 요소를 다시 찾을 선택자. shadow root·같은 출처 iframe 안이면 바깥으로 나가며 주인 요소의 선택자를 path 에 쌓는다 */
+  function locate(el) {
+    const steps = [];
+    let node = el;
+    for (let i = 0; node && i <= R.LIMITS.path; i++) {
+      const root = node.getRootNode();
+      const sel = localSel(node, root);
+      if (!sel || sel.length > R.LIMITS.sel) return null;
+      steps.unshift(sel);
+      if (root.host) { node = root.host; continue; }
+      const f = root.nodeType === 9 ? frameOf(root) : null;
+      if (!f) return { path: steps.slice(0, -1), sel: steps[steps.length - 1] };
+      node = f;
+    }
+    return null; // 너무 깊다
+  }
+
+  /* root(문서·shadow root) 안에서 el 하나에만 맞는 짧은 선택자. 오래 남을 이름(id·data-testid·클래스·name)부터 쓰고,
+     안 되면 조상으로 올라가며 > 와 :nth-of-type 으로 잇는다. 만들 때 그 요소 하나에만 맞는지 확인한다. */
+  function localSel(el, root) {
+    const uniq = (s) => {
+      try {
+        const l = root.querySelectorAll(s);
+        return l.length === 1 && l[0] === el;
+      } catch (_) {
+        return false;
+      }
+    };
+    const tag = el.localName;
+    const id = el.getAttribute('id');
+    if (id && R.stableId(id) && uniq('#' + CSS.escape(id))) return '#' + CSS.escape(id);
+    for (const a of TEST_ATTRS) {
+      const v = el.getAttribute(a);
+      if (v && v.length <= 80 && uniq(`${tag}[${a}="${cssStr(v)}"]`)) return `${tag}[${a}="${cssStr(v)}"]`;
+    }
+    const cls = stableClasses(el);
+    for (const c of cls) if (uniq(`${tag}.${CSS.escape(c)}`)) return `${tag}.${CSS.escape(c)}`;
+    for (let i = 0; i < cls.length; i++) {
+      for (let j = i + 1; j < cls.length; j++) {
+        const s = `${tag}.${CSS.escape(cls[i])}.${CSS.escape(cls[j])}`;
+        if (uniq(s)) return s;
+      }
+    }
+    const name = el.getAttribute('name');
+    if (name && name.length <= 80 && /^(input|select|textarea|button|form|iframe)$/.test(tag) && uniq(`${tag}[name="${cssStr(name)}"]`)) {
+      return `${tag}[name="${cssStr(name)}"]`;
+    }
+    const parts = [];
+    for (let node = el, depth = 0; node && depth < 12; node = node.parentElement, depth++) {
+      const p = piece(node);
+      if (depth > 0 && !p.anchor) {
+        const loose = [p.s, ...parts].join(' > ');
+        if (uniq(loose)) return loose;
+      }
+      parts.unshift(p.anchor ? p.s : p.s + nthOf(node));
+      const s = parts.join(' > ');
+      if (uniq(s)) return s;
+    }
+    return null;
+  }
+
+  /* 경로 한 칸: 오래 남을 id 면 그것만(여기서 멈출 수 있다), 아니면 태그와 클래스 둘까지 */
+  function piece(node) {
+    const id = node.getAttribute('id');
+    if (id && R.stableId(id)) return { s: '#' + CSS.escape(id), anchor: true };
+    for (const a of TEST_ATTRS) {
+      const v = node.getAttribute(a);
+      if (v && v.length <= 80) return { s: `${node.localName}[${a}="${cssStr(v)}"]`, anchor: false };
+    }
+    return { s: node.localName + stableClasses(node).slice(0, 2).map((c) => '.' + CSS.escape(c)).join(''), anchor: false };
+  }
+
+  function nthOf(node) {
+    const p = node.parentElement || (node.parentNode && node.parentNode.nodeType === 11 ? node.parentNode : null);
+    if (!p) return '';
+    let k = 0;
+    let n = 0;
+    for (const c of p.children) {
+      if (c.localName !== node.localName) continue;
+      n++;
+      if (c === node) k = n;
+    }
+    return n > 1 ? `:nth-of-type(${k})` : '';
+  }
+
+  function stableClasses(el) {
+    return [...el.classList].filter(R.stableClass).slice(0, 4);
+  }
+
+  function cssStr(v) {
+    return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\a ');
+  }
+
   /* ============================================================ 이벤트 */
 
   function usable(el) {
@@ -2343,6 +2872,13 @@
     if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       block(e);
       captureViewport('', { copy: true });
+      return;
+    }
+
+    // Q: 한 번에 정리 (한글 입력 상태의 ㅂ 도 같은 자리)
+    if (e.code === 'KeyQ' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      block(e);
+      cleanUp();
       return;
     }
 
@@ -2914,6 +3450,8 @@
     ui.shot.disabled = on;
     ui.full.disabled = on;
     ui.copy.disabled = on;
+    ui.clean.disabled = on;
+    ui.recipe.disabled = on;
   }
 
   /* 저장·복사를 마쳤을 때. 찍고 계속이면 정리한 상태를 그대로 두고, 아니면 전체 복원 후 닫는다 */
