@@ -5,6 +5,7 @@
 import { uid } from './util.js';
 import { newAuth, normalizeRequest, normalizeSsh } from './model.js';
 import { parseExtraArgs } from './curl-runner.js';
+import { normalizeExamples } from './resp-tools.js';
 
 const isObj = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
 const str = (v, d = '') => (typeof v === 'string' ? v : v == null ? d : String(v));
@@ -28,7 +29,10 @@ function normItems(items, depth) {
       if (it.variables !== undefined) out.variables = vars(it.variables);
       return out;
     }
-    return { ...it, id: str(it.id) || uid('req'), type: 'request', name: str(it.name, '요청'), request: normalizeRequest(isObj(it.request) ? it.request : {}) };
+    const out = { ...it, id: str(it.id) || uid('req'), type: 'request', name: str(it.name, '요청'), request: normalizeRequest(isObj(it.request) ? it.request : {}) };
+    // 응답 예제: 깨진 줄은 빼고 형식을 맞춘다 (본문 1MB 까지, 요청마다 100개까지)
+    if (it.examples !== undefined) out.examples = normalizeExamples(it.examples);
+    return out;
   });
 }
 

@@ -1,20 +1,15 @@
 // 환경 간 응답 비교 화면 (탭)
 // 같은 요청을 고른 환경마다 한꺼번에 보내고, 기준 환경의 응답과 상태 코드·머리글·본문을 견준다.
 // 응답은 이 탭의 메모리에만 두고 저장하지 않는다(히스토리에도 남기지 않음). 고른 환경·기준·뺄 곳만 탭에 저장한다.
-import { h, clear, formatBytes, formatMs, methodClass, methodShort, statusClass, copyText, STATUS_TEXT } from '../util.js';
+import { h, clear, formatBytes, formatMs, methodClass, methodShort, statusClass, copyText } from '../util.js';
 import { icon } from './icons.js';
-import { toast, openModal, confirmDialog } from './overlay.js';
-import { compareResults, makeIgnore, prettyJsonLines, sideBySide, lineHunks, showValue, ignorePathOf, DEFAULT_IGNORE_HEADERS } from '../compare.js';
-import { responseContext } from '../checks.js';
+import { toast, confirmDialog } from './overlay.js';
+import { compareResults, showValue } from '../compare.js';
+import { diffListView, diffSideView, flashPath, editIgnoreDialog, statusLine, ignoreLines as lines, LIST_LIMIT } from './diff-view.js';
 import { redactSecrets, vault } from '../secrets.js';
 import { app } from '../app.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const SIDE_LIMIT = 4000; // 나란히 보기에서 한쪽에 펴는 줄 수
-const LIST_LIMIT = 300; // 차이 목록에 보여 줄 줄 수 (본문)
-
-const lines = (s) => String(s || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-const statusLine = (r) => `${r.status} ${r.statusText || STATUS_TEXT[r.status] || ''}`.trim();
 
 export class CompareView {
   constructor(tab) {
@@ -264,133 +259,26 @@ export class CompareView {
   }
 
   listView(base, run, diff) {
-    const A = base.env.name;
-    const B = run.env.name;
-    const out = h('div.cmp-list');
-    if (diff.same) {
-      out.append(h('div.cmp-same', icon('check', 16), `${A} 와 ${B} 의 응답이 같습니다`, h('span.muted', ' (뺀 곳은 견주지 않음)')));
-    }
-    // 상태 코드
-    out.append(h('div.cmp-sec',
-      h('div.cmp-sec-head', '상태 코드', diff.status ? h('span.cmp-ok', '같음') : h('span.cmp-bad', '다름')),
-      diff.status ? null : h('div.cmp-kv', h('span.cmp-old', statusLine(base.result)), h('span.cmp-arrow', '→'), h('span.cmp-new', statusLine(run.result)))));
-    // 머리글
-    const hs = diff.headers;
-    out.append(h('div.cmp-sec',
-      h('div.cmp-sec-head', '응답 머리글', hs.length ? h('span.cmp-bad', `다른 곳 ${hs.length}개`) : h('span.cmp-ok', '같음'),
-        h('span.cmp-sec-note.muted', { title: DEFAULT_IGNORE_HEADERS.join(', ') }, '날짜·요청 ID 등은 견주지 않음')),
-      hs.length ? h('table.cmp-table',
-        h('thead', h('tr', h('th', '이름'), h('th', A), h('th', B), h('th'))),
-        h('tbody', hs.map((x) => h('tr.k-' + x.kind,
-          h('td.cmp-path', x.name),
-          h('td.cmp-old', x.a === undefined ? h('span.muted', '(없음)') : x.a),
-          h('td.cmp-new', x.b === undefined ? h('span.muted', '(없음)') : x.b),
-          h('td.cmp-act', h('button.link-btn', { title: '이 머리글은 견주지 않기', onclick: () => this.addIgnore('headers', x.name) }, '빼기')))))) : null));
-    // 본문
-    const b = diff.body;
-    const bodyHead = h('div.cmp-sec-head', '본문',
-      b.mode === 'json' ? h('span.cmp-tag', 'JSON · 경로마다') : b.mode === 'text' ? h('span.cmp-tag', '글 · 줄마다') : h('span.cmp-tag', '바이너리'),
-      b.count ? h('span.cmp-bad', b.mode === 'json' ? `다른 곳 ${b.count}${b.truncated ? '+' : ''}개` : b.mode === 'text' && !b.tooBig ? `다른 줄 ${b.count}개` : '다름') : h('span.cmp-ok', '같음'));
-    const sec = h('div.cmp-sec', bodyHead);
-    if (b.mode === 'json' && b.diffs.length) {
-      const shown = b.diffs.slice(0, LIST_LIMIT);
-      sec.append(h('table.cmp-table',
-        h('thead', h('tr', h('th', '경로'), h('th', A), h('th', B), h('th'))),
-        h('tbody', shown.map((x) => h('tr.k-' + x.kind,
-          h('td.cmp-path', h('button.link-btn.cmp-jump', { title: '본문 나란히 보기에서 이 자리로', onclick: () => this.jumpTo(x.path) }, x.path)),
-          h('td.cmp-old', showValue(x.a)),
-          h('td.cmp-new', showValue(x.b)),
-          h('td.cmp-act', h('button.link-btn', { title: '이 경로는 견주지 않기 (뺄 곳에 더함)', onclick: () => this.addIgnore('body', ignorePathOf(x.path)) }, '빼기')))))));
-      if (b.diffs.length > shown.length || b.truncated) sec.append(h('div.muted.cmp-more', `처음 ${shown.length}개만 보여 줍니다.`));
-      sec.append(h('div.muted.cmp-hint', '배열은 같은 번째끼리 견줍니다. 번째마다 달라지는 값은 [*] 로 뺄 수 있습니다 (예: $.items[*].updatedAt). 키 이름만 쓰면 어느 깊이든 뺍니다.'));
-    } else if (b.mode === 'text' && b.count) {
-      if (b.tooBig) sec.append(h('div.muted', '줄이 너무 많거나 다른 줄이 너무 많아 줄마다 견주지 않았습니다. 본문이 다릅니다.'));
-      else {
-        const hunks = lineHunks(b.ops, 2);
-        const pre = h('div.cmp-hunks');
-        let n = 0;
-        for (const hk of hunks) {
-          if (n > LIST_LIMIT) break;
-          const blk = h('div.cmp-hunk');
-          for (const o of hk) {
-            n++;
-            const text = o.t === '+' ? b.b[o.b] : b.a[o.a];
-            blk.appendChild(h('div.cmp-hl.k-' + (o.t === '+' ? 'added' : o.t === '-' ? 'removed' : 'same'),
-              h('span.cmp-ln', o.a === undefined ? '' : String(o.a + 1)), h('span.cmp-ln', o.b === undefined ? '' : String(o.b + 1)),
-              h('span.cmp-sign', o.t === '=' ? ' ' : o.t), h('span.cmp-tx', text)));
-          }
-          pre.appendChild(blk);
-        }
-        sec.append(pre);
-      }
-    } else if (b.mode === 'binary' && b.count) {
-      sec.append(h('div.muted', `바이트가 다릅니다 (${formatBytes(base.result.size && base.result.size.body)} → ${formatBytes(run.result.size && run.result.size.body)}).`));
-    }
-    out.append(sec);
-    return out;
+    return diffListView({
+      a: { name: base.env.name, result: base.result },
+      b: { name: run.env.name, result: run.result },
+      diff,
+      onIgnore: (kind, text) => this.addIgnore(kind, text),
+      onJump: (path) => this.jumpTo(path),
+    });
   }
 
   // 본문 나란히 보기: JSON 은 같은 경로끼리 같은 행, 글은 같은 줄끼리
   sideView(base, run, diff) {
-    const b = diff.body;
-    const box = h('div.cmp-side');
-    if (b.mode === 'binary') {
-      box.append(h('div.muted', '바이너리 응답은 나란히 볼 수 없습니다.'));
-      return box;
-    }
-    let L;
-    let R;
-    let truncated = false;
-    if (b.mode === 'json') {
-      const ig = makeIgnore(this.ignoreOpts().ignoreBody);
-      const left = new Set(b.diffs.filter((x) => x.kind !== 'added').map((x) => x.path));
-      const right = new Set(b.diffs.filter((x) => x.kind !== 'removed').map((x) => x.path));
-      const pl = prettyJsonLines(responseContext(base.result).json(), { ignore: ig, marks: left, limit: SIDE_LIMIT });
-      const pr = prettyJsonLines(responseContext(run.result).json(), { ignore: ig, marks: right, limit: SIDE_LIMIT });
-      L = pl.lines;
-      R = pr.lines;
-      truncated = pl.truncated || pr.truncated;
-    } else {
-      const ta = responseContext(base.result).text().split(/\r?\n/);
-      const tb = responseContext(run.result).text().split(/\r?\n/);
-      truncated = ta.length > SIDE_LIMIT || tb.length > SIDE_LIMIT;
-      L = ta.slice(0, SIDE_LIMIT).map((t) => ({ text: t, key: t }));
-      R = tb.slice(0, SIDE_LIMIT).map((t) => ({ text: t, key: t }));
-    }
-    const { rows, aligned } = sideBySide(L, R);
-    // 글 모드: 짝이 없는 줄과 짝지은 줄 중 글이 다른 줄이 다른 곳
-    if (b.mode !== 'json') {
-      for (const row of rows) {
-        if (row.l && (!row.r || row.r.text !== row.l.text)) row.l = { ...row.l, mark: true };
-        if (row.r && (!row.l || row.l.text !== row.r.text)) row.r = { ...row.r, mark: true };
-      }
-    }
-    const table = h('div.cmp-grid', h('div.cmp-grid-head', h('div', base.env.name, h('span.cmp-base-tag', '기준')), h('div', run.env.name)));
-    const cell = (x, i, side) => (x
-      ? h('div.cmp-cell' + (x.mark ? (side === 'l' ? '.del' : '.add') : '') + (x.ignored ? '.ign' : ''), { dataset: { key: x.key || '' }, title: x.ignored ? '뺀 곳 (견주지 않음)' : null },
-        h('span.cmp-ln', String(i + 1)), h('span.cmp-tx', x.text))
-      : h('div.cmp-cell.blank'));
-    const frag = document.createDocumentFragment();
-    for (const row of rows) frag.appendChild(h('div.cmp-row', cell(row.l, row.li, 'l'), cell(row.r, row.ri, 'r')));
-    this.gridBody = h('div.cmp-grid-body', frag);
-    table.appendChild(this.gridBody);
-    if (!aligned) box.append(h('div.muted.cmp-more', '다른 줄이 너무 많아 같은 줄끼리 맞추지 못했습니다. 줄 번호대로 놓았습니다.'));
-    if (truncated) box.append(h('div.muted.cmp-more', `한쪽에 ${SIDE_LIMIT}줄까지만 보여 줍니다.`));
-    box.append(table);
-    const marks = rows.filter((r) => (r.l && r.l.mark) || (r.r && r.r.mark)).length;
-    if (!marks) box.prepend(h('div.cmp-same', icon('check', 16), '본문이 같습니다', h('span.muted', ' (뺀 곳은 회색)')));
-    return box;
+    const v = diffSideView({ a: { name: base.env.name, result: base.result }, b: { name: run.env.name, result: run.result }, diff, ignoreBody: this.ignoreOpts().ignoreBody });
+    this.gridBody = v.grid;
+    return v.el;
   }
 
   jumpTo(path) {
     this.mode = 'side';
     this.renderBody();
-    const cell = this.gridBody && [...this.gridBody.querySelectorAll('.cmp-cell')].find((c) => c.dataset.key === path);
-    if (cell) {
-      cell.scrollIntoView({ block: 'center' });
-      cell.parentElement.classList.add('flash');
-      setTimeout(() => cell.parentElement && cell.parentElement.classList.remove('flash'), 1200);
-    }
+    flashPath(this.gridBody, path);
   }
 
   addIgnore(kind, text) {
@@ -403,42 +291,15 @@ export class CompareView {
   }
 
   editIgnore() {
-    const body = h('textarea.input.cmp-ig-input', { rows: 7, spellcheck: 'false', placeholder: 'updatedAt\n$.meta.requestId\n$.items[*].createdAt\n$..traceId' });
-    body.value = this.opts.ignoreBody || '';
-    const hdr = h('textarea.input.cmp-ig-input', { rows: 3, spellcheck: 'false', placeholder: 'X-Version\nETag' });
-    hdr.value = this.opts.ignoreHeaders || '';
-    const err = h('div.field-err');
-    const check = () => {
-      const bad = makeIgnore(body.value).errors;
-      err.textContent = bad.length ? bad.map((e) => `${e.line}번째 줄 "${e.text}": ${e.message}`).join(' · ') : '';
-      return !bad.length;
-    };
-    body.addEventListener('input', check);
-    const m = openModal({
-      title: '견주지 않을 곳',
-      subtitle: '요청마다 달라지는 값(시각·요청 ID 등)을 빼면 진짜 차이만 남습니다',
-      width: 560,
-      body: h('div.cmp-ig',
-        h('label.field', h('span.field-label', '본문 (한 줄에 하나)'), body,
-          h('div.muted', h('code', 'updatedAt'), ' 처럼 이름만 쓰면 어느 깊이든 그 키를 뺍니다. ', h('code', '$'), ' 로 시작하면 경로: ',
-            h('code', '$.meta.requestId'), ' · ', h('code', '$.items[*].at'), '(아무 번째) · ', h('code', '$.data.*.ts'), '(아무 이름) · ', h('code', '$..traceId'), '(아무 깊이). ',
-            h('code', '#'), ' 로 시작하는 줄은 메모.')),
-        err,
-        h('label.field', h('span.field-label', '응답 머리글 이름 (한 줄에 하나)'), hdr,
-          h('div.muted', '이것들은 늘 뺍니다: ', DEFAULT_IGNORE_HEADERS.join(', ')))),
-      footer: [
-        h('button.btn', { onclick: () => m.close() }, '취소'),
-        h('button.btn.btn-primary', {
-          onclick: () => {
-            if (!check()) return;
-            this.opts.ignoreBody = body.value.trim();
-            this.opts.ignoreHeaders = hdr.value.trim();
-            this.save();
-            m.close();
-            this.build();
-          },
-        }, '저장'),
-      ],
+    editIgnoreDialog({
+      ignoreBody: this.opts.ignoreBody,
+      ignoreHeaders: this.opts.ignoreHeaders,
+      onSave: ({ ignoreBody, ignoreHeaders }) => {
+        this.opts.ignoreBody = ignoreBody;
+        this.opts.ignoreHeaders = ignoreHeaders;
+        this.save();
+        this.build();
+      },
     });
   }
 

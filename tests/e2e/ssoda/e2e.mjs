@@ -21,6 +21,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const seen = [];
 const hanging = new Set();
 let cmpCount = 0;
+let rtCount = 0;
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
@@ -84,6 +85,29 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json', 'X-Version': q('ver'), 'X-Request-Id': 'rid-' + cmpCount });
       return res.end(`{"stage":${JSON.stringify(q('stage'))},"ver":${Number(q('ver')) || 0},"id":1234567890123456789,"k":${JSON.stringify(q('k'))},"n":${cmpCount},"items":[{"name":"a","at":${cmpCount}},{"name":"b","at":${cmpCount + 1}}]}`);
     }
+    // 응답 도구 시험: 목록(19자리 ID, v 마다 바뀌는 이름·X-Ver, 요청마다 바뀌는 meta.at), 5MB 넘는 글(맨 끝에 NEEDLE-END),
+    // 비밀 값을 되돌려 주는 응답(본문·머리글, 세션 쿠키), 그림
+    if (u.pathname === '/rt/items') {
+      rtCount += 1;
+      const v = u.searchParams.get('v') || '1';
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Ver': v });
+      return res.end(`{"total":2,"items":[{"id":1234567890123456789,"name":"kim","tags":["a"]},{"id":2,"name":"${v === '2' ? 'park' : 'lee'}","tags":[]}],"meta":{"at":${rtCount}}}`);
+    }
+    if (u.pathname === '/rt/big') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      const rows = [];
+      for (let i = 1; i <= 120000; i++) rows.push(`row ${String(i).padStart(6, '0')} lorem ipsum dolor sit amet consectetur\n`);
+      return res.end(rows.join('') + 'NEEDLE-END');
+    }
+    if (u.pathname === '/rt/echo') {
+      const k = u.searchParams.get('k') || '';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'SID=sess-abc123; Path=/; HttpOnly', 'X-Echo-Key': k });
+      return res.end(`{"key":${JSON.stringify(k)},"n":${Number(u.searchParams.get('n')) || 0},"id":1234567890123456789}`);
+    }
+    if (u.pathname === '/rt/png') {
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      return res.end(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]));
+    }
     json({ path: u.pathname });
   });
 });
@@ -144,7 +168,10 @@ async function waitApp(page) {
 }
 
 const results = [];
+// SSODA_ONLY=응답 도구,환경 비교 처럼 주면 이름에 그 글이 든 시험만 (쉼표로 여럿)
+const ONLY = (process.env.SSODA_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
 async function check(name, fn) {
+  if (ONLY.length && !ONLY.some((k) => name.includes(k))) return;
   try {
     const info = await fn();
     results.push({ name, ok: true });
@@ -1212,6 +1239,401 @@ await check('환경 비교: 사이드바에서 열어도 요청 탭이 열려 �
   assert(r.type === 'compare' && r.live === true && r.liveUrl === '{{host}}/cmp?live=1', JSON.stringify(r));
   assert(r.name === '비교 · 바뀐 이름', '이름: ' + r.name);
   assert(r.savedLive === false && r.savedUrl === '{{host}}/cmp?saved=1', JSON.stringify(r));
+});
+
+/* ---------------- 응답 도구 (JSONPath 필터 · 찾기 · 비교 탭 · 응답 예제) ---------------- */
+// 칸에 실제로 치는 것(Input.insertText)과 Ctrl+F 같은 키(Input.dispatchKeyEvent)는 포커스가 있어야 해서 포커스를 흉내 낸다
+await send('Emulation.setFocusEmulationEnabled', { enabled: true }, page.sessionId);
+const pressKey = async (key, code, vk, modifiers = 0) => {
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, modifiers }, page.sessionId);
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers }, page.sessionId);
+};
+
+await check('응답 도구: JSONPath 필터 — 맞는 값만(19자리 그대로) · 치는 동안 칸에 포커스 유지 · 틀린 경로는 까닭 · Tests 탭에 확인·꺼내기 줄로 · 다시 보내도 유지 · 지우면 원래대로', async () => {
+  const id = await ev(page, async (base) => {
+    const app = window.csApp;
+    const tab = app.newRequestTab({ url: base + '/rt/items' }, '응답 도구 필터');
+    await new Promise((r) => setTimeout(r, 200));
+    await app.send(tab, { engine: 'browser' });
+    await new Promise((r) => setTimeout(r, 200));
+    const input = app.views.get(tab.id).response.el.querySelector('input.resp-filter');
+    if (input) input.focus();
+    return input ? tab.id : null;
+  }, BASE);
+  assert(id, 'JSON 응답의 Body 에 필터 칸(input.resp-filter)이 없음');
+  await send('Input.insertText', { text: '$.items[*].id' }, page.sessionId);
+  await sleep(600);
+  const r = await ev(page, async (id) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const tab = app.tabs.find((t) => t.id === id);
+    const rv = app.views.get(id);
+    const el = rv.response.el;
+    const q = (s) => el.querySelector(s);
+    const code = () => (q('.body-content pre') || {}).textContent || '';
+    const bar = () => (q('.filter-bar') || {}).textContent || '';
+    const set = async (v) => {
+      const i = q('input.resp-filter');
+      i.value = v;
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(450);
+    };
+    const out = { focus: !!(document.activeElement && document.activeElement.classList.contains('resp-filter')), value: q('input.resp-filter').value, code1: code(), bar1: bar() };
+    await set('$.items[(');
+    out.err = bar();
+    await set('$.items[0].name');
+    q('.filter-ast').click();
+    await sleep(100);
+    out.assert = tab.draft.tests.assert.slice(-1)[0];
+    out.sub = rv.sub;
+    await set('$.items[0].id');
+    q('.filter-cap').click();
+    await sleep(100);
+    out.extract = tab.draft.tests.extract.slice(-1)[0];
+    await app.send(tab, { engine: 'browser' });
+    await sleep(300);
+    out.afterSend = { value: q('input.resp-filter').value, code: code() };
+    q('.filter-clear').click();
+    await sleep(200);
+    out.cleared = { value: q('input.resp-filter').value, code: code() };
+    return out;
+  }, id);
+  assert(r.focus && r.value === '$.items[*].id', '치는 동안 칸이 포커스를 잃음: ' + JSON.stringify({ focus: r.focus, value: r.value }));
+  assert(/\[\s*1234567890123456789,\s*2\s*\]/.test(r.code1) && !r.code1.includes('kim'), '거른 결과: ' + r.code1);
+  assert(/결과 2개/.test(r.bar1), r.bar1);
+  assert(/닫히지 않았습니다/.test(r.err), '틀린 경로: ' + r.err);
+  assert(r.assert && r.assert.target === 'json' && r.assert.path === '$.items[0].name' && r.assert.op === 'eq' && r.assert.value === 'kim' && r.sub === 'tests', JSON.stringify(r.assert) + ' ' + r.sub);
+  assert(r.extract && r.extract.from === 'json' && r.extract.path === '$.items[0].id' && r.extract.name === 'id', JSON.stringify(r.extract));
+  assert(r.afterSend.value === '$.items[0].id' && r.afterSend.code.trim() === '1234567890123456789', JSON.stringify(r.afterSend));
+  assert(r.cleared.value === '' && r.cleared.code.includes('"name": "kim"'), JSON.stringify(r.cleared).slice(0, 200));
+});
+
+await check('응답 도구: 찾기 — 본문을 누르고 Ctrl+F 로 열림, 개수·Enter·Shift+Enter, 대소문자·정규식, 칠한 곳, Esc 로 닫힘 · 주소 칸의 Ctrl+F 는 가로채지 않음', async () => {
+  const id = await ev(page, async (base) => {
+    const app = window.csApp;
+    const tab = app.newRequestTab({ url: base + '/rt/items' }, '응답 도구 찾기');
+    await new Promise((r) => setTimeout(r, 200));
+    await app.send(tab, { engine: 'browser' });
+    await new Promise((r) => setTimeout(r, 200));
+    app.views.get(tab.id).response.el.querySelector('.body-content').focus();
+    return tab.id;
+  }, BASE);
+  const st = () => ev(page, (id) => {
+    const el = window.csApp.views.get(id).response.el;
+    const hl = CSS.highlights.get('ssoda-find');
+    const cur = CSS.highlights.get('ssoda-find-cur');
+    return {
+      bar: !!el.querySelector('.find-bar'), count: (el.querySelector('.find-count') || {}).textContent || '',
+      focus: !!(document.activeElement && document.activeElement.classList.contains('find-input')),
+      hl: hl ? hl.size : 0, cur: cur ? [...cur].map((x) => x.toString()) : [],
+    };
+  }, id);
+  await pressKey('f', 'KeyF', 70, 2);
+  await sleep(200);
+  const s0 = await st();
+  await send('Input.insertText', { text: 'KIM' }, page.sessionId);
+  await sleep(400);
+  const s1 = await st();
+  await ev(page, (id) => window.csApp.views.get(id).response.el.querySelector('.find-case').click(), id);
+  await sleep(300);
+  const s2 = await st();
+  await ev(page, (id) => {
+    const el = window.csApp.views.get(id).response.el;
+    el.querySelector('.find-case').click();
+    el.querySelector('.find-re').click();
+    const i = el.querySelector('.find-input');
+    i.value = '"name": "\\w+"';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    i.focus();
+  }, id);
+  await sleep(400);
+  const s3 = await st();
+  await pressKey('Enter', 'Enter', 13);
+  await sleep(150);
+  const s4 = await st();
+  await pressKey('Enter', 'Enter', 13, 8);
+  await sleep(150);
+  const s5 = await st();
+  // 찾기 막대를 연 채 다시 보내면 새 응답에서 다시 찾아 칠한다
+  await ev(page, async (id) => {
+    const app = window.csApp;
+    await app.send(app.tabs.find((t) => t.id === id), { engine: 'browser' });
+    await new Promise((r) => setTimeout(r, 300));
+    const i = app.views.get(id).response.el.querySelector('.find-input');
+    if (i) i.focus();
+  }, id);
+  const s5b = await st();
+  await pressKey('Escape', 'Escape', 27);
+  await sleep(150);
+  const s6 = await st();
+  await ev(page, (id) => window.csApp.views.get(id).el.querySelector('.url-input input').focus(), id);
+  await pressKey('f', 'KeyF', 70, 2);
+  await sleep(200);
+  const s7 = await st();
+  assert(s0.bar && s0.focus, 'Ctrl+F 로 찾기 막대가 열리지 않음: ' + JSON.stringify(s0));
+  assert(s1.count === '1/1' && s1.hl === 1 && JSON.stringify(s1.cur) === '["kim"]', '대소문자 무시: ' + JSON.stringify(s1));
+  assert(/없음/.test(s2.count) && s2.hl === 0, '대소문자 구분: ' + JSON.stringify(s2));
+  assert(s3.count === '1/2' && JSON.stringify(s3.cur) === '["\\"name\\": \\"kim\\""]', '정규식: ' + JSON.stringify(s3));
+  assert(s4.count === '2/2' && JSON.stringify(s4.cur) === '["\\"name\\": \\"lee\\""]', 'Enter: ' + JSON.stringify(s4));
+  assert(s5.count === '1/2', 'Shift+Enter: ' + JSON.stringify(s5));
+  assert(s5b.bar && s5b.count === '1/2' && s5b.hl === 2, '다시 보낸 뒤: ' + JSON.stringify(s5b));
+  assert(!s6.bar && s6.hl === 0, 'Esc: ' + JSON.stringify(s6));
+  assert(!s7.bar, '주소 칸에서 Ctrl+F 를 가로챔');
+});
+
+await check('응답 도구: 5MB 넘는 응답 — 앞부분만 보이다가, 찾으면 전체에서 찾아 그 부분으로 옮겨 보여 줌(줄 번호 이어짐) · 처음 줄을 찾으면 다시 앞으로', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const tab = app.newRequestTab({ url: base + '/rt/big' }, '응답 도구 큰 응답');
+    await sleep(200);
+    await app.send(tab, { engine: 'browser' });
+    await sleep(300);
+    const rv = app.views.get(tab.id).response;
+    const el = rv.el;
+    const first = () => {
+      const g = el.querySelector('.cv-gutter');
+      return g ? Number(g.textContent.split('\n')[0]) : null;
+    };
+    const pre = () => (el.querySelector('.body-content pre') || {}).textContent || '';
+    const count = () => (el.querySelector('.find-count') || {}).textContent || '';
+    const out = { note: (el.querySelector('.win-note') || {}).textContent || '', first0: first(), end0: pre().includes('NEEDLE-END') };
+    rv.openFind();
+    const i = el.querySelector('.find-input');
+    const t0 = performance.now();
+    i.value = 'needle-end';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    for (let k = 0; k < 60 && count() !== '1/1'; k++) await sleep(50);
+    out.ms = Math.round(performance.now() - t0);
+    out.count = count();
+    out.first1 = first();
+    out.end1 = pre().includes('NEEDLE-END');
+    const cur = CSS.highlights.get('ssoda-find-cur');
+    const range = cur && [...cur][0];
+    const box = el.querySelector('.body-content').getBoundingClientRect();
+    const rr = range && range.getBoundingClientRect();
+    out.visible = !!rr && rr.height > 0 && rr.top >= box.top - 1 && rr.bottom <= box.bottom + 1;
+    out.cur = range ? range.toString() : '';
+    i.value = 'row 000001 ';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    for (let k = 0; k < 60 && first() !== 1; k++) await sleep(50);
+    out.first2 = first();
+    out.count2 = count();
+    rv.closeFind();
+    return out;
+  }, BASE);
+  assert(/일부만/.test(r.note) && r.first0 === 1 && !r.end0, '처음 화면: ' + JSON.stringify(r));
+  assert(r.count === '1/1' && r.end1 && r.first1 > 1000 && r.visible && r.cur === 'NEEDLE-END', '찾은 곳으로 옮기기: ' + JSON.stringify(r));
+  assert(r.first2 === 1 && r.count2 === '1/1', '다시 앞으로: ' + JSON.stringify(r));
+  return `찾기 ${r.ms} ms, 옮긴 구간이 ${r.first1}번째 줄부터`;
+});
+
+await check('응답 도구: 비교 탭 — 같은 탭에서 다시 보내면 바로 전 응답과 견줌(바뀐 경로·머리글, 같은 19자리 ID 는 같음) · 빼기 · 오류 응답은 기준이 되지 않음 · 본문 나란히', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const tab = app.newRequestTab({ url: base + '/rt/items?v=1' }, '응답 도구 비교');
+    await sleep(200);
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    const el = app.views.get(tab.id).response.el;
+    const tabBtn = () => el.querySelector('.subtab[data-sub="diff"]');
+    const rows = () => [...el.querySelectorAll('.cmp-table tbody tr')].map((tr) => tr.textContent);
+    const out = { before: !!tabBtn() };
+    tab.draft.url = base + '/rt/items?v=2';
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    out.label = tabBtn() ? tabBtn().textContent : '';
+    if (!tabBtn()) return out;
+    tabBtn().click();
+    await sleep(100);
+    const sel = el.querySelector('select.rd-against');
+    out.against = sel ? sel.selectedOptions[0].textContent : '';
+    out.rows = rows();
+    const row = [...el.querySelectorAll('.cmp-table tbody tr')].find((tr) => tr.textContent.includes('$.meta.at'));
+    if (row) row.querySelector('.cmp-act .link-btn').click();
+    await sleep(100);
+    out.ignore = tab.respDiff && tab.respDiff.ignoreBody;
+    out.rows2 = rows();
+    out.label2 = tabBtn().textContent;
+    tab.draft.url = 'http://127.0.0.1:1/x';
+    await app.send(tab, { engine: 'browser' });
+    await sleep(100);
+    out.errTab = !!tabBtn();
+    tab.draft.url = base + '/rt/items?v=1';
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    tabBtn().click();
+    await sleep(100);
+    out.rows3 = rows();
+    [...el.querySelectorAll('.cmp-mode .seg-btn')].find((b) => b.textContent === '본문 나란히').click();
+    await sleep(100);
+    out.side = [...el.querySelectorAll('.cmp-row')].map((rw) => [...rw.querySelectorAll('.cmp-tx')].map((x) => x.textContent.trim())).find((c) => c[0] && c[0].startsWith('"name": "park"'));
+    return out;
+  }, BASE);
+  assert(!r.before, '처음 받은 응답에 비교 탭이 있음');
+  assert(/비교/.test(r.label) && /\(3\)/.test(r.label) && /이전 응답/.test(r.against), JSON.stringify({ label: r.label, against: r.against }));
+  const joined = (r.rows || []).join(' | ');
+  assert(joined.includes('$.items[1].name') && joined.includes('"park"') && joined.includes('"lee"') && joined.includes('$.meta.at') && joined.includes('x-ver'), joined);
+  assert(!joined.includes('1234567890123456789'), '같은 19자리 ID 가 차이로 나옴: ' + joined);
+  assert(r.ignore === '$.meta.at' && !(r.rows2 || []).join(' ').includes('$.meta.at') && /\(2\)/.test(r.label2), JSON.stringify({ ignore: r.ignore, rows2: r.rows2, label2: r.label2 }));
+  assert(r.errTab === false, '오류 응답에 비교 탭이 있음');
+  const j3 = (r.rows3 || []).join(' | ');
+  assert(j3.includes('"park"') && j3.includes('"lee"'), '오류 뒤의 기준이 그 앞 응답(v=2)이 아님: ' + j3);
+  assert(r.side && r.side[1] === '"name": "lee",', '본문 나란히: ' + JSON.stringify(r.side));
+});
+
+const RT_SECRET = 'rt-secret-key-5566';
+await check('응답 도구: 응답 예제 — 저장 ▾ → 예제로 저장(비밀 변수 값·Set-Cookie 값 가림, 19자리 그대로) · 예제 보기·지금 응답과 비교·이름 바꾸기·지우기 · 새로 연 탭의 빈 응답 화면 · 백업·Postman·저장소에는 가린 값만', async () => {
+  const r = await ev(page, async (base, secret) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const { vault } = await import(chrome.runtime.getURL('js/secrets.js'));
+    const { normalizeRequest } = await import(chrome.runtime.getURL('js/model.js'));
+    const { exportPostmanCollection } = await import(chrome.runtime.getURL('js/postman.js'));
+    const env = app.createEnvironment('예제시험');
+    env.variables = [{ id: 'rtv_0', key: 'host', value: base, enabled: true, description: '' }, { id: 'rtv_1', key: 'apiKey', value: '', enabled: true, description: '', secret: true }];
+    vault.set('rtv_1', secret);
+    app.store.changed('environments');
+    app.setActiveEnv(env.id);
+    const col = { id: 'col_rt', name: '예제 컬렉션', description: '', auth: { type: 'none' }, variables: [], items: [{ id: 'rt_item', type: 'request', name: '키 되돌림', request: normalizeRequest({ method: 'GET', url: '{{host}}/rt/echo?k={{apiKey}}&n=1' }) }] };
+    app.store.state.collections.push(col);
+    app.store.changed('collections');
+    app.openItem('rt_item');
+    await sleep(200);
+    const tab = app.activeTab();
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    const rv = app.views.get(tab.id).response;
+    const el = rv.el;
+    const item = col.items[0];
+    const out = {};
+    const menuPick = async (text) => {
+      const b = [...document.querySelectorAll('.menu .menu-item')].find((x) => x.textContent.includes(text));
+      if (b) b.click();
+      await sleep(200);
+      return !!b;
+    };
+    const modalButton = async (labels, value) => {
+      const m = document.querySelector('.modal');
+      if (!m) return null;
+      const title = (m.querySelector('.modal-title') || {}).textContent || '';
+      const input = m.querySelector('input');
+      const before = input ? input.value : null;
+      if (input && value != null) input.value = value;
+      const b = [...m.querySelectorAll('button')].find((x) => labels.includes(x.textContent.trim()));
+      if (b) b.click();
+      await sleep(200);
+      return { title, before };
+    };
+    const save = el.querySelector('.resp-save');
+    if (!save) return { noSave: true };
+    save.click();
+    await sleep(100);
+    out.menu = await menuPick('예제로 저장');
+    out.prompt = await modalButton(['저장'], '정상');
+    out.n = (item.examples || []).length;
+    if (!out.n) return out;
+    const ex = item.examples[0];
+    const hv = (n) => (ex.headers.find((x) => x.name.toLowerCase() === n) || {}).value;
+    out.ex = { name: ex.name, body: ex.body, cookie: hv('set-cookie'), echo: hv('x-echo-key'), request: ex.request };
+    out.toast = document.body.innerText.includes('가렸습니다');
+    out.dirty = !!tab.dirty;
+    el.querySelector('.resp-examples').click();
+    await sleep(100);
+    await menuPick('정상');
+    out.banner = (el.querySelector('.ex-banner') || {}).textContent || '';
+    out.exBody = (el.querySelector('.body-content pre') || {}).textContent || '';
+    el.querySelector('.ex-close').click();
+    await sleep(100);
+    out.backBanner = !!el.querySelector('.ex-banner');
+    tab.draft.url = '{{host}}/rt/echo?k={{apiKey}}&n=2';
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    rv.showExample(item.examples[0]);
+    await sleep(100);
+    el.querySelector('.ex-compare').click();
+    await sleep(200);
+    const sel = el.querySelector('select.rd-against');
+    out.against = sel ? sel.selectedOptions[0].textContent : '';
+    out.diffRows = [...el.querySelectorAll('.cmp-table tbody tr')].map((tr) => tr.textContent).join(' | ');
+    out.diffLeak = el.innerText.includes(secret);
+    rv.showExample(item.examples[0]);
+    await sleep(100);
+    el.querySelector('.ex-rename').click();
+    await sleep(150);
+    await modalButton(['확인', '바꾸기'], '바뀐 예제');
+    out.renamed = item.examples[0].name;
+    const backup = JSON.stringify(app.backupData());
+    out.backup = { secret: backup.includes(secret), ex: backup.includes('바뀐 예제') };
+    const pm = JSON.stringify(exportPostmanCollection(col));
+    out.pm = { n: exportPostmanCollection(col).item[0].response.length, secret: pm.includes(secret), masked: pm.includes('••••••••') };
+    await app.closeTab(tab.id, { force: true });
+    app.openItem('rt_item');
+    await sleep(200);
+    const t2 = app.activeTab();
+    const el2 = app.views.get(t2.id).response.el;
+    out.chips = [...el2.querySelectorAll('.ex-chip')].map((b) => b.textContent);
+    if (el2.querySelector('.ex-chip')) el2.querySelector('.ex-chip').click();
+    await sleep(100);
+    out.chipBanner = (el2.querySelector('.ex-banner') || {}).textContent || '';
+    if (el2.querySelector('.ex-delete')) el2.querySelector('.ex-delete').click();
+    await sleep(150);
+    out.del = await modalButton(['지우기']);
+    out.afterDelete = { n: (item.examples || []).length, banner: !!el2.querySelector('.ex-banner') };
+    await app.store.flush();
+    out.stored = JSON.stringify((await chrome.storage.local.get('collections')).collections).includes(secret);
+    return out;
+  }, BASE, RT_SECRET);
+  assert(!r.noSave && r.menu && r.prompt && r.prompt.before === '200 OK', '저장 ▾ → 예제로 저장: ' + JSON.stringify(r));
+  assert(r.n === 1 && r.ex.name === '정상', JSON.stringify(r));
+  assert(r.ex.body.includes('••••••••') && !r.ex.body.includes(RT_SECRET) && r.ex.body.includes('1234567890123456789'), '본문: ' + r.ex.body);
+  assert(r.ex.cookie === 'SID=••••••••; Path=/; HttpOnly' && r.ex.echo === '••••••••', JSON.stringify(r.ex));
+  assert(r.ex.request && r.ex.request.url === '{{host}}/rt/echo?k={{apiKey}}&n=1', JSON.stringify(r.ex.request));
+  assert(r.toast && !r.dirty, JSON.stringify({ toast: r.toast, dirty: r.dirty }));
+  assert(/예제/.test(r.banner) && r.banner.includes('정상') && r.exBody.includes('••••••••') && !r.exBody.includes(RT_SECRET), '예제 보기: ' + r.banner + ' / ' + r.exBody);
+  assert(!r.backBanner, '응답으로 돌아가도 예제 표시가 남음');
+  assert(r.against.includes('정상') && r.diffRows.includes('$.n') && !r.diffRows.includes('$.key') && !r.diffLeak, '예제와 비교: ' + JSON.stringify({ against: r.against, rows: r.diffRows, leak: r.diffLeak }));
+  assert(r.renamed === '바뀐 예제', '이름 바꾸기: ' + r.renamed);
+  assert(!r.backup.secret && r.backup.ex && r.pm.n === 1 && !r.pm.secret && r.pm.masked, JSON.stringify({ backup: r.backup, pm: r.pm }));
+  assert(r.chips.some((c) => c.includes('바뀐 예제')) && r.chipBanner.includes('바뀐 예제'), '빈 응답 화면의 예제: ' + JSON.stringify(r.chips) + ' / ' + r.chipBanner);
+  assert(r.del && r.afterDelete.n === 0 && !r.afterDelete.banner && !r.stored, JSON.stringify({ del: r.del, after: r.afterDelete, stored: r.stored }));
+});
+
+await check('응답 도구: 저장하지 않은 요청은 예제보다 요청 저장을 먼저 묻고(취소하면 아무것도 안 생김) · 바이너리 응답은 예제로 저장하지 않음', async () => {
+  const r = await ev(page, async (base) => {
+    const app = window.csApp;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const tab = app.newRequestTab({ url: base + '/rt/items' }, '응답 도구 저장 안 함');
+    await sleep(200);
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    const rv = app.views.get(tab.id).response;
+    if (!rv.saveAsExample) return { missing: true };
+    const before = JSON.stringify(app.store.state.collections);
+    const p = rv.saveAsExample();
+    await sleep(250);
+    const m = document.querySelector('.modal');
+    const out = { title: m ? (m.querySelector('.modal-title') || {}).textContent : '' };
+    if (m) [...m.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소').click();
+    await p;
+    await sleep(100);
+    out.same = JSON.stringify(app.store.state.collections) === before;
+    out.itemId = tab.itemId || null;
+    out.modal = !!document.querySelector('.modal');
+    tab.draft.url = base + '/rt/png';
+    await app.send(tab, { engine: 'browser' });
+    await sleep(200);
+    await rv.saveAsExample();
+    await sleep(150);
+    out.binModal = !!document.querySelector('.modal');
+    out.binToast = /바이너리/.test(document.body.innerText);
+    return out;
+  }, BASE);
+  assert(!r.missing, 'saveAsExample 이 없음');
+  assert(/먼저 저장/.test(r.title), '확인창 제목: ' + r.title);
+  assert(r.same && !r.itemId && !r.modal, JSON.stringify(r));
+  assert(!r.binModal && r.binToast, '바이너리: ' + JSON.stringify(r));
 });
 
 await check('앱 탭을 하나 더 열면 먼저 열린 탭은 저장을 멈추고 안내를 띄움', async () => {

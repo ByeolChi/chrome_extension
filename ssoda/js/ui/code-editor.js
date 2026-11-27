@@ -123,8 +123,8 @@ export class CodeEditor {
   }
 }
 
-// 읽기 전용 코드 뷰 (응답 본문, 코드 스니펫)
-export function codeView(text, language, { wrap = false, lineNumbers = true, maxHighlight = 1000000 } = {}) {
+// 읽기 전용 코드 뷰 (응답 본문, 코드 스니펫). firstLine: 첫 줄 번호 (큰 응답을 구간으로 보여 줄 때)
+export function codeView(text, language, { wrap = false, lineNumbers = true, maxHighlight = 1000000, firstLine = 1 } = {}) {
   const t = String(text ?? '');
   const html = t.length > maxHighlight ? escapeHtml(t) : highlight(t, language, maxHighlight);
   const pre = h('pre.cv-code' + (wrap ? '.wrap' : ''));
@@ -132,7 +132,7 @@ export function codeView(text, language, { wrap = false, lineNumbers = true, max
   if (!lineNumbers || wrap) return h('div.cv' + (wrap ? '.wrap' : ''), pre);
   const lines = t.split('\n').length;
   let s = '';
-  for (let i = 1; i <= lines; i++) s += i + '\n';
+  for (let i = firstLine, last = firstLine + lines - 1; i <= last; i++) s += i + '\n';
   const gutter = h('div.cv-gutter', s);
   return h('div.cv', gutter, pre);
 }

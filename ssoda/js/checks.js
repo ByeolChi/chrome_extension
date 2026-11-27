@@ -459,6 +459,11 @@ export function jsonPath(root, path) {
   return evalSegs(root, parsePath(path));
 }
 
+/** 값 하나만 가리키는 경로인가 ($ · $.a.b · $['a b'][0] · $.items.length). * · .. · 조건 · 목록 · 자르기가 있으면 여럿일 수 있다. 틀린 경로면 예외 */
+export function isDefinitePath(path) {
+  return parsePath(path).every((s) => !s.deep && s.kind === 'union' && s.items.length === 1);
+}
+
 /* ------------------------------------------------------------------ */
 /* 비교                                                                 */
 /* ------------------------------------------------------------------ */

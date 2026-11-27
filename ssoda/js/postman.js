@@ -1,6 +1,7 @@
 // Postman Collection v2.0 / v2.1, Postman Environment 가져오기·내보내기
 import { newCollection, newFolder, newRequestItem, newRequest, newAuth, newEnvironment, parseQueryToParams, syncPathVars } from './model.js';
-import { kvRow, uuidv4 } from './util.js';
+import { kvRow, uuidv4, guessLanguage, STATUS_TEXT } from './util.js';
+import { normalizeExamples } from './resp-tools.js';
 import { looksLikeCurl, parseCurl } from './curl-parser.js';
 import { parseJson } from './checks.js';
 import { parseYaml } from './yaml.js';
@@ -82,6 +83,11 @@ function convertItems(items, warnings) {
       const ri = newRequestItem(it.name || '요청', convertRequestIn(it.request, warnings));
       if (it.event && it.event.some((e) => e.script && [].concat(e.script.exec || []).join('').trim()))
         warnings.push('Pre-request / Test 스크립트는 지원하지 않아 제외되었습니다.');
+      // 저장된 응답 예제 (Postman 의 Examples)
+      if (Array.isArray(it.response) && it.response.length) {
+        const examples = normalizeExamples(it.response.map(exampleIn));
+        if (examples.length) ri.examples = examples;
+      }
       out.push(ri);
     }
   }
@@ -164,6 +170,26 @@ function convertRequestIn(pr, warnings) {
     }
   }
   return req;
+}
+
+// Postman 예제(response[] 한 줄) → Ssoda 예제 (normalizeExamples 가 마저 정리)
+function exampleIn(r) {
+  if (!r || typeof r !== 'object') return null;
+  const list = Array.isArray(r.header) ? r.header : typeof r.header === 'string' ? parseHeaderString(r.header) : [];
+  const headers = list.filter((x) => x && x.key != null).map((x) => ({ name: String(x.key), value: x.value == null ? '' : String(x.value) }));
+  const ct = (headers.find((x) => x.name.toLowerCase() === 'content-type') || {}).value || '';
+  const o = r.originalRequest;
+  const req = o && typeof o === 'object' ? { method: o.method || 'GET', url: typeof o.url === 'string' ? o.url : (o.url && o.url.raw) || '' } : null;
+  return {
+    name: r.name,
+    status: Number(r.code) || 0,
+    statusText: typeof r.status === 'string' ? r.status : '',
+    headers,
+    contentType: ct,
+    body: typeof r.body === 'string' ? r.body : '',
+    time: Number(r.responseTime) || 0,
+    ...(req ? { request: req } : {}),
+  };
 }
 
 function guessRawLang(raw, headers) {
@@ -294,8 +320,22 @@ function exportItems(items) {
       if (it.auth && it.auth.type !== 'inherit') f.auth = convertAuthOut(it.auth);
       return f;
     }
-    return { name: it.name, request: exportRequest(it.request), response: [] };
+    return { name: it.name, request: exportRequest(it.request), response: exportExamples(it) };
   });
+}
+
+// 요청에 저장한 응답 예제 → Postman 의 Examples (response[])
+function exportExamples(it) {
+  return (it.examples || []).map((ex) => ({
+    name: ex.name,
+    originalRequest: exportRequest(it.request),
+    status: ex.statusText || STATUS_TEXT[ex.status] || '',
+    code: ex.status,
+    _postman_previewlanguage: guessLanguage(ex.contentType, ex.body),
+    header: (ex.headers || []).map((x) => ({ key: x.name, value: x.value })),
+    cookie: [],
+    body: ex.body || '',
+  }));
 }
 
 export function exportRequest(r) {
