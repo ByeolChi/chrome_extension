@@ -39,7 +39,7 @@ function syncExt() {
   fs.rmSync(EXT, { recursive: true, force: true });
   fs.mkdirSync(path.join(EXT, 'icons'), { recursive: true });
   fs.mkdirSync(path.join(EXT, 'shared'), { recursive: true });
-  for (const f of ['picker.js', 'background.js', 'settings.js', 'options.html', 'options.js', 'shared/redact-core.js']) {
+  for (const f of ['picker.js', 'background.js', 'settings.js', 'recipes.js', 'options.html', 'options.js', 'shared/redact-core.js']) {
     if (fs.existsSync(path.join(SRC, f))) fs.copyFileSync(path.join(SRC, f), path.join(EXT, f)); // 예전 버전(CLEANSHOT_EXT)에는 없는 파일도 있다
   }
   for (const f of fs.readdirSync(path.join(SRC, 'icons'))) fs.copyFileSync(path.join(SRC, 'icons', f), path.join(EXT, 'icons', f));
@@ -111,6 +111,15 @@ const uiRect = (sel) => iso(`(() => { const e = ${UI}.querySelector(${JSON.strin
 const masks = () => iso(`window.__cleanShot.state.masks.map((m) => m.view ? { x: m.view.x, y: m.view.y, w: m.view.w, h: m.view.h } : null)`);
 const maskBoxes = () => iso(`[...${UI}.querySelectorAll('.mask')].map((e) => { const r = e.getBoundingClientRect(); return getComputedStyle(e).display === 'none' ? null : { x: r.left, y: r.top, w: r.width, h: r.height }; })`);
 const toastText = () => iso(`${UI}.querySelector('.toast').textContent`);
+/* 알림 글이 re 에 맞을 때까지 (최대 ms) 기다린다. 마지막으로 본 글을 돌려준다 */
+async function waitToastText(re, ms = 5000) {
+  let t = '';
+  for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(25)) {
+    t = await toastText().catch(() => '');
+    if (re.test(t)) break;
+  }
+  return t;
+}
 const cand = () => iso(`(() => { const c = window.__cleanShot.state.candidate; return c ? { id: c.id, tag: c.localName, inFrame: c.ownerDocument !== document } : null; })()`);
 
 const rectMain = (sel) => main(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); const r = e.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; })()`);
@@ -166,6 +175,7 @@ const KEYS = {
   Delete: { code: 'Delete', vk: 46 }, Backspace: { code: 'Backspace', vk: 8 },
   z: { code: 'KeyZ', vk: 90, text: 'z' }, a: { code: 'KeyA', vk: 65, text: 'a' }, b: { code: 'KeyB', vk: 66, text: 'b' },
   c: { code: 'KeyC', vk: 67, text: 'c' }, 'ㅊ': { code: 'KeyC', vk: 67, text: 'ㅊ' },
+  q: { code: 'KeyQ', vk: 81, text: 'q' }, 'ㅂ': { code: 'KeyQ', vk: 81, text: 'ㅂ' },
   t: { code: 'KeyT', vk: 84, text: 't' }, 'ㅅ': { code: 'KeyT', vk: 84, text: 'ㅅ' },
   ' ': { code: 'Space', vk: 32, text: ' ' }
 };
@@ -201,7 +211,7 @@ async function freshPage(url = `http://127.0.0.1:${WEB}/main.html`) {
   mainFrameId = tree.frameTree.frame.id;
 }
 
-const OUT_KEYS = ['outFormat', 'outScale', 'nameTemplate', 'askWhere', 'stamp', 'hideScrollbars', 'keepAfter'];
+const OUT_KEYS = ['outFormat', 'outScale', 'nameTemplate', 'askWhere', 'stamp', 'hideScrollbars', 'keepAfter', 'autoClean'];
 
 /* 피커를 닫는다. 정리한 것이 있으면 Esc 를 두 번 눌러야 닫히므로(실수 방지) 닫힐 때까지 몇 번 누른다 */
 async function closePicker() {
@@ -213,9 +223,11 @@ async function closePicker() {
 }
 /* 스크롤 막대를 뺀 문서 화면 크기 (CSS px) — 보이는 화면 캡처는 기본으로 이만큼만 저장한다 */
 const clientSize = () => main(`({ w: document.documentElement.clientWidth, h: document.documentElement.clientHeight })`);
-async function activate() {
-  // 앞 시험이 저장한 설정(빈자리 제거·툴바 위치·저장 설정)이 다음 시험에 새지 않게 되돌린다
-  const r = await sw(`(async () => { await chrome.storage.sync.set({ forceRemove: false, barTop: false }); await chrome.storage.sync.remove(${JSON.stringify(OUT_KEYS)}); const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await togglePicker(tab); return tab.id; })()`);
+async function activate({ keep = false } = {}) {
+  // 앞 시험이 저장한 설정(빈자리 제거·툴바 위치·저장 설정·자동 정리)과 사이트별 레시피가 다음 시험에 새지 않게 되돌린다.
+  // keep 이면 저장 설정·자동 정리·레시피는 그대로 둔다 (레시피를 다시 켜서 적용하는 시험)
+  const reset = keep ? '' : `await chrome.storage.sync.remove(${JSON.stringify(OUT_KEYS)}); await chrome.storage.local.remove('recipes');`;
+  const r = await sw(`(async () => { await chrome.storage.sync.set({ forceRemove: false, barTop: false }); ${reset} const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:${WEB}/*' }); await togglePicker(tab); return tab.id; })()`);
   for (let i = 0; i < 50 && !isoId(); i++) await sleep(50);
   if (!isoId()) throw new Error('isolated world not found');
   for (let i = 0; i < 50; i++) {
@@ -395,6 +407,16 @@ const fullExpect = (L, H = L.H) => (y) => {
 };
 const BLACK = [0, 0, 0];
 const WHITE = [255, 255, 255];
+
+/* ---------------------------------------------------------------- 한 번에 정리·사이트별 레시피 도우미 */
+const CLEAN_URL = `http://127.0.0.1:${WEB}/clean.html`;
+const CLEAN_HIDE = ['appBanner', 'ckBar', 'qcBox', 'chatBtn', 'layerPop', 'dim'];   // 정리로 숨길 것 (site/clean.html)
+const CLEAN_KEEP = ['top', 'side', 'cookieDoc', 'topBtn', 'policy'];              // 비슷하지만 숨기면 안 되는 것
+const RECIPE_HOST = `127.0.0.1:${WEB}`;
+/* id 로 찾은 요소가 보이는지와 인라인 style 속성 (되돌린 뒤 원래대로인지 본다) */
+const shownOf = (ids) => main(`(${JSON.stringify(ids)}).map((id) => { const e = document.getElementById(id); const cs = getComputedStyle(e);
+  return { id, shown: cs.display !== 'none' && cs.visibility !== 'hidden', style: e.getAttribute('style') }; })`);
+const storedRecipes = () => sw(`chrome.storage.local.get('recipes').then((v) => v.recipes || null)`);
 
 /* ---------------------------------------------------------------- 시작 */
 async function setup() {
@@ -614,13 +636,30 @@ const cases = {
       console.log('   화면 저장: ' + out);
     }
     await sleep(900);
-    // 설정 화면 (밝게·어둡게)
+    // 한 번에 정리: 정리한 뒤의 화면과 툴바 (정리·레시피 저장 단추, 알림)
+    await freshPage(CLEAN_URL);
+    await activate();
+    await key('q');
+    await waitToastText(/정리했습니다/);
+    await move(10, 300);
+    await sleep(100);
+    await shot('clean');
+    await closePicker();
+    // 설정 화면 (밝게·어둡게) — 사이트별 레시피 목록이 보이게 예시 두 개를 넣고 하나는 펼친다
+    await sw(`chrome.storage.local.set({ recipes: {
+      'erp.example.com': { on: true, cleanup: true, at: 2, items: [
+        { kind: 'hide', path: [], sel: '#notice-banner', label: 'div#notice-banner', remove: false },
+        { kind: 'mask', path: ['#content-frame'], sel: 'td.acct-no', label: 'td.acct-no' },
+        { kind: 'text', path: [], sel: 'span.user-name', label: 'span.user-name', text: '홍길동' } ] },
+      'shop.example.com': { on: false, cleanup: false, at: 1, items: [{ kind: 'hide', path: [], sel: 'div.promo-bar', label: 'div.promo-bar', remove: true }] } } }).then(() => true)`);
     const extId = await sw('chrome.runtime.id');
     const { targetId } = await cdp.send('Target.createTarget', { url: `chrome-extension://${extId}/options.html` });
     const optS = (await cdp.send('Target.attachToTarget', { targetId, flatten: true })).sessionId;
     try {
       await cdp.send('Page.enable', {}, optS);
       await sleep(800);
+      await cdp.send('Runtime.evaluate', { expression: `document.querySelector('.recipe-site details') && (document.querySelector('.recipe-site details').open = true)` }, optS);
+      await sleep(100);
       for (const scheme of ['light', 'dark']) {
         await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] }, optS);
         await sleep(200);
@@ -632,8 +671,9 @@ const cases = {
     } finally {
       await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
       await cdp.send('Target.activateTarget', { targetId: pageTargetId }).catch(() => {});
+      await sw(`chrome.storage.local.remove('recipes').then(() => true)`);
     }
-    check('화면 저장 (기본·dialog·영역·주석·글상자 등·띠·설정 화면)', true);
+    check('화면 저장 (기본·dialog·영역·주석·글상자 등·띠·정리·설정 화면)', true);
   },
 
   /* 여러 요소에 걸친 영역은 예전처럼 문서 좌표에 붙는다 */
@@ -1718,6 +1758,294 @@ const cases = {
       cs.w < iw && !!ia && ia.width === Math.round(cs.w * DPR) && !!ib && ib.width === Math.round(iw * DPR),
       { client: cs.w, inner: iw, a: ia && ia.width, b: ib && ib.width });
     await sleep(900);
+  },
+
+  /* 한 번에 정리(Q): 내장 목록과 규칙으로 쿠키 배너·채팅 버튼·앱 설치 배너·공지 팝업(가림막째)을 한 작업으로 숨긴다.
+     머리글 메뉴·옆 메뉴·본문 문단·맨 위로 단추·정책 링크 띠처럼 비슷하지만 아닌 것은 그대로 둔다 (site/clean.html) */
+  async clean() {
+    await freshPage(CLEAN_URL);
+    await activate();
+    const bad = await iso(`Object.values(CleanShotRecipes.VENDORS).flat().filter((s) => { try { document.querySelectorAll(s); return false; } catch (_) { return true; } })`);
+    check('내장 목록의 선택자를 브라우저가 모두 읽음', Array.isArray(bad) && bad.length === 0, bad);
+
+    // 시험 페이지 확인: 정리하기 전 캡처에는 배너들이 찍혀 있다 (판정할 자리가 맞는지)
+    const cs = await clientSize();
+    const spots = { header: [cs.w - 100, 25], ck: [Math.round(cs.w / 2), cs.h - 30], chat: [cs.w - 50, cs.h - 210], pop: [610, 350], empty: [1000, 620] };
+    const read = async () => {
+      const before = new Set(listFiles());
+      await key('Enter');
+      const f = await waitNewFile(before, /\.png$/);
+      const img = f ? decodePng(fs.readFileSync(f)) : null;
+      const out = {};
+      for (const [k, [x, y]] of Object.entries(spots)) out[k] = img ? [...pixel(img, Math.round(x * DPR), Math.round(y * DPR))].slice(0, 3) : null;
+      await sleep(900); // 저장하면 닫힌다
+      return out;
+    };
+    const p0 = await read();
+    check('시험 페이지: 정리 전 캡처에는 앱 설치 배너·쿠키 배너·채팅 버튼·팝업·가림막이 찍힘',
+      !sameRgb(p0.header, [30, 30, 30]) && ['ck', 'chat', 'pop', 'empty'].every((k) => !sameRgb(p0[k], WHITE)), p0);
+
+    await activate();
+    const t0 = Date.now();
+    await key('ㅂ'); // 한글 입력 상태에서도 Q 자리 키
+    const t = await waitToastText(/정리했습니다/);
+    const ms = Date.now() - t0;
+    const hid = await shownOf(CLEAN_HIDE);
+    const kept = await shownOf(CLEAN_KEEP);
+    const hist = await iso(`window.__cleanShot.state.history.map((h) => h.kind)`);
+    check('Q: 쿠키 배너 둘(화면 아래 띠·내장 목록)·채팅 버튼·앱 설치 배너·공지 팝업과 가림막을 숨김', hid.every((x) => !x.shown), hid);
+    check('Q: 머리글 메뉴(앱 다운로드 링크)·옆 메뉴(쿠키 관리)·본문의 쿠키 문단·맨 위로 단추·정책 링크 띠는 그대로', kept.every((x) => x.shown && x.style === null), kept);
+    check('Q: 한 작업으로 쌓이고 분류별 개수를 알림', JSON.stringify(hist) === '["cleanup"]' &&
+      /쿠키 배너 2/.test(t) && /채팅 버튼 1/.test(t) && /앱 설치 배너 1/.test(t) && /공지 팝업 1/.test(t), { hist, t, ms });
+
+    await key('q');
+    const t2 = await waitToastText(/찾지 못했습니다/);
+    check('Q 를 다시 누르면 더 숨길 것이 없다고 알리고 작업이 늘지 않음',
+      /찾지 못했습니다/.test(t2) && (await iso('window.__cleanShot.state.history.length')) === 1, t2);
+
+    await key('z', CTRL);
+    const back = await shownOf(CLEAN_HIDE);
+    check('Ctrl+Z 한 번에 정리한 것이 모두 돌아옴 (인라인 스타일도 원래대로)', back.every((x) => x.shown && x.style === null), back);
+
+    // 정리하고 찍으면 배너 자리는 그 아래 화면(머리글 색·흰 바탕)이다
+    const ob = await uiRect('.clean');
+    await click(center(ob).x, center(ob).y); // 툴바 "정리" 단추도 같다
+    await waitToastText(/정리했습니다/);
+    const p1 = await read();
+    check('정리하고 찍은 PNG: 배너·채팅 버튼·팝업·가림막 자리가 그 아래 화면 색', sameRgb(p1.header, [30, 30, 30]) &&
+      ['ck', 'chat', 'pop', 'empty'].every((k) => sameRgb(p1[k], WHITE)), p1);
+    const after = await shownOf([...CLEAN_HIDE, ...CLEAN_KEEP]);
+    check('찍고 닫으면 정리한 것도 모두 되돌림', after.every((x) => x.shown && x.style === null), after);
+  },
+
+  /* 모달 dialog 로 뜬 쿠키 창: 툴바가 그 안에 붙어 있으므로 숨기지 않는다 (숨기면 툴바까지 사라진다) */
+  async cleanDialog() {
+    await freshPage(CLEAN_URL);
+    await main(`document.getElementById('ckDialog').showModal()`);
+    await activate();
+    const parent = await main(`document.getElementById('__cleanshot_host__').parentElement.id`);
+    await key('q');
+    await waitToastText(/정리했습니다/);
+    const dlg = await main(`(() => { const d = document.getElementById('ckDialog'); return { open: d.open, display: getComputedStyle(d).display }; })()`);
+    const bar = await uiRect('.bar');
+    check('모달 dialog 로 뜬 쿠키 창 안에 툴바가 있으면 그 창은 숨기지 않음 (툴바가 함께 사라지지 않게)',
+      parent === 'ckDialog' && dlg.open && dlg.display !== 'none' && !!bar && bar.w > 0 && bar.h > 0, { parent, dlg, bar });
+    check('그때도 다른 배너는 숨김', (await shownOf(['appBanner', 'chatBtn', 'ckBar'])).every((x) => !x.shown));
+    await closePicker();
+    // 레시피도 같다: 툴바를 품은 요소를 지우는 항목은 건너뛴다
+    await sw(`chrome.storage.local.set({ recipes: { '${RECIPE_HOST}': { on: true, cleanup: false, at: 1, items: [
+      { kind: 'hide', path: [], sel: '#ckDialog', label: 'dialog#ckDialog', remove: false }, { kind: 'hide', path: [], sel: '#topBtn', label: 'button#topBtn', remove: false } ] } } }).then(() => true)`);
+    await activate({ keep: true });
+    const t = await waitToastText(/레시피/);
+    const dlg2 = await main(`getComputedStyle(document.getElementById('ckDialog')).display`);
+    const bar2 = await uiRect('.bar');
+    check('레시피가 툴바를 품은 요소를 지우라고 해도 건너뛰고(못 찾음으로 셈) 나머지는 적용',
+      dlg2 !== 'none' && !!bar2 && bar2.w > 0 && !(await shownOf(['topBtn']))[0].shown && /지우기 1/.test(t) && /못 찾음 1/.test(t), { dlg2, bar2, t });
+    await closePicker();
+    await main(`document.getElementById('ckDialog').close()`);
+    await sw(`chrome.storage.local.remove('recipes').then(() => true)`);
+  },
+
+  /* 한 번에 정리의 속도: 요소 2만 7,500개짜리 표를 더한 페이지에서 Q 를 누르고 알림이 뜰 때까지 (세 번) */
+  async cleanSpeed() {
+    await freshPage(CLEAN_URL);
+    const n = await main(`(() => {
+      const t = document.createElement('table');
+      const b = t.createTBody();
+      for (let i = 0; i < 2750; i++) { const tr = b.insertRow(); for (let j = 0; j < 9; j++) tr.insertCell().textContent = 'r' + i + 'c' + j; }
+      document.getElementById('content').appendChild(t);
+      return document.getElementsByTagName('*').length;
+    })()`);
+    const runs = [];
+    for (let i = 0; i < 3; i++) {
+      await activate();
+      await sleep(1000); // 켤 때 거는 커서 규칙의 스타일 다시 계산(큰 페이지에서 수백 ms)이 끝난 뒤에 잰다
+      const t0 = Date.now();
+      await key('q');
+      const t = await waitToastText(/정리했습니다/);
+      runs.push(Date.now() - t0);
+      check(`큰 페이지(요소 ${n}개)에서도 정리 ${i + 1}`, /쿠키 배너 2 · 채팅 버튼 1 · 앱 설치 배너 1 · 공지 팝업 1/.test(t), t);
+      await closePicker();
+    }
+    console.log(`   정리(Q) 키 누름부터 알림까지 ms (요소 ${n}개, 입력·알림 확인 25ms 간격 포함): ${JSON.stringify(runs)}`);
+  },
+
+  /* 설정 "켤 때 자동으로 정리": 켜자마자 정리하고 Ctrl+Z 한 번이면 이번만 뺀다. 끄면 하지 않는다 */
+  async cleanAuto() {
+    await freshPage(CLEAN_URL);
+    await sw(`chrome.storage.local.remove('recipes').then(() => chrome.storage.sync.set({ autoClean: true })).then(() => true)`);
+    await activate({ keep: true });
+    const t = await waitToastText(/정리/);
+    const hid = await shownOf(CLEAN_HIDE);
+    const hist = await iso(`window.__cleanShot.state.history.map((h) => h.kind)`);
+    check('자동 정리 켬: 선택 모드를 켜자마자 정리하고 한 작업으로 쌓임', hid.every((x) => !x.shown) && JSON.stringify(hist) === '["auto"]' && /Ctrl\+Z/.test(t), { hid, hist, t });
+    await key('z', CTRL);
+    check('자동 정리도 Ctrl+Z 한 번이면 이번만 빼고 원래대로', (await shownOf(CLEAN_HIDE)).every((x) => x.shown && x.style === null));
+    await closePicker();
+    await sw(`chrome.storage.sync.set({ autoClean: false }).then(() => true)`);
+    await activate({ keep: true });
+    await sleep(400);
+    check('자동 정리 끔: 켤 때 정리하지 않음', (await shownOf(CLEAN_HIDE)).every((x) => x.shown) && (await iso('window.__cleanShot.state.history.length')) === 0);
+    await closePicker();
+  },
+
+  /* 사이트별 레시피: 지운 것·요소째 가린 것·고친 글(같은 출처 iframe·닫힌 shadow DOM 안 포함)을 선택자로 저장하고,
+     다음에 켜면 한 작업으로 바로 적용한다. 페이지 글자는 저장하지 않는다 */
+  async recipe() {
+    await freshPage();
+    const closedStyle0 = await main(`window.__closedRoot.getElementById('closedInner').getAttribute('style')`); // 시험 페이지가 준 인라인 스타일
+    await activate();
+    const rb = await uiRect('.recipe');
+    await click(center(rb).x, center(rb).y);
+    const t0 = await waitToastText(/저장할 것이 없습니다/);
+    check('정리한 것이 없으면 레시피를 만들지 않고 알림', /저장할 것이 없습니다/.test(t0) && (await storedRecipes()) === null, t0);
+
+    await key('1');
+    for (const r of [await rectMain('#banner'), await rectMain('#scroller .item:nth-child(5)'), await rectShadow(null, 'closedInner', true)]) {
+      await click(center(r).x, center(r).y);
+    }
+    await key('4');
+    const br = await rectMain('#bold');
+    await click(center(br).x, center(br).y);
+    await key('a', CTRL);
+    await cdp.send('Input.insertText', { text: 'planet' }, pageS);
+    await sleep(80);
+    await key('Escape');
+    await key('5');
+    for (const r of [await rectMain('#flowSecret'), await rectInner('#innerSecret')]) await click(center(r).x, center(r).y);
+    await key('7'); // 강조(주석)는 레시피에 넣지 않는다
+    const ddr = await rectMain('#dd');
+    await click(center(ddr).x, center(ddr).y);
+    await click(center(rb).x, center(rb).y);
+    const t1 = await waitToastText(/레시피에 저장했습니다/);
+    const saved = await storedRecipes();
+    const rec = saved && saved[RECIPE_HOST];
+    const items = rec ? rec.items : [];
+    const find = (kind, sel, p = []) => items.find((i) => i.kind === kind && i.sel === sel && JSON.stringify(i.path) === JSON.stringify(p));
+    check('레시피 저장: 이 사이트(127.0.0.1:8930)에 지우기 3·가리기 2·글 고침 1 — iframe·닫힌 shadow DOM 안은 경로와 함께, 주석은 넣지 않음',
+      !!rec && rec.on === true && rec.cleanup === false && items.length === 6 &&
+      !!find('hide', '#banner') && !!find('mask', '#flowSecret') && !!find('mask', '#innerSecret', ['#sameFrame']) &&
+      !!find('hide', '#closedInner', ['#closedHost']) && !!find('text', '#bold') && find('text', '#bold').text === 'planet' &&
+      items.some((i) => i.kind === 'hide' && /nth-of-type\(5\)/.test(i.sel)) && /지우기 3 · 가리기 2 · 글 고침 1/.test(t1),
+      { t1, items });
+    const json = JSON.stringify(saved);
+    check('레시피에 페이지 글자는 남지 않음 (직접 고쳐 쓴 글만)', !/flow secret|inner secret|closed shadow|item 4|world|banner<|menu/.test(json) && /planet/.test(json), json.slice(0, 400));
+
+    await closePicker();
+    await activate({ keep: true });
+    const t2 = await waitToastText(/레시피/);
+    const st = await main(`(() => {
+      const vis = (e) => getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+      const items = document.querySelectorAll('#scroller .item');
+      return { banner: vis(document.getElementById('banner')), item4: vis(items[4]), item3: vis(items[3]), closed: vis(window.__closedRoot.getElementById('closedInner')), bold: document.getElementById('bold').textContent };
+    })()`);
+    const fr = await rectMain('#flowSecret');
+    const ir = await rectInner('#innerSecret');
+    const mv = await masks();
+    const hist = await iso(`window.__cleanShot.state.history.map((h) => h.kind)`);
+    check('다시 켜면 레시피를 바로 적용: 지운 것(iframe·shadow 안 포함)·고친 글·가리기가 제자리에, 한 작업으로',
+      !st.banner && !st.item4 && st.item3 && !st.closed && st.bold === 'planet' && mv.length === 2 && mv.some((m) => near(m, fr)) && mv.some((m) => near(m, ir)) &&
+      JSON.stringify(hist) === '["auto"]' && /Ctrl\+Z/.test(t2), { st, mv, fr, ir, hist, t2 });
+    const shot = await captureAndRead();
+    const b1 = shot.img ? blackRatio(shot.img, ...Object.values(scaled(fr))) : -1;
+    const b2 = shot.img ? blackRatio(shot.img, ...Object.values(scaled(ir))) : -1;
+    check('레시피로 가린 곳이 캡처 PNG 에서 검정', b1 > 0.999 && b2 > 0.999, { b1, b2 });
+    await sleep(900);
+
+    await activate({ keep: true });
+    await waitToastText(/레시피/);
+    await key('z', CTRL);
+    const back = await main(`(() => { const b = document.getElementById('bold'); return { banner: document.getElementById('banner').getAttribute('style'),
+      sameText: b === window.__refs.bold && b.firstChild === window.__refs.worldText && b.childNodes.length === 1, text: document.getElementById('textTarget').textContent,
+      closed: window.__closedRoot.getElementById('closedInner').getAttribute('style') }; })()`);
+    check('Ctrl+Z 한 번이면 이번만 빼고 원래대로 (글자 노드 객체도 그대로)', back.banner === null && back.sameText && back.text === 'Hello world!' &&
+      back.closed === closedStyle0 && !!closedStyle0 && (await masks()).length === 0, { ...back, closedStyle0 });
+    await closePicker();
+
+    await sw(`chrome.storage.local.get('recipes').then((v) => { v.recipes['${RECIPE_HOST}'].on = false; return chrome.storage.local.set(v); }).then(() => true)`);
+    await activate({ keep: true });
+    await sleep(400);
+    check('끈 레시피는 켤 때 적용하지 않음', (await iso('window.__cleanShot.state.history.length')) === 0 && (await main(`document.getElementById('banner').getAttribute('style')`)) === null);
+    await key('1');
+    const bn = await rectMain('#banner');
+    await click(center(bn).x, center(bn).y);
+    await click(center(rb).x, center(rb).y);
+    await waitToastText(/레시피에 저장했습니다/);
+    const again = (await storedRecipes())[RECIPE_HOST];
+    check('끈 레시피에 다시 저장하면 켜지고, 이미 있는 항목은 겹치지 않음', again.on === true && again.items.length === 6, again);
+    await closePicker();
+  },
+
+  /* 정리를 쓰고 레시피를 저장하면 "정리 포함" — 다시 켜면 정리까지 바로 적용한다 */
+  async recipeClean() {
+    await freshPage(CLEAN_URL);
+    await activate();
+    await key('q');
+    await waitToastText(/정리했습니다/);
+    const rb = await uiRect('.recipe');
+    await click(center(rb).x, center(rb).y);
+    const t = await waitToastText(/레시피에 저장했습니다/);
+    const rec = ((await storedRecipes()) || {})[RECIPE_HOST];
+    check('정리를 쓰고 저장하면 레시피에 정리 포함 (정리로 숨긴 요소는 항목으로 남기지 않음)', !!rec && rec.cleanup === true && rec.items.length === 0 && /정리/.test(t), { rec, t });
+    await closePicker();
+    await activate({ keep: true });
+    const t2 = await waitToastText(/레시피/);
+    const hid = await shownOf(CLEAN_HIDE);
+    const hist = await iso(`window.__cleanShot.state.history.map((h) => h.kind)`);
+    check('정리 포함 레시피: 다시 켜면 정리까지 바로 적용 (한 작업)', hid.every((x) => !x.shown) && JSON.stringify(hist) === '["auto"]', { hid, hist, t2 });
+    await closePicker();
+  },
+
+  /* 설정 화면의 사이트별 레시피: 목록(최근 저장 순)·켬/끔·정리 포함·항목 지우기·사이트 지우기(두 번 눌러야)·자동 정리 */
+  async recipeOptions() {
+    const extId = await sw('chrome.runtime.id');
+    await sw(`chrome.storage.local.set({ recipes: {
+      'b.example.com': { on: false, cleanup: false, at: 1, items: [{ kind: 'hide', path: [], sel: '.ad', label: 'div.ad', remove: true }] },
+      'a.example.com': { on: true, cleanup: true, at: 2, items: [
+        { kind: 'hide', path: [], sel: '#notice', label: 'div#notice', remove: false },
+        { kind: 'mask', path: ['#frame'], sel: '#acct', label: 'span#acct' },
+        { kind: 'text', path: [], sel: '#user', label: 'span#user', text: '홍길동' } ] } } }).then(() => chrome.storage.sync.remove('autoClean')).then(() => true)`);
+    const { targetId } = await cdp.send('Target.createTarget', { url: `chrome-extension://${extId}/options.html` });
+    const s = (await cdp.send('Target.attachToTarget', { targetId, flatten: true })).sessionId;
+    try {
+      await cdp.send('Runtime.enable', {}, s);
+      const page = (expr) => evalIn(s, expr);
+      for (let i = 0; i < 50; i++) {
+        if (await page(`document.querySelectorAll('.recipe-site').length === 2`).catch(() => false)) break;
+        await sleep(100);
+      }
+      const view = await page(`[...document.querySelectorAll('.recipe-site')].map((e) => ({ host: e.dataset.host, on: e.querySelector('input.on').checked,
+        cleanup: e.querySelector('input.cleanup').checked, items: e.querySelectorAll('.item').length, text: e.textContent }))`);
+      check('설정 화면: 사이트별 레시피 목록(최근 저장 순), 켬·끔, 정리 포함, 항목과 요약',
+        view.length === 2 && view[0].host === 'a.example.com' && view[0].on && view[0].cleanup && view[0].items === 3 && !view[1].on &&
+        /지우기 1 · 가리기 1 · 글 고침 1 · 정리 포함/.test(view[0].text) && /홍길동/.test(view[0].text) && /#notice/.test(view[0].text), view);
+      const stored = () => sw(`chrome.storage.local.get('recipes').then((v) => v.recipes || {})`);
+      await page(`document.querySelector('.recipe-site[data-host="a.example.com"] input.on').click(); document.querySelector('.recipe-site[data-host="a.example.com"] input.cleanup').click(); true`);
+      await sleep(300);
+      let st = await stored();
+      check('설정 화면: 켬·끔과 정리 포함을 바꾸면 바로 저장', st['a.example.com'].on === false && st['a.example.com'].cleanup === false, st['a.example.com']);
+      await page(`document.querySelector('.recipe-site[data-host="a.example.com"] .item[data-index="1"] button.del').click(); true`);
+      await sleep(300);
+      st = await stored();
+      check('설정 화면: 항목 하나 지우기', st['a.example.com'].items.length === 2 && !st['a.example.com'].items.some((i) => i.sel === '#acct'), st['a.example.com'].items);
+      await page(`document.querySelector('.recipe-site[data-host="b.example.com"] button.drop').click(); true`);
+      await sleep(300);
+      const armed = await stored();
+      await page(`document.querySelector('.recipe-site[data-host="b.example.com"] button.drop').click(); true`);
+      await sleep(300);
+      st = await stored();
+      const left = await page(`document.querySelectorAll('.recipe-site').length`);
+      check('설정 화면: 사이트 레시피 지우기는 두 번 눌러야', 'b.example.com' in armed && !('b.example.com' in st) && left === 1, { armed: Object.keys(armed), st: Object.keys(st), left });
+      await page(`document.getElementById('autoClean').click(); true`);
+      await sleep(300);
+      const ac = await sw(`chrome.storage.sync.get('autoClean')`);
+      check('설정 화면: 켤 때 자동으로 정리 (기본 끔 → 켬 저장)', ac.autoClean === true, ac);
+    } finally {
+      await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
+      await cdp.send('Target.activateTarget', { targetId: pageTargetId }).catch(() => {});
+      await sw(`chrome.storage.local.remove('recipes').then(() => chrome.storage.sync.remove('autoClean')).then(() => true)`);
+      await sleep(300);
+    }
   },
 
   /* 3 저장 실패 시 대체 경로 */

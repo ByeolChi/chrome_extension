@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>cleanshot clean e2e</title>
+<style>
+  /* 한 번에 정리 시험 페이지: 숨길 것(앱 설치 배너·쿠키 배너 둘·채팅 버튼·공지 팝업과 가림막)과
+     숨기면 안 되는 것(머리글 메뉴·맨 위로 단추·정책 링크 띠·옆 메뉴·본문의 쿠키 안내 문단)을 함께 둔다.
+     색은 캡처 PNG 에서 판정하려고 정한 값이다. */
+  body { margin: 0; font: 15px/1.4 sans-serif; height: 2400px; background: rgb(255, 255, 255); }
+  #top { position: sticky; top: 0; height: 50px; background: rgb(30, 30, 30); color: #fff; z-index: 10; display: flex; gap: 18px; align-items: center; padding: 0 240px; }
+  #top a { color: #fff; }
+  #appBanner { position: fixed; top: 0; left: 0; right: 0; height: 56px; background: rgb(0, 150, 0); color: #fff; z-index: 20; display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+  #ckBar { position: fixed; left: 0; right: 0; bottom: 0; height: 90px; background: rgb(40, 40, 120); color: #fff; z-index: 30; padding: 12px 16px; box-sizing: border-box; }
+  #qcBox { margin: 40px 0 0 600px; width: 300px; height: 80px; background: rgb(120, 0, 120); color: #fff; }
+  #chatBtn { position: fixed; right: 20px; bottom: 180px; width: 60px; height: 60px; border-radius: 30px; background: rgb(255, 200, 0); border: 0; z-index: 30; }
+  #topBtn { position: fixed; right: 20px; bottom: 110px; width: 60px; height: 40px; background: rgb(0, 180, 180); color: #fff; border: 0; z-index: 30; }
+  #policy { position: fixed; right: 20px; top: 70px; width: 200px; height: 30px; background: rgb(200, 255, 200); z-index: 30; }
+  #side { position: fixed; left: 0; top: 0; bottom: 0; width: 220px; background: rgb(235, 235, 245); z-index: 5; padding-top: 70px; box-sizing: border-box; }
+  #dim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); z-index: 50; }
+  #layerPop { position: absolute; left: 400px; top: 200px; width: 420px; height: 300px; background: rgb(250, 240, 200); z-index: 60; }
+  #layerPop .pop_foot { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: rgb(60, 60, 60); color: #fff; display: flex; justify-content: space-between; align-items: center; padding: 0 12px; }
+  #content { margin-left: 240px; padding-top: 220px; }
+  #cookieDoc { width: 500px; }
+</style>
+</head>
+<body>
+  <div id="appBanner">앱에서 보기 · 더 빠르고 편하게 <button type="button">열기</button></div>
+  <header id="top"><a href="#">홈</a><a href="#">제품</a><a href="#">이벤트</a><a href="#">고객센터</a><a href="#">앱 다운로드</a></header>
+  <nav id="side"><a href="#">대시보드</a><br><span>쿠키 관리</span><br><button type="button">확인</button></nav>
+  <div id="content">
+    <p id="cookieDoc">쿠키 정책 안내: 이 문단은 본문이라 숨기면 안 됩니다. <button type="button">확인</button></p>
+    <div id="qcBox" class="qc-cmp2-container">Privacy choices</div>
+  </div>
+  <div id="ckBar"><p style="margin:0 0 8px">이 사이트는 더 나은 서비스를 위해 쿠키를 사용합니다.</p><button type="button">모두 허용</button> <button type="button">설정</button></div>
+  <button id="chatBtn" type="button" aria-label="채팅 상담"></button>
+  <button id="topBtn" type="button">맨 위로</button>
+  <div id="policy"><a href="#">개인정보처리방침</a> · <a href="#">쿠키 정책</a></div>
+  <div id="dim"></div>
+  <div id="layerPop">
+    <p style="margin:16px">공지: 12월 정기 점검 안내</p>
+    <div class="pop_foot"><label><input type="checkbox"> 오늘 하루 보지 않기</label><button type="button">닫기</button></div>
+  </div>
+  <!-- 모달로 띄우는 쿠키 창 (시험이 showModal 로 연다). 열려 있으면 툴바가 이 안에 붙는다 -->
+  <dialog id="ckDialog"><p>We use cookies to improve your experience.</p><button type="button">Accept</button></dialog>
+</body>
+</html>
