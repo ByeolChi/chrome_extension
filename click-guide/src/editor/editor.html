@@ -11,13 +11,17 @@
 <header class="topbar">
   <div class="brand"><span class="mark"></span><strong>ClickGuide</strong></div>
   <select id="session-select" title="가이드 선택"></select>
+  <button id="btn-import" class="sm ghost" title="가이드 파일(.zip)을 가져옵니다. 다른 사람이 보낸 가이드도 가져와 따라 할 수 있습니다">가져오기</button>
+  <input id="import-file" type="file" accept=".zip,application/zip" hidden>
   <span class="spacer"></span>
   <button id="btn-undo" class="sm ghost" title="되돌리기 (Ctrl+Z)" disabled>되돌리기</button>
   <button id="btn-redo" class="sm ghost" title="다시 하기 (Ctrl+Shift+Z)" disabled>다시 하기</button>
   <button id="btn-ai" class="sm" title="LLM으로 단계 문장을 다듬습니다">AI로 문장 다듬기</button>
+  <button id="btn-play" class="sm" title="이 가이드를 실제 화면 위에서 한 단계씩 따라 합니다 (가이드의 시작 화면을 새 탭으로 엽니다)">따라하기</button>
   <div class="menu">
     <button id="btn-export" class="primary sm">내보내기 ▾</button>
     <div id="export-menu" class="dropdown" hidden>
+      <button data-export="guide" title="받는 사람이 ClickGuide 편집기의 [가져오기]로 열어 따라 할 수 있습니다">가이드 파일 (.zip, 따라하기·옮기기용)</button>
       <button data-export="docx">Word 문서 (.docx)</button>
       <button data-export="pptx">PowerPoint (.pptx)</button>
       <button data-export="html">HTML 파일 (이미지 포함)</button>

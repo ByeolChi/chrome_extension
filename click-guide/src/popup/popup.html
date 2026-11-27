@@ -36,8 +36,14 @@
       </div>
     </section>
 
+    <section id="playing" hidden>
+      <p class="play-line"><span class="play-dot"></span><span id="play-text">따라하는 중</span></p>
+      <button id="play-stop" class="ghost sm">따라하기 끝내기</button>
+    </section>
+    <p id="play-error" class="error-box" hidden></p>
+
     <section id="recent">
-      <h2>최근 가이드</h2>
+      <h2>최근 가이드 <span class="faint h2-hint">▶ 지금 탭에서 따라하기</span></h2>
       <ul id="recent-list"></ul>
       <p id="recent-empty" class="faint">아직 만든 가이드가 없습니다.</p>
     </section>

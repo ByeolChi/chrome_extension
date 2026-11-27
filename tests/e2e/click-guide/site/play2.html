@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset="utf-8"><title>따라하기 시험 — 바뀐 화면</title>
+<style>
+body{margin:0;font:15px sans-serif}
+header{padding:10px 16px;background:#f3f3f3}
+.menu{display:flex;gap:16px}
+.toolbar{padding:10px 16px}
+main{padding:0 16px}
+.card{border:1px solid #ddd;border-radius:8px;padding:10px;margin:10px 0;width:440px}
+.card h3{margin:0 0 8px}
+.field{margin:6px 0}
+iframe{position:absolute;border:1px solid #888}
+.inner{left:540px;top:160px;width:300px;height:110px}
+.xo{left:540px;top:290px;width:300px;height:110px}
+</style></head><body>
+<!-- 같은 기능을 다시 만든 화면: id·클래스·구조가 다르다. data-testid·글자·name·placeholder 는 같다 -->
+<header><div class="menu"><span>홈</span><a class="nav-link" href="/play-list.html">주문 목록</a></div></header>
+<div class="toolbar"><span class="wrap"><button data-testid="new-order" class="primary">새 주문</button></span></div>
+<main>
+  <div class="card" id="ship"><h3>배송지</h3><div class="actions"><button class="btn">저장</button></div></div>
+  <div class="card" id="order"><h3>주문</h3>
+    <div class="field"><label for="c">고객 이름</label> <input id="c" name="customer" placeholder="홍길동"></div>
+    <div class="field"><select id="kind2"><option>일반</option><option>급송</option></select></div>
+    <div class="actions"><button class="btn">저장</button></div>
+  </div>
+  <x-picker></x-picker>
+</main>
+<iframe class="inner" src="/play-frame.html"></iframe>
+<script>
+document.write('<iframe class="xo" src="http://127.0.0.1:' + (Number(location.port) + 1) + '/play-xframe.html"></iframe>');
+customElements.define('x-picker', class extends HTMLElement {
+  connectedCallback() {
+    if (this.shadowRoot) return;
+    const r = this.attachShadow({ mode: 'open' });
+    r.innerHTML = '<div class="wrap"><button>날짜 고르기</button></div>';
+  }
+});
+</script>
+</body></html>

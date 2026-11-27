@@ -8,7 +8,8 @@ const els = {
   toggleBar: $('#toggle-bar'),
   list: $('#recent-list'), empty: $('#recent-empty'),
   targetTab: $('#target-tab'), startError: $('#start-error'),
-  openEditor: $('#open-editor'), openOptions: $('#open-options')
+  openEditor: $('#open-editor'), openOptions: $('#open-options'),
+  playing: $('#playing'), playText: $('#play-text'), playStop: $('#play-stop'), playError: $('#play-error')
 };
 
 function send(msg) {
@@ -51,10 +52,38 @@ async function renderRecent() {
     b.querySelector('.name').textContent = s.name || '제목 없는 가이드';
     b.querySelector('.meta').textContent = `${s.stepCount || 0}단계 · ${relTime(s.createdAt)}`;
     b.addEventListener('click', () => send({ type: 'OPEN_EDITOR', sessionId: s.id }).then(() => window.close()));
-    li.append(b);
+    // 따라하기: 지금 탭에서 (웹페이지가 아니면 가이드의 시작 화면을 새 탭으로)
+    const p = document.createElement('button');
+    p.className = 'play';
+    p.textContent = '▶';
+    p.title = '따라하기 — 지금 탭 위에서 이 가이드를 한 단계씩 안내합니다';
+    p.setAttribute('aria-label', `${s.name || '제목 없는 가이드'} 따라하기`);
+    p.disabled = !(s.stepCount > 0);
+    p.addEventListener('click', async () => {
+      els.playError.hidden = true;
+      const t = await currentTab();
+      const res = await send({ type: 'PLAY_START', sessionId: s.id, tabId: t ? t.id : null });
+      if (res && res.ok) { window.close(); return; }
+      els.playError.hidden = false;
+      els.playError.textContent = (res && res.error) || '따라하기를 시작하지 못했습니다.';
+    });
+    li.append(b, p);
     els.list.append(li);
   }
 }
+
+async function renderPlaying() {
+  const r = await send({ type: 'PLAY_STATUS' });
+  els.playing.hidden = !(r && r.playing);
+  if (r && r.playing) {
+    els.playText.textContent = `따라하는 중: ${r.name || '가이드'} (${Math.min(r.index + 1, r.total)} / ${r.total})`;
+  }
+}
+
+els.playStop.addEventListener('click', async () => {
+  await send({ type: 'PLAY_STOP' });
+  await renderPlaying();
+});
 
 // 팝업에서 직접 대상 탭을 정한다. 서비스 워커에는 '현재 창' 개념이 없어
 // 여러 창을 띄워 둔 경우 엉뚱한 탭이 잡힐 수 있기 때문이다.
@@ -172,5 +201,6 @@ chrome.runtime.onMessage.addListener((msg) => { if (msg && msg.type === 'STATE_C
   if (r) render(r.state);
   await showTargetTab();
   await refreshBarToggle();
+  await renderPlaying();
   await renderRecent();
 })();

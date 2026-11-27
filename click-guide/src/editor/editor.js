@@ -9,6 +9,7 @@ import { exportStrings } from '../common/ooxml.js';
 import { PALETTE, normalizeAnnotations, normalizeCrop } from '../common/annotate.js';
 import { mergedDescription } from '../common/steps.js';
 import { createZip } from '../lib/zip.js';
+import { buildGuideFile, readBackup, applyGuideFile } from '../common/backup.js';
 import { downloadBlob, slugify, formatDate, bytes } from '../common/util.js';
 import { StepCanvas, TOOLS, applyVisual } from './step-canvas.js';
 
@@ -792,6 +793,45 @@ $('#btn-delete').addEventListener('click', async () => {
   else { $('#doc').hidden = true; $('#empty').hidden = false; }
 });
 
+// 따라하기: 가이드의 시작 화면을 새 탭으로 열고, 그 위에서 한 단계씩 안내한다
+$('#btn-play').addEventListener('click', async () => {
+  if (!S.session) return;
+  await flushSaves();   // 방금 고친 제목·설명으로 안내하도록
+  let r = null;
+  try { r = await chrome.runtime.sendMessage({ type: 'PLAY_START', sessionId: S.session.id, newTab: true }); } catch (_) { r = null; }
+  if (!r || !r.ok) toast('따라하기를 시작하지 못했습니다: ' + ((r && r.error) || '확장과 연결하지 못했습니다.'), true, 5000);
+});
+
+// 가이드 파일(.zip, 편집기의 '내보내기 → 가이드 파일' 또는 설정의 전체 백업)을 가져온다
+$('#btn-import').addEventListener('click', () => $('#import-file').click());
+$('#import-file').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const plan = await readBackup(file);
+    if (!plan.meta.sessions.length) { toast('파일에 가이드가 없습니다.', true, 4000); return; }
+    let replace = false;
+    if (plan.skipped > 0) {
+      const names = plan.meta.sessions.filter((s) => !plan.newSessions.includes(s)).map((s) => `‘${s.name || '제목 없는 가이드'}’`).join(', ');
+      replace = confirm(`${names}: 이미 있는 가이드입니다. 파일의 것으로 바꿀까요?\n취소하면 이미 있는 가이드는 그대로 두고, 새 가이드만 가져옵니다.`);
+      if (!replace && !plan.newSessions.length) { toast('이미 있는 가이드라 가져오지 않았습니다.', false, 3500); return; }
+    }
+    await flushSaves();
+    const res = await applyGuideFile(plan, { replace });
+    S.sessions = await db.listSessions();
+    const first = S.sessions.find((s) => res.ids.includes(s.id)) || null;
+    renderSessionSelect(first || S.sessions[0]);
+    if (first) await openSession(first.id);
+    toast(`가이드 ${res.sessions}개(단계 ${res.steps}개)를 가져왔습니다. [따라하기]로 실제 화면에서 따라 할 수 있습니다.`, false, 5000);
+  } catch (err) {
+    const notOurs = /백업 파일이 아닙니다|backup\.json|열 수 없습니다/.test(String(err && err.message));
+    toast('가져오기 실패: ' + (notOurs
+      ? 'ClickGuide 가이드 파일이 아닙니다. 편집기의 “내보내기 → 가이드 파일”이나 설정의 “전체 백업”으로 만든 ZIP 을 고르세요.'
+      : (err && err.message) || String(err)), true, 6000);
+  }
+});
+
 const menu = $('#export-menu');
 $('#btn-export').addEventListener('click', (e) => {
   e.stopPropagation();
@@ -916,6 +956,16 @@ function baseName() {
 async function doExport(kind) {
   if (!S.session) return;
   await flushSaves();
+
+  // 가이드 파일: 단계 레코드(누를 곳을 다시 찾는 단서 포함)와 스크린샷(편집기에서 더 가린 곳은 칠해서). 받는 사람이 가져와 따라 한다
+  if (kind === 'guide') {
+    toast('가이드 파일을 만드는 중…', false, 0);
+    const { blob, counts } = await buildGuideFile(S.session.id);
+    downloadBlob(blob, `${baseName()}.clickguide.zip`);
+    toast(`가이드 파일로 저장했습니다 (${bytes(blob.size)}, ${counts.steps}단계). 받는 사람은 편집기의 [가져오기]로 열고 [따라하기]를 누르면 됩니다. 파일에는 화면 주소와 누른 곳의 글자가 들어 있습니다.`, false, 8000);
+    return;
+  }
+
   const t = toast('이미지 준비 중… 0 / ' + S.steps.length, false, 0);
   const baked = await bakeAll((d, n) => { t.textContent = `이미지 준비 중… ${d} / ${n}`; });
   const images = new Map([...baked].map(([id, b]) => [id, b.dataUrl]));

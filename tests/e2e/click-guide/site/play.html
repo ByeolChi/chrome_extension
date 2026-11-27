@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset="utf-8"><title>따라하기 시험 — 주문</title>
+<style>
+body{margin:0;font:15px sans-serif;padding:16px}
+nav{position:absolute;left:560px;top:16px}
+section{border:1px solid #ccc;padding:10px;margin:10px 0;width:440px}
+section h3{margin:0 0 8px}
+.row{display:flex;gap:8px;align-items:center}
+iframe{position:absolute;border:1px solid #888}
+#inner{left:520px;top:120px;width:300px;height:110px}
+#xo{left:520px;top:250px;width:300px;height:110px}
+#late-wrap{min-height:40px;margin-top:10px}
+x-picker{display:block;margin-top:10px}
+</style></head><body>
+<nav><a id="to-list" href="/play-list.html">주문 목록</a></nav>
+<button data-testid="new-order" id="new-1f8a2c9d" class="btn btn-new">새 주문</button>
+<section id="sec1"><h3>배송지</h3><button class="save">저장</button></section>
+<section id="sec2"><h3>주문</h3>
+  <div class="row"><label>고객 이름 <input name="customer" placeholder="홍길동"></label>
+  <select id="kind"><option>일반</option><option>급송</option></select></div>
+  <p><button class="save">저장</button></p>
+</section>
+<x-picker></x-picker>
+<div id="late-wrap"></div>
+<iframe id="inner" name="inner" src="/play-frame.html"></iframe>
+<script>
+// 다른 출처 iframe: 이 서버 포트 + 1
+document.write('<iframe id="xo" src="http://127.0.0.1:' + (Number(location.port) + 1) + '/play-xframe.html"></iframe>');
+customElements.define('x-picker', class extends HTMLElement {
+  connectedCallback() {
+    if (this.shadowRoot) return;
+    const r = this.attachShadow({ mode: 'open' });
+    r.innerHTML = '<button style="padding:6px 12px">날짜 고르기</button>';
+  }
+});
+// 늦게 그려지는 화면 (1.5초 뒤)
+setTimeout(() => { document.getElementById('late-wrap').innerHTML = '<button id="late">늦게 나오는 버튼</button>'; }, 1500);
+</script>
+</body></html>
