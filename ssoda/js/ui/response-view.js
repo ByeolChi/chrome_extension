@@ -1,12 +1,16 @@
 // 응답 패널
-import { h, clear, formatBytes, formatMs, statusClass, guessLanguage, isTextContentType, copyText, download, escapeHtml, STATUS_TEXT } from '../util.js';
-import { codeView } from './code-editor.js';
+// 응답 도구: Body 의 JSONPath 필터 칸, 찾기 막대(Ctrl+F), 비교 탭(이전 응답·저장한 예제와), 응답 예제(저장·보기·이름 바꾸기·지우기)
+import { h, clear, formatBytes, formatMs, statusClass, guessLanguage, isTextContentType, copyText, download, escapeHtml, debounce, modKey, STATUS_TEXT } from '../util.js';
 import { icon } from './icons.js';
-import { openMenu, popover, toast } from './overlay.js';
+import { openMenu, popover, toast, confirmDialog, promptDialog } from './overlay.js';
 import { parseSetCookie } from '../cookiejar.js';
 import { formatJson } from '../json-format.js';
 import { isEventStream, parseSse } from '../sse.js';
-import { describeAssert } from '../checks.js';
+import { describeAssert, parseJson } from '../checks.js';
+import { compareResults } from '../compare.js';
+import { filterJson, exampleProblem, exampleAsResult, maskResult, looksTextual } from '../resp-tools.js';
+import { diffListView, diffSideView, flashPath, editIgnoreDialog, statusLine, ignoreLines } from './diff-view.js';
+import { BodyCode } from './body-code.js';
 import { app } from '../app.js';
 import { vault, redactSecrets, MASK } from '../secrets.js';
 
@@ -24,15 +28,29 @@ const STREAM_END = {
 };
 
 export class ResponseView {
-  constructor() {
+  /** tab: 이 응답의 요청 탭 (예제·비교 설정·이전 응답을 찾는 데 씀). 없으면 응답 도구 중 필터·찾기만 */
+  constructor(tab = null) {
+    this.tab = tab;
     this.sub = 'body';
     this.mode = 'pretty'; // pretty | raw | preview (SSE 응답은 Events | Raw)
     this.format = null; // null = auto
     this.el = h('div.resp');
-    this.result = null;
+    this.result = null; // 지금 보여 주는 결과 (받은 응답 또는 예제)
+    this.liveResult = null; // 받은 응답 (예제를 보는 동안에도 그대로)
+    this.exampleView = null; // 보고 있는 예제
     this.loading = false;
     this.live = null; // 받는 중인 SSE 스트림 (http.js onStream)
     this.blobUrl = null;
+    this.filter = ''; // JSONPath 필터 (다시 보내도 그대로)
+    this.findOpen = false;
+    this.findQuery = '';
+    this.findCase = false;
+    this.findRe = false;
+    this.diffMode = 'list'; // 비교 탭: list | side
+    this.code = null; // 본문 글 보기 (BodyCode)
+    this.el.addEventListener('keydown', (e) => this.onKey(e));
+    // 다른 탭을 보다 돌아오면 이 화면의 찾은 곳을 다시 칠한다 (칠한 곳 등록부는 문서에 하나)
+    this.el.addEventListener('pointerenter', () => this.code && this.code.repaint());
     this.render();
   }
 
@@ -40,6 +58,7 @@ export class ResponseView {
     if (this.blobUrl) URL.revokeObjectURL(this.blobUrl);
     clearTimeout(this._liveTimer);
     clearInterval(this._liveTick);
+    if (this.code) this.code.destroy();
   }
 
   setLoading(on, onCancel, engine) {
@@ -74,7 +93,14 @@ export class ResponseView {
     this.render();
   }
 
+  /** 받은 응답 (app.send) */
   show(result) {
+    this.liveResult = result;
+    this.exampleView = null;
+    this.display(result);
+  }
+
+  display(result) {
     this.result = result;
     this.loading = false;
     this.live = null;
@@ -85,12 +111,27 @@ export class ResponseView {
     this.format = null;
     this._decoded = null;
     this._parsedStream = null;
+    this._json = undefined;
+    this._filter = null;
     if (this.blobUrl) {
       URL.revokeObjectURL(this.blobUrl);
       this.blobUrl = null;
     }
     if (result && !result.ok) this.sub = this.sub === 'timeline' ? 'timeline' : 'body';
     this.render();
+  }
+
+  /** 저장한 예제를 응답 자리에 보여 준다 (받은 응답은 그대로 두고, 배너의 단추로 돌아감) */
+  showExample(ex) {
+    if (!ex) return;
+    this.exampleView = ex;
+    if (!['body', 'headers', 'cookies'].includes(this.sub)) this.sub = 'body';
+    this.display(exampleAsResult(ex));
+  }
+
+  backToResponse() {
+    this.exampleView = null;
+    this.display(this.liveResult);
   }
 
   decoded() {
@@ -124,6 +165,10 @@ export class ResponseView {
   }
 
   render() {
+    if (this.code) this.code.destroy();
+    this.code = null;
+    this.bodyWrap = null;
+    this.findBarEl = null;
     clear(this.el);
     if (this.loading && this.live) {
       this.renderLive();
@@ -146,15 +191,22 @@ export class ResponseView {
       this.el.appendChild(
         h('div.resp-head', h('div.resp-title', 'Response')),
       );
+      // 이 요청에 저장한 예제가 있으면 보내기 전에도 열어 볼 수 있다
+      const exs = this.examples();
       this.el.appendChild(
         h('div.resp-empty',
           emptyIllustration(),
           h('div.resp-empty-title', 'URL을 입력하고 Send를 눌러 응답을 확인하세요'),
-          h('div.resp-empty-sub', 'cURL 명령을 URL 입력창에 붙여넣으면 자동으로 변환됩니다'))
+          h('div.resp-empty-sub', 'cURL 명령을 URL 입력창에 붙여넣으면 자동으로 변환됩니다'),
+          exs.length ? h('div.ex-chips', h('span.ex-chips-label', '저장한 예제'),
+            exs.map((ex) => h('button.ex-chip', { title: '예제 보기', onclick: () => this.showExample(ex) }, icon('file', 12), ex.name, h('span.ex-chip-st', String(ex.status || ''))))) : null)
       );
       return;
     }
+    if (this.exampleView) this.el.appendChild(this.exampleBanner());
     if (this.sub === 'tests' && !r.checks) this.sub = 'body';
+    if (this.sub === 'diff' && !this.canDiff()) this.sub = 'body';
+    if (this.sub === 'timeline' && r.engine === 'example') this.sub = 'body';
     this.el.appendChild(this.renderBar());
     const body = h('div.resp-body');
     this.el.appendChild(body);
@@ -166,7 +218,10 @@ export class ResponseView {
     else if (this.sub === 'headers') body.appendChild(this.renderHeaders());
     else if (this.sub === 'cookies') body.appendChild(this.renderCookies());
     else if (this.sub === 'tests') body.appendChild(this.renderChecks());
+    else if (this.sub === 'diff') body.appendChild(this.renderDiff());
     else if (this.sub === 'timeline') body.appendChild(this.renderTimeline());
+    // 찾기 막대가 열려 있으면 새로 그린 본문에서 다시 찾는다 (칠하기·굴리기는 화면에 붙은 뒤라야 됨)
+    if (this.code && this.findOpen && this.findQuery) this.runFind(true);
   }
 
   /* ---------------- Tests (응답값 꺼내기·확인 결과) ---------------- */
@@ -212,9 +267,14 @@ export class ResponseView {
     // Tests: 확인 결과 (통과 수/전체, 하나라도 실패하면 빨강)
     const ck = r.checks;
     if (ck) tabs.push(['tests', 'Tests', ck.asserts.length ? `${ck.passed}/${ck.asserts.length}` : 0, ck.skipped ? '' : ck.failed || ck.captures.some((x) => !x.ok) ? '.ck-bad' : '.ck-good']);
-    tabs.push(['timeline', r.engine === 'curl' ? 'Terminal' : 'Timeline']);
+    // 비교: 이 탭의 이전 응답이나 저장한 예제가 있을 때. 다른 곳 수는 본문이 작을 때만 미리 센다
+    if (this.canDiff()) {
+      const n = this.diffCount();
+      tabs.push(['diff', '비교', n || 0, n == null ? '' : n ? '.rd-bad' : '.ck-good']);
+    }
+    if (r.engine !== 'example') tabs.push(['timeline', r.engine === 'curl' ? 'Terminal' : 'Timeline']);
     const tabEls = tabs.map(([id, label, count, cls = '']) =>
-      h('button.subtab' + (this.sub === id ? '.active' : ''), { onclick: () => { this.sub = id; this.render(); } },
+      h('button.subtab' + (this.sub === id ? '.active' : ''), { dataset: { sub: id }, onclick: () => { this.sub = id; this.render(); } },
         label, count ? h('span.count' + cls, `(${count})`) : cls ? h('span.ck-dot' + cls) : null)
     );
     const meta = h('div.resp-meta');
@@ -230,12 +290,14 @@ export class ResponseView {
       if (r.engine === 'curl') meta.appendChild(h('span.meta-tag.curl-tag', { title: 'PC의 curl 로 실행됨' + (r.terminal && r.terminal.curlPath ? ': ' + r.terminal.curlPath : '') }, 'cURL'));
       const ssh = r.terminal && r.terminal.ssh;
       if (ssh) meta.appendChild(h('span.meta-tag.ssh-tag', { title: `SSH 터널 ${ssh.user}@${ssh.host}:${ssh.port} 를 거쳐 실행됨` }, icon('lock', 11), 'SSH ' + (ssh.label || ssh.host)));
-      const save = h('button.btn.btn-sm.btn-ghost', { title: '응답 저장' }, icon('download', 14), '저장', icon('chevronDown', 12));
+      const save = h('button.btn.btn-sm.btn-ghost.resp-save', { title: '응답 저장' }, icon('download', 14), '저장', icon('chevronDown', 12));
       save.addEventListener('click', () =>
         openMenu(save, [
           { label: '파일로 저장', icon: 'download', onClick: () => this.saveToFile() },
           { label: '본문 복사', icon: 'copy', onClick: () => this.copyBody() },
           { label: '응답 헤더 복사', icon: 'copy', onClick: () => copyText(r.headers.map((x) => `${x.name}: ${x.value}`).join('\n')).then(() => toast('복사했습니다.', 'success')) },
+          this.exampleView || !this.tab ? null : { divider: true },
+          this.exampleView || !this.tab ? null : { label: '예제로 저장…', icon: 'save', hint: '이 요청에', onClick: () => this.saveAsExample() },
         ], { alignRight: true })
       );
       meta.appendChild(save);
@@ -244,6 +306,8 @@ export class ResponseView {
       if (r.engine === 'curl') meta.appendChild(h('span.meta-tag.curl-tag', 'cURL'));
       if (r.timing && r.timing.total != null) meta.appendChild(h('span.meta-item', h('span.meta-k', 'Time:'), h('span.meta-v.plain', formatMs(r.timing.total))));
     }
+    const exs = this.examples();
+    if (exs.length) meta.appendChild(this.examplesButton(exs));
     return h('div.resp-head', h('div.subtabs', tabEls), meta);
   }
 
@@ -383,11 +447,19 @@ export class ResponseView {
         STREAM_END[stream.end] ? ` · ${STREAM_END[stream.end]}` : '',
         stream.comments ? ` · 주석 ${stream.comments}줄` : ''),
       h('div.flex1'),
+      this.findButton(),
       h('button.icon-btn', { title: '본문 복사', onclick: () => this.copyBody() }, icon('copy', 16)),
       h('button.icon-btn', { title: '파일로 저장', onclick: () => this.saveToFile() }, icon('download', 16)));
-    const content = h('div.body-content' + (mode === 'events' ? '.sse-box' : ''));
+    const content = h('div.body-content' + (mode === 'events' ? '.sse-box' : ''), { tabindex: '-1' });
     if (mode === 'raw') {
-      content.appendChild(codeView(d.text, 'text', { wrap: true, lineNumbers: false }));
+      // 받은 글 그대로 (찾기는 Raw 에서)
+      this.bodyBox = content;
+      this.code = new BodyCode(content, { onState: (s) => this.updateFindCount(s) });
+      this.code.show(d.text, 'text', { wrap: true, lineNumbers: false });
+      const wrapEl = h('div.body-wrap', toolbar, this.findOpen ? (this.findBarEl = this.findBar()) : null, content);
+      this.bodyWrap = wrapEl;
+      this.bodyAnchor = content;
+      return wrapEl;
     } else if (!stream.events.length) {
       content.appendChild(h('div.body-empty', r.body.byteLength ? '이벤트로 끝난 내용이 없습니다. Raw 에서 받은 글을 볼 수 있습니다.' : '받은 내용이 없습니다.'));
     } else {
@@ -403,12 +475,11 @@ export class ResponseView {
   }
 
   renderBody() {
-    const r = this.result;
     const stream = this.streamOf();
     if (stream) return this.renderStreamBody(stream);
     const d = this.decoded();
     const wrap = app.settings.wrapResponse;
-    const lang = this.format || (d.lang === 'binary' ? 'text' : d.lang);
+    const lang = this.lang();
     const toolbar = h('div.body-toolbar');
     const modes = [['pretty', 'Pretty'], ['raw', 'Raw'], ['preview', 'Preview']];
     const seg = h('div.seg', modes.map(([id, label]) =>
@@ -425,7 +496,10 @@ export class ResponseView {
       );
       toolbar.appendChild(fmtBtn);
     }
+    // JSONPath 필터 (JSON 을 Pretty 로 볼 때). 치는 동안에는 본문만 다시 그려 칸의 포커스를 지킨다
+    if (this.filterable()) toolbar.appendChild(this.filterInput());
     toolbar.appendChild(h('div.flex1'));
+    if (d.isText && this.mode !== 'preview' && this.result.body.byteLength) toolbar.appendChild(this.findButton());
     if (d.isText) {
       toolbar.appendChild(h('button.icon-btn' + (wrap ? '.on' : ''), {
         title: '줄 바꿈',
@@ -438,27 +512,458 @@ export class ResponseView {
     }
     toolbar.appendChild(h('button.icon-btn', { title: '본문 복사', onclick: () => this.copyBody() }, icon('copy', 16)));
     toolbar.appendChild(h('button.icon-btn', { title: '파일로 저장', onclick: () => this.saveToFile() }, icon('download', 16)));
-    const content = h('div.body-content');
+    this.bodyBox = h('div.body-content', { tabindex: '-1' });
+    this.filterSlot = h('div.filter-slot');
+    this.bodyWrap = h('div.body-wrap', toolbar, this.findOpen ? (this.findBarEl = this.findBar()) : null, this.filterSlot, this.bodyBox);
+    this.bodyAnchor = this.filterSlot;
+    this.fillBody();
+    return this.bodyWrap;
+  }
+
+  // 본문 칸과 필터 줄만 다시 그린다 (도구 막대·찾기 막대는 그대로)
+  fillBody() {
+    const r = this.result;
+    const d = this.decoded();
+    const content = this.bodyBox;
+    if (this.code) this.code.destroy();
+    this.code = null;
+    clear(content);
+    this.fillFilterBar();
+    const f = this.filterResult();
     if (r.body.byteLength === 0) {
       content.appendChild(h('div.body-empty', r.opaqueRedirect ? '리다이렉트 응답입니다 (리다이렉트 자동 따라가기 꺼짐). Headers 탭에서 Location을 확인하세요.' : '응답 본문이 없습니다.'));
     } else if (this.mode === 'preview' || ((d.isImage || d.isPdf) && this.mode === 'pretty')) {
       content.appendChild(this.renderPreview(d));
     } else if (!d.isText) {
       content.appendChild(this.renderBinary(d));
+    } else if (f && f.ok && !f.count) {
+      content.appendChild(h('div.body-empty', `${this.filter.trim()} 에 맞는 값이 없습니다.`));
     } else {
-      const text = this.mode === 'raw' ? d.text : lang === d.lang ? d.pretty : reformat(d.text, lang);
-      const maxHl = app.settings.maxHighlightBytes || 1000000;
-      const MAX_RENDER = 5 * 1024 * 1024;
-      let shown = text;
-      let truncated = false;
-      if (shown.length > MAX_RENDER) {
-        shown = shown.slice(0, MAX_RENDER);
-        truncated = true;
-      }
-      content.appendChild(codeView(shown, this.mode === 'raw' ? 'text' : lang, { wrap: this.mode === 'raw' ? true : wrap, maxHighlight: maxHl, lineNumbers: this.mode !== 'raw' }));
-      if (truncated) content.appendChild(h('div.body-note', `응답이 커서 처음 ${formatBytes(MAX_RENDER)}만 표시합니다. 전체는 파일로 저장하세요.`));
+      const raw = this.mode === 'raw' && !(f && f.ok);
+      this.code = new BodyCode(content, { onState: (s) => this.updateFindCount(s) });
+      this.code.show(this.displayText(), raw ? 'text' : f && f.ok ? 'json' : this.lang(), {
+        wrap: raw ? true : app.settings.wrapResponse,
+        lineNumbers: !raw,
+        maxHighlight: app.settings.maxHighlightBytes || 1000000,
+      });
+      // 필터를 바꿔 본문만 다시 그린 때 (처음 그릴 때는 render 가 화면에 붙인 뒤에 찾는다)
+      if (this.findOpen && this.findQuery && content.isConnected) this.runFind(true);
     }
-    return h('div.body-wrap', toolbar, content);
+  }
+
+  lang() {
+    const d = this.decoded();
+    return this.format || (d.lang === 'binary' ? 'text' : d.lang);
+  }
+
+  // 보이는 글: 걸러 낸 결과, Raw 는 받은 글 그대로, 아니면 들여 쓴 글
+  displayText() {
+    const d = this.decoded();
+    const f = this.filterResult();
+    if (f && f.ok && f.count) return f.text;
+    const lang = this.lang();
+    return this.mode === 'raw' ? d.text : lang === d.lang ? d.pretty : reformat(d.text, lang);
+  }
+
+  /* ---------------- JSONPath 필터 ---------------- */
+  filterable() {
+    const r = this.result;
+    if (!r || !r.ok || this.mode !== 'pretty' || this.streamOf()) return false;
+    const d = this.decoded();
+    return d.isText && this.lang() === 'json';
+  }
+
+  // 지금 필터의 결과 (같은 응답·같은 식이면 다시 계산하지 않음). 필터가 없으면 null
+  filterResult() {
+    const p = this.filter.trim();
+    if (!p || !this.filterable()) return null;
+    if (this._filter && this._filter.path === p && this._filter.result === this.result) return this._filter.value;
+    let value;
+    try {
+      if (this._json === undefined) this._json = parseJson(this.decoded().text);
+      value = filterJson(this._json, p);
+    } catch (e) {
+      value = { ok: false, error: '본문을 JSON 으로 읽지 못했습니다: ' + e.message };
+    }
+    this._filter = { path: p, result: this.result, value };
+    return value;
+  }
+
+  filterInput() {
+    const input = h('input.input.resp-filter', { value: this.filter, placeholder: '$.items[*].id 로 거르기', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'JSONPath 필터' });
+    const apply = debounce(() => {
+      if (input.value === this.filter) return;
+      this.filter = input.value;
+      this.fillBody();
+    }, 250);
+    input.addEventListener('input', apply);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && input.value) {
+        e.preventDefault();
+        e.stopPropagation();
+        input.value = '';
+        this.filter = '';
+        this.fillBody();
+      }
+    });
+    return h('label.filter-box', { title: 'JSONPath 로 응답을 거릅니다 (Tests 탭과 같은 문법). 예: $.data.items[*].id · $..id · $.items[?(@.age > 10)]' }, icon('filter', 13), input);
+  }
+
+  fillFilterBar() {
+    const slot = this.filterSlot;
+    if (!slot) return;
+    clear(slot);
+    const f = this.filterResult();
+    if (!f) return;
+    const p = this.filter.trim();
+    slot.appendChild(h('div.filter-bar',
+      f.ok ? h('span.filter-count', f.count ? `결과 ${f.count}개` : '찾은 값이 없습니다') : h('span.filter-err', icon('alert', 13), f.error),
+      f.ok ? h('span.filter-path.muted', p) : null,
+      h('div.flex1'),
+      f.ok && this.onAddTest ? h('button.btn.btn-sm.btn-ghost.filter-cap', { title: 'Tests 탭의 "변수로 꺼내기"에 이 경로를 넣습니다', onclick: () => this.onAddTest('extract', p, f) }, icon('plus', 13), '변수로 꺼내기') : null,
+      f.ok && this.onAddTest ? h('button.btn.btn-sm.btn-ghost.filter-ast', { title: 'Tests 탭의 "확인"에 이 경로를 넣습니다 (값이 하나면 지금 값과 같은지)', onclick: () => this.onAddTest('assert', p, f) }, icon('check', 13), '확인 추가') : null,
+      h('button.icon-btn.filter-clear', { title: '필터 지우기', onclick: () => { this.filter = ''; this.render(); } }, icon('x', 14))));
+  }
+
+  /* ---------------- 찾기 (Ctrl+F) ---------------- */
+  findButton() {
+    return h('button.icon-btn.find-btn' + (this.findOpen ? '.on' : ''), { title: '본문에서 찾기 (본문을 누른 뒤 Ctrl+F)', onclick: () => (this.findOpen ? this.closeFind() : this.openFind()) }, icon('search', 16));
+  }
+
+  findOpts() {
+    return { caseSensitive: this.findCase, regex: this.findRe };
+  }
+
+  findBar() {
+    const input = h('input.input.find-input', { value: this.findQuery, placeholder: '본문에서 찾기', spellcheck: 'false', autocomplete: 'off', 'aria-label': '본문에서 찾기' });
+    const count = h('span.find-count');
+    const later = debounce(() => this.runFind(), 150);
+    input.addEventListener('input', () => {
+      this.findQuery = input.value;
+      later();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const fresh = this.runFind(); // 막 친 글이면 찾기만 (첫 곳), 이미 찾았으면 다음·이전으로
+        if (!fresh && this.code) this.code.step(e.shiftKey ? -1 : 1);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closeFind();
+      }
+    });
+    const toggle = (cls, title, label, on, flip) => {
+      const b = h('button.icon-btn.find-tg.' + cls + (on ? '.on' : ''), { title, 'aria-pressed': on ? 'true' : 'false' }, label);
+      b.addEventListener('click', () => {
+        flip();
+        const now = cls === 'find-case' ? this.findCase : this.findRe;
+        b.classList.toggle('on', now);
+        b.setAttribute('aria-pressed', now ? 'true' : 'false');
+        this.runFind();
+      });
+      return b;
+    };
+    const bar = h('div.find-bar', icon('search', 14), input, count,
+      h('button.icon-btn.find-prev', { title: '이전 (Shift+Enter)', onclick: () => this.code && this.code.step(-1) }, icon('chevronDown', 14, 'flip')),
+      h('button.icon-btn.find-next', { title: '다음 (Enter)', onclick: () => this.code && this.code.step(1) }, icon('chevronDown', 14)),
+      toggle('find-case', '대소문자 구분', 'Aa', this.findCase, () => { this.findCase = !this.findCase; }),
+      toggle('find-re', '정규식 (줄마다 ^ $)', '.*', this.findRe, () => { this.findRe = !this.findRe; }),
+      h('button.icon-btn.find-close', { title: '닫기 (Esc)', onclick: () => this.closeFind() }, icon('x', 14)));
+    this.findInput = input;
+    this.findCountEl = count;
+    return bar;
+  }
+
+  /** 찾기 막대를 연다 (본문 탭·Pretty 또는 Raw 로). 열려 있으면 칸에 포커스만 */
+  openFind() {
+    const r = this.result;
+    if (this.loading || !r || !r.ok || !r.body || !r.body.byteLength || !this.decoded().isText) return;
+    let rebuild = false;
+    if (this.sub !== 'body') {
+      this.sub = 'body';
+      rebuild = true;
+    }
+    if (this.streamOf() && this.mode !== 'raw') {
+      this.mode = 'raw'; // SSE 는 Raw 에서 찾는다
+      rebuild = true;
+    } else if (this.mode === 'preview') {
+      this.mode = 'pretty';
+      rebuild = true;
+    }
+    this.findOpen = true;
+    if (rebuild || !this.bodyWrap || !this.bodyWrap.isConnected) this.render();
+    else if (!this.findBarEl) {
+      this.findBarEl = this.findBar();
+      this.bodyWrap.insertBefore(this.findBarEl, this.bodyAnchor);
+      this.bodyWrap.querySelector('.find-btn')?.classList.add('on');
+      if (this.findQuery) this.runFind(true);
+    }
+    if (this.findInput) {
+      this.findInput.focus();
+      this.findInput.select();
+    }
+  }
+
+  closeFind() {
+    this.findOpen = false;
+    if (this.code) this.code.clearFind();
+    if (this.findBarEl) this.findBarEl.remove();
+    this.findBarEl = null;
+    this.findInput = null;
+    this.findCountEl = null;
+    this.bodyWrap && this.bodyWrap.querySelector('.find-btn')?.classList.remove('on');
+    if (this.bodyBox && this.bodyBox.isConnected) this.bodyBox.focus({ preventScroll: true });
+  }
+
+  /** 지금 찾는 글로 찾는다. 새로 찾았으면 true (같은 글·옵션이면 그대로 두고 false). force: 본문을 다시 그린 뒤 */
+  runFind(force = false) {
+    if (!this.code) return false;
+    const before = this.code.find && this.code.find.key;
+    if (force) this.code.find = null;
+    const s = this.code.setFind(this.findQuery, this.findOpts());
+    this.updateFindCount(s);
+    return force || (this.code.find ? this.code.find.key : null) !== before;
+  }
+
+  updateFindCount(s) {
+    const el = this.findCountEl;
+    if (!el) return;
+    el.classList.toggle('err', !!(s && s.error));
+    if (!this.findQuery || !s) el.textContent = '';
+    else if (s.error) el.textContent = s.error;
+    else if (!s.total) el.textContent = '없음';
+    else el.textContent = `${s.cur + 1}/${s.total}${s.capped ? '+' : ''}`;
+  }
+
+  // 응답 패널 안에서 Ctrl+F(맥은 Cmd+F)·F3: 본문에서 찾기 (다른 곳에서는 브라우저 찾기 그대로)
+  onKey(e) {
+    const k = String(e.key || '').toLowerCase();
+    const isF = modKey(e) && !e.shiftKey && !e.altKey && k === 'f';
+    if (!isF && e.key !== 'F3') return;
+    const t = e.target;
+    if (t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]') && !(t.classList && t.classList.contains('find-input'))) return;
+    if (this.loading || !this.result || !this.result.ok) return;
+    e.preventDefault();
+    if (e.key === 'F3' && this.findOpen && this.code) {
+      this.code.step(e.shiftKey ? -1 : 1);
+      return;
+    }
+    this.openFind();
+  }
+
+  /* ---------------- 비교 탭 (이전 응답·저장한 예제와) ---------------- */
+  examples() {
+    return this.tab ? app.examplesOf(this.tab) : [];
+  }
+
+  // 견줄 수 있는 응답: 이 탭에서 그 앞에 받은 응답, 이 요청에 저장한 예제
+  diffChoices() {
+    const out = [];
+    if (!this.tab) return out;
+    const prev = app.prevResponses.get(this.tab.id);
+    if (prev && prev.ok && prev !== this.liveResult) {
+      out.push({ id: 'prev', ref: prev, name: '이전 응답', label: `이전 응답 · ${clock(prev.receivedAt)} · ${statusLine(prev)} · ${formatBytes(prev.size && prev.size.body)}`, get: () => maskResult(prev, vault.secretValues()) });
+    }
+    for (const ex of this.examples()) {
+      out.push({ id: ex.id, ref: ex, name: `예제 "${ex.name}"`, label: `예제 · ${ex.name} · ${ex.status || ''} · ${shortDate(ex.savedAt)}`, get: () => exampleAsResult(ex) });
+    }
+    return out;
+  }
+
+  canDiff() {
+    const r = this.result;
+    return !!(r && r.ok && !this.exampleView && this.tab && this.diffChoices().length);
+  }
+
+  diffOpts() {
+    if (!this.tab.respDiff) this.tab.respDiff = { against: null, ignoreBody: '', ignoreHeaders: '' };
+    return this.tab.respDiff;
+  }
+
+  // 고른 기준과 그 상태 열쇠 (기준·이름·뺄 곳이 같으면 같은 열쇠)
+  diffState() {
+    const choices = this.diffChoices();
+    if (!choices.length) return null;
+    const o = this.diffOpts();
+    const pick = choices.find((c) => c.id === o.against) || choices[0];
+    return { o, pick, key: `${pick.id}\u0000${pick.ref && pick.ref.name}\u0000${o.ignoreBody}\u0000${o.ignoreHeaders}` };
+  }
+
+  cachedDiff(st) {
+    const c = this._diff;
+    return c && c.result === this.result && c.ref === st.pick.ref && c.key === st.key ? c : null;
+  }
+
+  // 지금 응답과 고른 기준을 견준다 (같은 응답·기준·뺄 곳이면 다시 계산하지 않음)
+  diffNow() {
+    const st = this.diffState();
+    if (!st) return null;
+    const hit = this.cachedDiff(st);
+    if (hit) return hit;
+    const { o, pick } = st;
+    const base = pick.get();
+    const cur = maskResult(this.result, vault.secretValues()); // 기준(가린 예제·이전 응답)과 같은 방식으로 가려서 견준다
+    const diff = compareResults(base, cur, { ignoreBody: ignoreLines(o.ignoreBody), ignoreHeaders: ignoreLines(o.ignoreHeaders) });
+    this._diff = { result: this.result, ref: pick.ref, key: st.key, pick, base, cur, diff };
+    return this._diff;
+  }
+
+  // 비교 탭에 붙일 다른 곳 수 — 두 본문이 작을 때만 바로 센다 (크면 탭을 열 때)
+  diffCount() {
+    const st = this.diffState();
+    if (!st) return null;
+    const hit = this.cachedDiff(st);
+    if (hit) return hit.diff.count;
+    const SMALL = 512 * 1024;
+    const ref = st.pick.ref;
+    const baseSize = ref && ref.body && ref.body.byteLength != null ? ref.body.byteLength : (ref && ref.size) || 0;
+    if (this.result.body.byteLength > SMALL || baseSize > SMALL) return null;
+    return this.diffNow().diff.count;
+  }
+
+  renderDiff() {
+    const d = this.diffNow();
+    const o = this.diffOpts();
+    const choices = this.diffChoices();
+    const sel = h('select.select.select-sm.rd-against', { 'aria-label': '견줄 응답' },
+      choices.map((c) => h('option', { value: c.id, selected: c.id === d.pick.id }, c.label)));
+    sel.addEventListener('change', () => {
+      o.against = sel.value;
+      app.saveWorkspace();
+      this.render();
+    });
+    const nIgnore = ignoreLines(o.ignoreBody).length + ignoreLines(o.ignoreHeaders).length;
+    const seg = h('div.seg.cmp-mode',
+      [['list', '차이 목록'], ['side', '본문 나란히']].map(([id, label]) =>
+        h('button.seg-btn' + (this.diffMode === id ? '.active' : ''), { onclick: () => { this.diffMode = id; this.render(); } }, label)));
+    const ignoreBtn = h('button.btn.btn-sm.rd-ignore', {
+      title: '견주지 않을 본문 경로·머리글',
+      onclick: () => editIgnoreDialog({
+        ignoreBody: o.ignoreBody,
+        ignoreHeaders: o.ignoreHeaders,
+        onSave: (v) => {
+          o.ignoreBody = v.ignoreBody;
+          o.ignoreHeaders = v.ignoreHeaders;
+          app.saveWorkspace();
+          this.render();
+        },
+      }),
+    }, icon('settings', 13), nIgnore ? `뺄 곳 ${nIgnore}` : '뺄 곳');
+    const bar = h('div.rd-bar', h('span.rd-label', '견줄 응답'), sel, h('div.flex1'), ignoreBtn, seg);
+    const a = { name: d.pick.name, result: d.base };
+    const b = { name: '지금 응답', result: d.cur };
+    let view;
+    if (this.diffMode === 'side') {
+      const v = diffSideView({ a, b, diff: d.diff, ignoreBody: ignoreLines(o.ignoreBody) });
+      this.diffGrid = v.grid;
+      view = v.el;
+    } else {
+      view = diffListView({
+        a, b, diff: d.diff,
+        onIgnore: (kind, text) => this.addDiffIgnore(kind, text),
+        onJump: (path) => {
+          this.diffMode = 'side';
+          this.render();
+          flashPath(this.diffGrid, path);
+        },
+      });
+    }
+    return h('div.rd-wrap', bar, h('div.rd-body', view),
+      h('div.rd-foot.muted', '비밀 변수 값·Set-Cookie 값·인증 머리글 값은 두 쪽 모두 가린 채로 견줍니다. 날짜·요청 ID 같은 머리글은 견주지 않습니다.'));
+  }
+
+  addDiffIgnore(kind, text) {
+    const o = this.diffOpts();
+    const k = kind === 'headers' ? 'ignoreHeaders' : 'ignoreBody';
+    const cur = ignoreLines(o[k]);
+    if (!cur.includes(text)) o[k] = [...cur, text].join('\n');
+    app.saveWorkspace();
+    toast(`"${text}" 은 이제 견주지 않습니다. [뺄 곳]에서 되돌릴 수 있습니다.`, 'info', 3000);
+    this.render();
+  }
+
+  /* ---------------- 응답 예제 ---------------- */
+  examplesButton(exs) {
+    const b = h('button.btn.btn-sm.btn-ghost.resp-examples', { title: '이 요청에 저장한 응답 예제' }, icon('file', 14), `예제 ${exs.length}`, icon('chevronDown', 12));
+    b.addEventListener('click', () => {
+      const live = this.liveResult && this.liveResult.ok;
+      openMenu(b, [
+        { header: '저장한 예제' },
+        ...exs.map((ex) => ({ label: ex.name, hint: `${ex.status || ''} · ${shortDate(ex.savedAt)}`, checked: !!(this.exampleView && this.exampleView.id === ex.id), onClick: () => this.showExample(ex) })),
+        live ? { divider: true } : null,
+        live ? { label: '지금 응답을 예제로 저장…', icon: 'plus', onClick: () => this.saveAsExample() } : null,
+      ], { alignRight: true, minWidth: 240 });
+    });
+    return b;
+  }
+
+  exampleBanner() {
+    const ex = this.exampleView;
+    const live = !!(this.liveResult && this.liveResult.ok);
+    return h('div.ex-banner',
+      icon('file', 14),
+      h('span.ex-tag', '예제'),
+      h('b.ex-name', ex.name),
+      ex.savedAt ? h('span.ex-when', `${fullDate(ex.savedAt)} 저장`) : null,
+      ex.request ? h('span.ex-req', { title: ex.request.url }, `${ex.request.method} ${ex.request.url}`) : null,
+      h('div.flex1'),
+      live ? h('button.btn.btn-sm.ex-compare', { title: '받은 응답과 이 예제를 비교 탭에서 견줍니다', onclick: () => this.compareWithExample(ex) }, icon('compare', 13), '지금 응답과 비교') : null,
+      h('button.btn.btn-sm.ex-rename', { onclick: () => this.renameExample(ex) }, icon('edit', 13), '이름 바꾸기'),
+      h('button.btn.btn-sm.ex-delete', { onclick: () => this.deleteExample(ex) }, icon('trash', 13), '지우기'),
+      h('button.btn.btn-sm.ex-close', { title: live ? '받은 응답으로 돌아가기' : '예제 닫기', onclick: () => this.backToResponse() }, icon('x', 13), live ? '응답으로' : '닫기'));
+  }
+
+  compareWithExample(ex) {
+    const o = this.diffOpts();
+    o.against = ex.id;
+    app.saveWorkspace();
+    this.exampleView = null;
+    this.sub = 'diff';
+    this.display(this.liveResult);
+  }
+
+  /** 받은 응답을 이 요청의 예제로 저장한다. 저장하지 않은 요청이면 요청부터 저장할지 묻는다 */
+  async saveAsExample() {
+    const r = this.liveResult;
+    const problem = exampleProblem(r);
+    if (problem) return void toast(problem, 'error', 4000);
+    if (!this.tab) return;
+    if (!this.tab.itemId) {
+      const ok = await confirmDialog({
+        title: '요청을 먼저 저장할까요?',
+        message: '예제는 컬렉션에 저장한 요청에 붙습니다. 이 요청을 컬렉션에 저장한 다음, 받은 응답을 예제로 저장합니다.',
+        okText: '요청 저장',
+      });
+      if (!ok) return;
+      const saved = await app.saveTab(this.tab);
+      if (!saved || !this.tab.itemId) return;
+    }
+    const name = await promptDialog({ title: '응답을 예제로 저장', label: '예제 이름', value: statusLine(r), okText: '저장' });
+    if (name == null) return;
+    try {
+      const { example, masked } = app.saveExample(this.tab, r, name);
+      toast(`예제 "${example.name}"을(를) 저장했습니다.${masked.length ? ` ${masked.join(' · ')}은 가렸습니다.` : ''}`, 'success', masked.length ? 4500 : 2600);
+      this.render();
+    } catch (e) {
+      toast(e.message, 'error', 4000);
+    }
+  }
+
+  async renameExample(ex) {
+    const name = await promptDialog({ title: '예제 이름 바꾸기', label: '예제 이름', value: ex.name, okText: '바꾸기' });
+    if (name == null || !name.trim()) return;
+    app.renameExample(this.tab.itemId, ex.id, name);
+    this.render();
+  }
+
+  async deleteExample(ex) {
+    const ok = await confirmDialog({ title: '예제를 지울까요?', message: `"${ex.name}" 예제를 지웁니다. 되돌릴 수 없습니다.`, okText: '지우기', danger: true });
+    if (!ok) return;
+    app.deleteExample(this.tab.itemId, ex.id);
+    if (this.tab.respDiff && this.tab.respDiff.against === ex.id) this.tab.respDiff.against = null;
+    this.backToResponse();
   }
 
   renderPreview(d) {
@@ -606,8 +1111,11 @@ export class ResponseView {
     return box;
   }
 
+  // 보이는 것을 복사한다: 걸러 냈으면 걸러 낸 결과 (파일로 저장은 늘 받은 본문 그대로)
   copyBody() {
     const d = this.decoded();
+    const f = this.filterResult();
+    if (f && f.ok && f.count) return void copyText(f.text).then((ok) => toast(ok ? '걸러 낸 결과를 복사했습니다.' : '복사 실패', ok ? 'success' : 'error'));
     copyText(this.mode === 'raw' ? d.text : d.pretty).then((ok) => toast(ok ? '응답 본문을 복사했습니다.' : '복사 실패', ok ? 'success' : 'error'));
   }
 
@@ -658,16 +1166,22 @@ function sseRow(ev) {
   return row;
 }
 
-function looksTextual(bytes) {
-  const n = Math.min(bytes.length, 512);
-  if (!n) return true;
-  let bad = 0;
-  for (let i = 0; i < n; i++) {
-    const b = bytes[i];
-    if (b === 0) return false;
-    if (b < 9 || (b > 13 && b < 32)) bad++;
-  }
-  return bad / n < 0.05;
+// 시각 표시: 받은 시각(14:02:11), 예제를 저장한 날(11-27 14:02 · 해가 다르면 2025-11-27)
+const pad2 = (n) => String(n).padStart(2, '0');
+function clock(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+function shortDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const day = d.getFullYear() === new Date().getFullYear() ? `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  return `${day} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function fullDate(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function reformat(text, lang) {

@@ -16,6 +16,7 @@ import { highlight } from '../highlight.js';
 import { copyText } from '../util.js';
 import { formatJson } from '../json-format.js';
 import { CAPTURE_SOURCES, CAPTURE_SCOPES, ASSERT_TARGETS, ASSERT_OPS, NO_EXPR, NO_EXPECTED, VALUE_TYPES, newCapture, newAssert, countTests } from '../checks.js';
+import { assertFromFilter, suggestVarName } from '../resp-tools.js';
 import { app } from '../app.js';
 
 const SUBTABS = [
@@ -46,8 +47,10 @@ export class RequestView {
     this.tab = tab;
     this.sub = tab.sub || 'params';
     this.el = h('div.rv');
-    this.response = new ResponseView();
+    this.response = new ResponseView(tab);
     this.response.onCancel = () => app.cancel(this.tab);
+    // 응답의 JSONPath 필터 결과를 Tests 탭의 꺼내기·확인 줄로
+    this.response.onAddTest = (kind, path, filtered) => this.addTestFromResponse(kind, path, filtered);
     this.response.onRetry = (engine) => app.send(this.tab, { engine });
     this.response.onToggleInsecure = () => {
       this.draft.settings.curl = { ...curlOptsOf(this.draft), insecure: true };
@@ -849,6 +852,25 @@ export class RequestView {
         h('button.link-btn', { onclick: () => app.ui.openCurlHelper() }, '설치하기'));
       chip.title = st ? st.message || '' : '';
     }
+  }
+
+  /** 응답의 JSONPath 필터에서: kind 'extract' 면 꺼내기 줄(변수 이름은 경로 끝 이름), 'assert' 면 확인 줄(값이 하나면 = 지금 값) */
+  addTestFromResponse(kind, path, filtered) {
+    const t = this.draft.tests;
+    if (kind === 'extract') {
+      const scope = app.activeEnv() ? 'env' : app.collectionOfTab(this.tab) ? 'collection' : 'global';
+      t.extract.push(newCapture({ from: 'json', path, name: suggestVarName(path), scope }));
+    } else {
+      const a = assertFromFilter(path, filtered);
+      t.assert.push(newAssert({ target: a.target, path: a.path, op: a.op, value: a.value }));
+    }
+    this.sub = 'tests';
+    this.tab.sub = 'tests';
+    app.saveWorkspace();
+    this.changed();
+    this.renderSubtabs();
+    this.renderPane();
+    toast(kind === 'extract' ? 'Tests 탭의 "변수로 꺼내기"에 넣었습니다. 변수 이름과 저장할 곳을 확인하세요.' : 'Tests 탭의 "확인"에 넣었습니다.', 'success', 3200);
   }
 
   /* ---------------- Tests: 응답값 꺼내기(변수로 저장)·확인 ---------------- */

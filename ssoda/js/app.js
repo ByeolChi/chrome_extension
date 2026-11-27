@@ -23,12 +23,14 @@ export const SSH_KEEP_MAX_MINUTES = 120;
 import { genCurl } from './codegen.js';
 import { parseSetCookie, storeCookie, cookiesForUrl, purgeExpired } from './cookiejar.js';
 import { detectImport, exportPostmanCollection, exportPostmanEnvironment } from './postman.js';
+import { makeExample, EXAMPLES_MAX } from './resp-tools.js';
 import { looksLikeCurl, parseCurl, suggestName } from './curl-parser.js';
 
 export const app = {
   store,
   views: new Map(), // tabId → view
   responses: new Map(), // tabId → response
+  prevResponses: new Map(), // tabId → 그 앞에 받은 응답 (응답의 비교 탭 기준. 메모리에만, 오류 응답은 넣지 않음)
   controllers: new Map(), // tabId → AbortController
   sshSecrets: new Map(), // envId → { password, server, lastUsed } (메모리에만 보관, 저장하지 않음)
   ui: {}, // 렌더러 훅 (main.js에서 주입)
@@ -342,6 +344,7 @@ export const app = {
     if (view && view.destroy) view.destroy();
     this.views.delete(tabId);
     this.responses.delete(tabId);
+    this.prevResponses.delete(tabId);
     if (ws.activeTabId === tabId) {
       const next = ws.tabs[i2] || ws.tabs[i2 - 1] || null;
       ws.activeTabId = next ? next.id : null;
@@ -505,6 +508,11 @@ export const app = {
     }
     // Tests 탭: 응답값을 변수로 꺼내고 확인한다 (보낸 시점의 요청 기준)
     if (countTests(sentDraft.tests)) result.checks = this.runChecks(tab, sentDraft.tests, result);
+    // 응답의 비교 탭은 이 탭에서 그 앞에 받은 응답과 견준다 (오류 응답은 기준이 되지 않음)
+    const old = this.responses.get(tab.id);
+    if (old && old.ok) this.prevResponses.set(tab.id, old);
+    result.receivedAt = Date.now();
+    result.sentFrom = { method: sentDraft.method, url: sentDraft.url }; // 예제에 남길 요청 (변수 그대로)
     this.responses.set(tab.id, result);
     this.addHistory(tab, result, sentDraft);
     const v = this.views.get(tab.id);
@@ -867,6 +875,53 @@ export const app = {
     const limit = this.settings.historyLimit > 0 ? this.settings.historyLimit : 300;
     if (h.length > limit) h.length = limit;
     store.changed('history');
+  },
+
+  /* ---------------- 응답 예제 (요청 항목의 examples) ---------------- */
+  // 예제는 탭의 draft 가 아니라 저장된 요청 항목에 붙는다 (예제를 더하거나 지워도 탭이 "고침"이 되지 않음)
+  requestItemOf(itemId) {
+    const hit = itemId ? findInCollections(store.state.collections, itemId) : null;
+    return hit && hit.item.type === 'request' ? hit.item : null;
+  },
+
+  examplesOf(tab) {
+    const item = tab && tab.type === 'request' ? this.requestItemOf(tab.itemId) : null;
+    return (item && item.examples) || [];
+  },
+
+  /** 받은 응답을 탭의 저장된 요청에 예제로 더한다. 반환 { example, masked } — 저장할 수 없으면 Error (사용자에게 보일 글) */
+  saveExample(tab, result, name) {
+    const item = tab && tab.type === 'request' ? this.requestItemOf(tab.itemId) : null;
+    if (!item) throw new Error('예제는 컬렉션에 저장한 요청에만 둘 수 있습니다. 요청을 먼저 저장하세요.');
+    const list = item.examples || [];
+    if (list.length >= EXAMPLES_MAX) throw new Error(`요청 하나에 예제는 ${EXAMPLES_MAX}개까지 둘 수 있습니다.`);
+    const request = result && result.sentFrom ? result.sentFrom : { method: tab.draft.method, url: tab.draft.url };
+    // 비밀 변수 값·Set-Cookie 값·인증 머리글 값은 가려서 저장한다 (예제는 백업·Postman 내보내기에 들어가므로)
+    const out = makeExample(result, { name, secrets: vault.secretValues(), request });
+    item.examples = [...list, out.example];
+    store.changed('collections');
+    return out;
+  },
+
+  renameExample(itemId, exampleId, name) {
+    const item = this.requestItemOf(itemId);
+    const ex = item && (item.examples || []).find((x) => x.id === exampleId);
+    const n = String(name || '').trim().slice(0, 200);
+    if (!ex || !n) return false;
+    ex.name = n;
+    store.changed('collections');
+    return true;
+  },
+
+  deleteExample(itemId, exampleId) {
+    const item = this.requestItemOf(itemId);
+    if (!item || !item.examples) return false;
+    const rest = item.examples.filter((x) => x.id !== exampleId);
+    if (rest.length === item.examples.length) return false;
+    if (rest.length) item.examples = rest;
+    else delete item.examples;
+    store.changed('collections');
+    return true;
   },
 
   /* ---------------- 컬렉션 ---------------- */

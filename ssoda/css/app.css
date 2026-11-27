@@ -1241,3 +1241,51 @@ tr.k-added td.cmp-old, tr.k-removed td.cmp-new { background: transparent; }
 .cmp-ig .field-err:empty { display: none; }
 .cmp-ig-input.input { font-family: var(--mono); font-size: 12px; width: 100%; height: auto; padding: 6px 10px; line-height: 1.5; resize: vertical; min-height: 60px; }
 .cmp-ig .muted { font-size: 11.5px; line-height: 1.6; margin-top: 4px; }
+
+/* ---------- 응답 도구: JSONPath 필터 · 찾기 · 비교 탭 · 응답 예제 ---------- */
+:root { --find-bg: rgba(255, 200, 0, .38); --find-cur-bg: #ff9632; --find-cur-fg: #1b1b1b; }
+[data-theme='dark'] { --find-bg: rgba(255, 196, 0, .28); --find-cur-bg: #f0a020; --find-cur-fg: #111111; }
+.ic.flip svg { transform: rotate(180deg); }
+.filter-box {
+  display: flex; align-items: center; gap: 6px; flex: 0 1 320px; min-width: 150px; height: 26px; padding: 0 8px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-input); color: var(--text-3); cursor: text;
+}
+.filter-box:focus-within { border-color: var(--text-3); }
+.filter-box .resp-filter.input { border: 0; outline: 0; box-shadow: none; background: transparent; padding: 0; height: 100%; flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--text); }
+.filter-slot:empty { display: none; }
+.filter-bar { display: flex; align-items: center; gap: 8px; margin: 0 16px 6px; padding: 3px 4px 3px 10px; border-radius: var(--radius); background: var(--primary-soft); font-size: 12px; min-height: 30px; }
+.filter-count { font-weight: 600; color: var(--primary); white-space: nowrap; }
+.filter-path { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.filter-err { display: inline-flex; align-items: center; gap: 4px; color: var(--danger); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-bar .btn { white-space: nowrap; }
+.find-bar { display: flex; align-items: center; gap: 3px; margin: 0 16px 6px; padding: 2px 4px 2px 10px; border: 1px solid var(--border-2); border-radius: var(--radius); background: var(--bg-2); color: var(--text-3); }
+.find-bar .find-input.input { flex: 0 1 280px; min-width: 120px; height: 24px; padding: 0 6px; font-size: 12.5px; margin-left: 3px; color: var(--text); }
+.find-count { min-width: 52px; padding: 0 4px; font-size: 12px; color: var(--text-2); text-align: center; white-space: nowrap; }
+.find-count.err { color: var(--danger); text-align: left; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.find-bar .icon-btn { width: 26px; height: 24px; }
+.find-bar .find-tg { width: auto; padding: 0 6px; font-family: var(--mono); font-size: 11.5px; font-weight: 600; }
+.find-bar .find-close { margin-left: auto; }
+::highlight(ssoda-find) { background-color: var(--find-bg); }
+::highlight(ssoda-find-cur) { background-color: var(--find-cur-bg); color: var(--find-cur-fg); }
+.body-content:focus { outline: none; }
+.win-note { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; }
+.win-note .link-btn { font-size: 12px; }
+.subtab .count.rd-bad { color: var(--warn); }
+.rd-wrap { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; padding: 8px 16px 16px; }
+.rd-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rd-label { font-size: 12px; color: var(--text-2); }
+.rd-against.select { max-width: min(460px, 100%); }
+.rd-body { border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; flex: none; }
+.rd-body > .cmp-side { padding: 8px; }
+.rd-foot { font-size: 11.5px; }
+.ex-banner { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; padding: 6px 16px; background: var(--warn-soft); border-bottom: 1px solid var(--border); font-size: 12.5px; flex: none; }
+.ex-banner > .ic { color: var(--warn); }
+.ex-tag { font-size: 11px; font-weight: 600; color: var(--warn); border: 1px solid currentColor; border-radius: 3px; padding: 0 5px; line-height: 16px; }
+.ex-when, .ex-req { color: var(--text-2); font-size: 12px; }
+.ex-req { font-family: var(--mono); font-size: 11.5px; flex: 1 1 80px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-banner .btn { flex: none; }
+.ex-chips { display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.ex-chips-label { font-size: 12px; color: var(--text-3); }
+.ex-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-2); background: var(--bg); color: var(--text); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.ex-chip:hover { background: var(--bg-hover); }
+.ex-chip-st { color: var(--text-3); font-size: 11px; }

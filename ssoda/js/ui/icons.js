@@ -49,6 +49,7 @@ const P = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="1"/>',
   layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  filter: '<path d="M4 5h16l-6.5 7.5V19l-3-1.5v-5z"/>',
 };
 
 export function icon(name, size = 16, cls = '') {
